@@ -170,9 +170,20 @@ fixture_ubuntu; F_SSHD_PW=unknown; run
 eq "$(st ssh.password)" SKIP "unreadable config: SKIP"
 
 echo "Linux: sleep targets"
-fixture_ubuntu; F_SLEEP=unmasked; run
+fixture_ubuntu; F_SLEEP=unmasked; F_SLEEP_DETAIL="logind idle and lid"; run
 eq "$(st power.sleep)" OK "sleep targets not masked, no auto-suspend configured: OK with a note"
-contains "$(printf '%s' "$CHECKS" | grep '^power.sleep')" "not masked, but no automatic suspend" "OK row explains"
+contains "$(printf '%s' "$CHECKS" | grep '^power.sleep')" "no automatic suspend was found (checked: logind idle and lid)" "OK row says what was checked"
+if printf '%s' "$CHECKS" | grep '^power.sleep' | grep -q GNOME; then bad "OK row claims GNOME" yes no; else ok "OK row does not claim GNOME was checked when it was not"; fi
+eq "$(classify_sleep "" "" yes no)" "desktop|" "display manager active, no session bus (SSH): desktop"
+eq "$(classify_sleep "" "" no no)" "unmasked|logind idle and lid" "no desktop: unmasked, logind only"
+eq "$(classify_sleep "" "'nothing'" yes yes)" "unmasked|logind idle and lid, this user's GNOME setting" "session bus, GNOME never suspends: unmasked, GNOME checked"
+eq "$(classify_sleep "" "'suspend'" yes yes)" "sleeps|GNOME idle action 'suspend' on AC (this user)" "session bus, GNOME suspends: sleeps"
+eq "$(classify_sleep "logind IdleAction=suspend" "" yes no)" "sleeps|logind IdleAction=suspend" "logind finding wins"
+fixture_ubuntu; F_SLEEP=desktop; F_SLEEP_DETAIL=""; run
+eq "$(st power.sleep)" WARN "desktop over SSH: WARN"
+contains "$(printf '%s' "$CHECKS" | grep '^power.sleep')" "GNOME and GDM suspend on AC after about 15-20 minutes by default" "desktop WARN explains the default"
+contains "$(printf '%s' "$CHECKS" | grep '^power.sleep')" "sleep-inactive-ac-type 'nothing'" "desktop advice prints the gsettings command"
+contains "$(printf '%s' "$CHECKS" | grep '^power.sleep')" "systemctl mask sleep.target" "desktop advice prints the mask command"
 fixture_ubuntu; F_SLEEP=sleeps; F_SLEEP_DETAIL="logind IdleAction=suspend"; run
 eq "$(st power.sleep)" WARN "auto-suspend configured: WARN"
 contains "$(printf '%s' "$CHECKS" | grep '^power.sleep')" "sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target" "mask command printed"
@@ -391,7 +402,7 @@ forbidden=" sudo chmod chown apk apt apt-get dnf yum rm mv cp ln mkdir touch tee
 guard_check() {
   _f=$1
   _code=$(awk '/^# BEGIN ADVICE$/ {skip=1} !skip {print} /^# END ADVICE$/ {skip=0}' "$_f")
-  _code=$(printf '%s\n' "$_code" | grep -vxF -e '  _otmp=$(mktemp "$_odir/.lanq-makeready.XXXXXX" 2>/dev/null) || return 1' -e '  ln -- "$_otmp" "$OUT_PATH" 2>/dev/null; _ok=$?' -e '  rm -f -- "$_otmp"')
+  _code=$(printf '%s\n' "$_code" | grep -vxF -e '  _otmp=$(mktemp "$_odir/.lanq-makeready.XXXXXX" 2>/dev/null) || return 1' -e '  ln -- "$_otmp" "$OUT_PATH" 2>/dev/null; _ok=$?' -e '  rm -f -- "$_otmp"' -e "  trap 'rm -f -- \"\$_otmp\"' EXIT" -e "  trap 'rm -f -- \"\$_otmp\"; exit 130' INT TERM" -e '  trap - EXIT INT TERM')
   _fns=$(grep -E '^[a-z_0-9]+\(\)' "$_f" | sed 's/().*//')
   for _w in $(printf '%s\n' "$_code" | cmd_words); do
     case "$allowed" in *" $_w "*) continue ;; esac
@@ -452,7 +463,8 @@ mutant "ln of something else" 'ln -- /etc/passwd "$OUT_PATH"'
 mutant "set -C used to write elsewhere" '( set -C; echo x > /tmp/x )'
 rm -rf "$mut_dir"
 eq "$(printf '%s\n' "x=1" | cmd_words)" "" "tokenizer ignores assignments"
-eq "$(grep -c '^  ln -- "$_otmp" "$OUT_PATH"' "$root/lanq-makeready.sh"):$(grep -c 'rm -f -- "$_otmp"' "$root/lanq-makeready.sh"):$(grep -c 'mktemp' "$root/lanq-makeready.sh")" "1:1:1" "the only ln, rm and mktemp are the --out temp-file lines"
+eq "$(grep -c '^  ln -- "$_otmp" "$OUT_PATH"' "$root/lanq-makeready.sh"):$(grep -c 'rm -f -- "$_otmp"' "$root/lanq-makeready.sh"):$(grep -c 'mktemp' "$root/lanq-makeready.sh")" "1:3:1" "the only ln, rm and mktemp are the --out temp-file lines (rm: the cleanup and its two traps)"
+eq "$(grep -cE '(^|[^A-Za-z_])rm[[:space:]]' "$root/lanq-makeready.sh" | tr -d ' ')" "$(grep -c 'rm -f -- "$_otmp"' "$root/lanq-makeready.sh")" "every rm in the script removes only the --out temp file"
 eq "$([ -e "$root/SHA256SUMS" ] && echo committed || echo none)" none "SHA256SUMS is produced by the release workflow, never committed (a stale copy would mislead)"
 lines=$(wc -l < "$root/lanq-makeready.sh" | tr -d ' ')
 if [ "$lines" -le 900 ]; then ok "script is $lines lines (max 900)"; else bad "line count" "$lines" "<=900"; fi
@@ -493,6 +505,12 @@ eq "$(OUT_PATH="$od/dangling"; save_out "x" >/dev/null 2>&1; echo $?)" 1 "save_o
 eq "$([ -e "$od/nowhere" ] && echo created || echo absent)" absent "save_out: nothing created through the symlink"
 eq "$(OUT_PATH="$od/new.txt"; save_out "hello" 2>/dev/null; cat "$od/new.txt")" hello "save_out: writes a new file"
 eq "$(for _t in "$od"/.lanq-makeready.*; do [ -e "$_t" ] && echo left; done)" "" "save_out: temp files removed"
+eq "$(OUT_PATH="$od/t2.txt"; save_out "x" 2>/dev/null; trap)" "" "save_out: its cleanup traps are removed afterwards"
+eq "$(cd "$od" && mkdir -- -d && OUT_PATH="-d/r.txt"; save_out "dash" 2>/dev/null; cat -- "$od/-d/r.txt" 2>/dev/null)" dash "save_out: a folder name starting with - is not taken as a mktemp option"
+eq "$(OUT_PATH="$od/nolink.txt"; ln() { return 1; }; save_out "x" 2>/dev/null; echo $?)" 3 "save_out: ln failing on a new name returns 3 (no hard links on this filesystem)"
+eq "$([ -e "$od/nolink.txt" ] && echo created || echo absent):$(for _t in "$od"/.lanq-makeready.*; do [ -e "$_t" ] && echo left; done)" "absent:" "save_out: failed ln leaves nothing behind"
+contains "$(out_error 3)" "may not support hard links (e.g. FAT/exFAT USB sticks); choose another folder" "--out: hard-link failure message"
+contains "$(out_error 1)" "already exists" "--out: other failures keep their message"
 rm -rf "$od"
 
 echo "smoke: stdout JSON mode (the SSH invocation)"

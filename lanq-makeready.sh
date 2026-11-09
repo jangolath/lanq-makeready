@@ -36,6 +36,7 @@ advice() {
     dotnet.mac) echo ".NET 10 supports macOS 15 and newer." ;;
     docker.daemon) echo "The docker client is installed but the engine is not answering (or you lack permission). Start the service or check group membership yourself." ;;
     docker.ram) echo "Under 4 GB RAM: containers are not recommended on this machine." ;;
+    power.desktop) echo "A desktop is installed; its power settings cannot be read from this session (no desktop session bus, e.g. over SSH). GNOME and GDM suspend on AC after about 15-20 minutes by default. Check Settings > Power > Automatic Suspend on the PC, or as the desktop user: gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing' ; for the GDM login screen: sudo -u gdm dbus-run-session gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing' ; or block all suspend: sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target" ;;
     power.sleep) echo "On a PC that should stay on, stop systemd from suspending it: sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target   (undo with systemctl unmask). Skip this if you want the PC to sleep and use LanQueue's wake: setting instead." ;;
     reboot.pending) echo "A restart is pending; the machine may reboot during a job. Restart it at a time you choose: sudo reboot" ;;
     wol.wired) echo "Wake-on-LAN needs a wired Ethernet connection (Wi-Fi rarely supports it). Use a cable, or leave wake: out and keep the PC awake." ;;
@@ -47,7 +48,7 @@ advice() {
   esac
 }
 advice_admin() { # true when acting on that advice needs root
-  case "$1" in ssh.install|ssh.start|ssh.password|tar.busybox|tar.missing|os.eol|power.sleep|wol.off|swap.none|reboot.pending|dotnet.glibc|arch32|docker.daemon|git.install) echo true ;; *) echo false ;; esac
+  case "$1" in ssh.install|ssh.start|ssh.password|power.desktop|tar.busybox|tar.missing|os.eol|power.sleep|wol.off|swap.none|reboot.pending|dotnet.glibc|arch32|docker.daemon|git.install) echo true ;; *) echo false ;; esac
 }
 # END ADVICE
 
@@ -204,6 +205,16 @@ logind_values() { # logind.conf text (main file, then drop-ins) on stdin -> "Idl
   awk '/^[ \t]*[#;]/ { next } { gsub(/[ \t]/, "") } /^IdleAction=/ { i = substr($0, 12) } /^HandleLidSwitch=/ { l = substr($0, 17) } /^HandleLidSwitchExternalPower=/ { e = substr($0, 30) } END { print (i == "" ? "-" : i) " " (l == "" ? "-" : l) " " (e == "" ? "-" : e) }'
 }
 
+classify_sleep() { # $1 logind finding, $2 GNOME sleep-inactive-ac-type ("" = not read), $3 display manager active, $4 session bus (yes|no) -> "state|detail"
+  if [ -n "$1" ]; then echo "sleeps|$1"; return 0; fi
+  if [ "$4" = yes ] && [ -n "$2" ]; then
+    case "$2" in *nothing*) echo "unmasked|logind idle and lid, this user's GNOME setting" ;; *) echo "sleeps|GNOME idle action $2 on AC (this user)" ;; esac
+    return 0
+  fi
+  if [ "$3" = yes ]; then echo "desktop|"; return 0; fi
+  echo "unmasked|logind idle and lid"
+}
+
 logind_auto_suspend() { # $1 idle $2 lid $3 lid-on-AC $4 laptop(yes|no) -> what would suspend this PC, empty = nothing found
   case "$1" in suspend|hibernate|hybrid-sleep|suspend-then-hibernate|sleep) echo "logind IdleAction=$1"; return 0 ;; esac
   [ "$4" = yes ] || return 0
@@ -294,7 +305,8 @@ eval_checks() { # reads F_* facts, fills CHECKS
   case "$F_SLEEP" in
     never|masked) add_check power.sleep "Sleep/suspend" OK "will not sleep ($F_SLEEP)" ;;
     sleeps) add_check power.sleep "Sleep/suspend" WARN "may sleep: ${F_SLEEP_DETAIL:-idle suspend enabled}" power.sleep ;;
-    unmasked) add_check power.sleep "Sleep/suspend" OK "sleep targets are not masked, but no automatic suspend is configured (logind idle and lid, GNOME); masking them makes an always-on PC certain" ;;
+    unmasked) add_check power.sleep "Sleep/suspend" OK "sleep targets are not masked; no automatic suspend was found (checked: ${F_SLEEP_DETAIL:-logind idle and lid}); masking them makes an always-on PC certain" ;;
+    desktop) add_check power.sleep "Sleep/suspend" WARN "a desktop is installed (display manager active) but its power settings cannot be read here; GNOME and GDM suspend on AC after about 15-20 minutes by default" power.desktop ;;
     *) add_check power.sleep "Sleep/suspend" SKIP "could not determine (no pmset, gsettings or systemd)" ;;
   esac
   if [ "$F_REBOOT" = yes ]; then add_check reboot.pending "Pending reboot" WARN "a restart is pending" reboot.pending
@@ -698,11 +710,12 @@ gather_facts() {
       _lv=$(for _x in /etc/systemd/logind.conf /usr/lib/systemd/logind.conf.d/*.conf /run/systemd/logind.conf.d/*.conf /etc/systemd/logind.conf.d/*.conf; do [ -r "$_x" ] && cat "$_x"; done | logind_values)
       # shellcheck disable=SC2086
       _ld=$(logind_auto_suspend $_lv "$_lap")
-      if [ -n "$_ld" ]; then F_SLEEP=sleeps; F_SLEEP_DETAIL=$_ld
-      elif have gsettings && have_session_bus; then
-        _gt=$(run_t 5 gsettings get org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 2>/dev/null)
-        case "$_gt" in *nothing*|"") ;; *) F_SLEEP=sleeps; F_SLEEP_DETAIL="GNOME idle action $_gt on AC (this user)" ;; esac
-      fi
+      _gt=""; _bus=no; _dm=no
+      if have_session_bus; then _bus=yes; fi
+      if [ -z "$_ld" ] && [ "$_bus" = yes ] && have gsettings; then _gt=$(run_t 5 gsettings get org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 2>/dev/null); fi
+      if [ -z "$_ld" ] && [ -z "$_gt" ] && [ "$(run_t 5 systemctl is-active display-manager 2>/dev/null)" = active ]; then _dm=yes; fi
+      _cs=$(classify_sleep "$_ld" "$_gt" "$_dm" "$_bus")
+      F_SLEEP=${_cs%%|*}; F_SLEEP_DETAIL=${_cs#*|}
     fi
     [ -e /var/run/reboot-required ] && F_REBOOT=yes
     gather_wol
@@ -753,14 +766,25 @@ gather_facts() {
 
 # --out: the report goes to a new temp file (created with O_EXCL) in the same folder, then ln puts it in place.
 # link(2) fails if the name exists as anything (file, FIFO, device, link), so nothing is ever overwritten or written through.
+# Returns 0 written, 1 exists or not writable, 3 ln failed on a new name (no hard links on this filesystem).
 save_out() {
   [ -e "$OUT_PATH" ] || [ -L "$OUT_PATH" ] && return 1
   case "$OUT_PATH" in */*) _odir=${OUT_PATH%/*}; [ -n "$_odir" ] || _odir=/ ;; *) _odir=. ;; esac
+  case "$_odir" in /*) ;; *) _odir=./$_odir ;; esac # a folder named -x must not be read as an option
   _otmp=$(mktemp "$_odir/.lanq-makeready.XXXXXX" 2>/dev/null) || return 1
+  trap 'rm -f -- "$_otmp"' EXIT
+  trap 'rm -f -- "$_otmp"; exit 130' INT TERM
   printf '%s\n' "$1" > "$_otmp"
   ln -- "$_otmp" "$OUT_PATH" 2>/dev/null; _ok=$?
   rm -f -- "$_otmp"
-  return "$_ok"
+  trap - EXIT INT TERM
+  if [ "$_ok" != 0 ]; then { [ -e "$OUT_PATH" ] || [ -L "$OUT_PATH" ]; } && return 1; return 3; fi
+  return 0
+}
+
+out_error() { # $1 = save_out's code
+  if [ "$1" = 3 ]; then echo "lanq-makeready: could not create $OUT_PATH: this folder's filesystem may not support hard links (e.g. FAT/exFAT USB sticks); choose another folder. Nothing was written."
+  else echo "lanq-makeready: could not create $OUT_PATH (it already exists now, or the folder is not writable); nothing was written."; fi
 }
 
 # ---------- main ----------
@@ -800,9 +824,7 @@ main() {
     [ -n "$JSON_PATH" ] && render_json "$REDACT" > "$JSON_PATH"
   fi
   # the only other write: a NEW file the user named
-  if [ -n "$OUT_PATH" ] && ! save_out "$_report"; then
-    echo "lanq-makeready: could not create $OUT_PATH (it exists now, or the folder is not writable); nothing was written." >&2
-  fi
+  if [ -n "$OUT_PATH" ]; then save_out "$_report" || out_error "$?" >&2; fi
   if [ "$V_GIT" != FAIL ] || [ "$V_ARCHIVE" != FAIL ]; then exit 0; fi
   exit 1
 }
