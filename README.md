@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/makeready-banner.png" alt="MakeReady - old PC, ready by morning" width="100%"></p>
+
 # lanq-makeready
 
 A small, **read-only** readiness check for a PC you want to use as a worker for
