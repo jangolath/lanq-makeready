@@ -334,7 +334,7 @@ if (-not $SkipSmoke) {
 
   Write-Host 'smoke: real run, non-elevated, -Json <file> -Redact'
   $isAdmin = (New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-  Assert-True (-not $isAdmin) 'smoke runs non-elevated'
+  if ($isAdmin) { Write-Host '  note: running elevated (CI runners are admin); admin-only rows are filled in' } else { Assert-True $true 'smoke runs non-elevated' }
   $out = Join-Path ([IO.Path]::GetTempPath()) ("lanq-makeready-smoke-" + [Guid]::NewGuid().ToString('N') + '.json')
   $console = & powershell -NoProfile -ExecutionPolicy Bypass -File $script -Json $out -Redact -Hours 00:00-07:00 | Out-String
   $code = $LASTEXITCODE
