@@ -35,6 +35,44 @@
         "overnight": { "$ref": "#/$defs/status" }
       }
     },
+    "summary": {
+      "type": "object",
+      "description": "Optional (0.2.0+). The one-line verdict and the numbered next steps (every WARN/FAIL check, blockers first).",
+      "required": ["verdict", "text", "blockers", "warnings", "nextSteps"],
+      "properties": {
+        "verdict": { "enum": ["READY", "READY_WITH_WARNINGS", "NOT_READY"] },
+        "text": { "type": "string", "description": "READY, READY WITH WARNINGS (n) or NOT READY (n blockers)" },
+        "blockers": { "type": "integer", "minimum": 0 },
+        "warnings": { "type": "integer", "minimum": 0 },
+        "nextSteps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["step", "id", "title", "status", "blocker", "detail", "action", "adminToFix"],
+            "properties": {
+              "step": { "type": "integer", "minimum": 1 },
+              "id": { "type": "string" },
+              "title": { "type": "string" },
+              "status": { "enum": ["WARN", "FAIL"] },
+              "blocker": { "type": "boolean" },
+              "detail": { "type": "string" },
+              "action": { "type": "string", "description": "Printed command or GUI path; the tool never runs it." },
+              "adminToFix": { "type": "boolean", "description": "Acting on the action needs admin/root." }
+            }
+          }
+        }
+      }
+    },
+    "suitedFor": {
+      "type": "object",
+      "description": "Optional (0.2.0+). Job sizing hint: light (under 6 GB), medium (6-16 GB), heavy (16 GB+ and 4+ logical CPUs).",
+      "required": ["tier", "containers", "text"],
+      "properties": {
+        "tier": { "enum": ["light", "medium", "heavy"] },
+        "containers": { "type": "boolean", "description": "A local Docker engine answers." },
+        "text": { "type": "string" }
+      }
+    },
     "checks": {
       "type": "array",
       "items": {
@@ -60,9 +98,16 @@
         "ssh": { "type": "string", "description": "Placeholder; the user must confirm." },
         "work_root": { "type": "string" },
         "capabilities": { "type": "array", "items": { "type": "string" } },
-        "max_jobs": { "type": "integer", "minimum": 1 },
+        "max_jobs": { "type": "integer", "minimum": 1, "description": "From RAM (under 6 GB 1, 8 GB 2, 16 GB 3-4, 32 GB+ 6-8), capped by logical CPUs." },
+        "min_free_mem_gb": { "type": "number", "minimum": 0, "description": "Optional (0.2.0+): 1.5 under 6 GB, else 2." },
         "transfer": { "enum": ["git", "archive", "none"] },
-        "allowed_hours": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$" }
+        "allowed_hours": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$" },
+        "wake": {
+          "type": "object",
+          "description": "Optional (0.2.0+), only when the wol check is OK. mac is <mac> under --redact.",
+          "required": ["mac"],
+          "properties": { "mac": { "type": "string" } }
+        }
       }
     }
   },

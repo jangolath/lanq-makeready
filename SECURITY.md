@@ -12,10 +12,13 @@ volunteer-maintained project.
 
 - **Read-only.** It never installs, uninstalls, updates, changes settings, edits the registry, starts or stops
   services, or touches drivers. Every fix is printed as advice for a person to run, or not.
+- **Writes only what you name.** The JSON report (`-Json`/`--json PATH`) and the human report (`-Out`/`--out FILE`).
+  `-Out` only creates a new file and refuses an existing one, so it cannot overwrite anything (on Linux/macOS it
+  writes a temp file in the same folder, links it into place with `ln`, and removes the temp file).
 - **No network.** No telemetry, no update check, no downloads. Version probes run from a neutral folder with
   toolchain auto-download switched off (`GOTOOLCHAIN=local`, `RUSTUP_AUTO_INSTALL=0`).
 - **No secrets.** It never reads private keys or `~/.docker/config.json`. `-Redact` / `--redact` removes host
-  name, user name and profile paths before the report is built.
+  name, user name, profile paths and the network adapter's MAC address before the report is built.
 - **No admin needed.** Checks that need admin are reported as `SKIP`.
 - **Bounded.** Every external command has a time limit; no whole-disk walks.
 

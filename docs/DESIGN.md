@@ -1,4 +1,4 @@
-# lanq-makeready — design (v0.1 prototype)
+# lanq-makeready — design (v0.2)
 
 Name approved by the owner 2026-11-08 (formerly the working name lanq-ready).
 
@@ -31,7 +31,8 @@ Then it prints a ready-to-paste `machines.yml` entry for LanQueue, and optionall
   present). Never walks the whole disk: folder sizes only for a fixed list of known temp/cache folders, with a cap.
 - **Honest verdicts.** Three words with fixed meanings: `OK`, `WARN` (works, but degraded or unsupported-but-may-run),
   `FAIL` (will not work for that role). Plus `SKIP` (could not check, with reason).
-- Small: target ≤ 700 lines per script.
+- Small: at most 900 lines per script (a test enforces it).
+- The only writes are files the user names: `--json PATH` and `--out FILE`; `--out` creates a NEW file only (never overwrites).
 
 ## Files
 
@@ -104,7 +105,10 @@ Overnight survivability
   `...\WindowsUpdate\Auto Update\RebootRequired`, `PendingFileRenameOperations`. Linux: `/var/run/reboot-required`.
 - `updates.activehours` — Windows: active hours registry values vs `--hours` window (Windows Update may reboot
   inside the overnight window) → WARN with advice.
-- `wol` — informational only; Windows `Get-NetAdapterPowerManagement` (may need admin → SKIP).
+- `wol` — Wake-on-LAN for LanQueue's `wake:`. Windows: wired adapter + MAC (`Get-NetAdapter -Physical`), "Wake on Magic
+  Packet" (`Get-NetAdapterPowerManagement`, may need admin → SKIP), `powercfg /devicequery wake_armed`, Fast Startup
+  (`HiberbootEnabled`). Linux: wired NIC from `/sys/class/net`, `ethtool <if>` "Wake-on" if readable without root.
+  WARN when no wired NIC, magic packet off, not armed, or Fast Startup on. The snippet's `wake:` is active only on OK.
 
 Slowdowns (report only, never act)
 - `startup` — count + top entries from `Win32_StartupCommand` and HKCU/HKLM Run keys; Linux: enabled user services
@@ -116,6 +120,15 @@ Slowdowns (report only, never act)
 - `drivers` — report only: count of devices with problem codes (`Win32_PnPEntity` ConfigManagerErrorCode ≠ 0) with
   names; advise Windows Update optional driver updates / vendor site. **Never updates drivers.**
 
+## Verdict and next steps (0.2)
+
+`NOT READY (n blockers)` when no transfer mode works (exit 1); blockers are FAIL checks among os.version, ssh.*, disk,
+git, tar (git/tar also when neither transfer tool exists). Otherwise `READY WITH WARNINGS (n)` (every other WARN/FAIL) or
+`READY`. Next steps list WARN/FAIL checks, blockers first, each with its advice text and an admin flag from a second
+table in the ADVICE region (`$AdviceAdmin` / `advice_admin`). Sizing (`max_jobs`, `min_free_mem_gb`, suited-for tier)
+uses the thresholds LanQueue 0.5.1+ `lanq health` uses: under 6 GB → 1 job / light; under 12 GB → 2 / medium; under 24 GB → 3 (4 with
+8+ CPUs); else 6 (8 with 16+ CPUs; 24-31 GB is this top band); capped by logical CPUs; heavy = 16 GB+ and 4+ logical CPUs.
+
 ## Suggested machines.yml snippet
 
 ```yaml
@@ -124,9 +137,11 @@ Slowdowns (report only, never act)
     ssh: <user>@<hostname>.lan   # placeholder; user must confirm
     work_root: C:/lq | /srv/lq   # short path; on Windows choose the SSD/most-free fixed drive
     capabilities: [dotnet, node, docker, windows]   # only what was detected AND working
-    max_jobs: 1                  # 2 only if logical cores ≥ 8 and RAM ≥ 16 GB
+    max_jobs: 1                  # from RAM and CPUs (see "Verdict and next steps")
+    min_free_mem_gb: 1.5         # 1.5 under 6 GB, else 2
     transfer: git | archive      # archive when git missing but tar OK
-    allowed_hours: "00:00-07:00" # only when --hours given; note: evaluated in the ORCHESTRATOR's local time
+    allowed_hours: "00:00-07:00" # when --hours given (the worker's own clock); else a commented example
+    wake: {mac: ...}             # only when the wol check is OK; otherwise commented out
 ```
 
 ## JSON report v1
@@ -158,6 +173,11 @@ With `--redact`: hostname, user and any absolute user-profile paths replaced by 
 - Signed releases (GitHub artifact attestations first; Authenticode later if worth the cost).
 
 ## Note on the guard tests
+
+0.2 widened the allow-lists deliberately: ps1 `Get-NetAdapter`, `Get-NetFirewallPortFilter`, the `powercfg /devicequery
+wake_armed` probe, and `[System.IO.File]::Open` with `CreateNew` (only inside `Save-OutFile`, for `-Out`). For sh `--out` (a temp file plus
+`ln`, so there is no noclobber race on FIFOs or devices) the guard allows exactly three lines in `save_out` (`mktemp`, `ln --`, `rm -f --` on the
+temp file) and the `> "$_otmp"` redirection, and a test checks those are the only `ln`, `rm` and `mktemp` in the script. The sh guard now also flags `ethtool -s/-K/...`, `nmcli` and `swapon`.
 
 The read-only guard tests (AST allow-list for PowerShell, command-word allow-list for sh, plus injected-mutation tests) are a
 test-time tripwire against accidental mutating code. They are not a sandbox and cannot prove the scripts are safe: the read-only
