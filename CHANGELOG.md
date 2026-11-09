@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-11-09)
 
 - One-line verdict at the top and bottom of the report: `READY`, `READY WITH WARNINGS (n)` or `NOT READY (n blockers)`,
   then numbered next steps (WARN/FAIL only, blockers first), each with the exact command or settings path for the OS
@@ -49,7 +49,7 @@
   the three `--out` temp-file lines (`mktemp`, `ln --`, `rm -f --` on the temp file) and the `> "$_otmp"` redirection,
   and now flags `ethtool -s/-K`, `wol`, `nmcli`, `swapon` and any other `ln`/`rm`. Script size limit 900 lines.
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-11-09)
 
 - First release: read-only worker-readiness scan for Windows (PowerShell 5.1+), Linux and macOS (POSIX sh),
   human report + JSON (`schema/report.v1.json`, stdout mode for piping over SSH), suggested LanQueue `machines.yml` entry.
