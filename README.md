@@ -51,7 +51,7 @@ Do not pipe a download into a shell. Download, read, verify, then run.
    ```sh
    gh attestation verify lanq-makeready.ps1 -R jangolath/lanq-makeready
    ```
-4. Open the script in a text editor and read it. It is about 500 lines and has no dependencies.
+4. Open the script in a text editor and read it. It is about 600 lines and has no dependencies.
 
 **Never** run it as `irm <url> | iex` (or `curl <url> | sh`). That runs unreviewed code with your rights and
 skips every check above.
@@ -74,9 +74,22 @@ sh ./lanq-makeready.sh
 sh ./lanq-makeready.sh --hours 00:00-07:00 --redact --json ./report.json
 ```
 
+Running it over SSH (what a future `lanq makeready` will do): the script is piped in, only JSON comes back on stdout,
+the human report is suppressed, and the exit code is `0`/`1` as usual. Nothing is copied to the worker.
+
+```sh
+# Windows worker (default shell may be cmd.exe, so start powershell explicitly)
+ssh user@worker "powershell -NoProfile -NonInteractive -Command \"& ([scriptblock]::Create([Console]::In.ReadToEnd())) -Json - -Redact\"" < lanq-makeready.ps1
+# Linux worker
+ssh user@worker "sh -s -- --json - --redact" < lanq-makeready.sh
+```
+
+`-Json -` only works in the stdin form above; with `powershell -File` use a file path. Windows PowerShell flags are
+`-Json/-Redact/-Hours/-Quiet`; unknown arguments exit 2 with a usage line.
+
 | Option (ps1 / sh) | Meaning |
 |---|---|
-| `-Json PATH` / `--json PATH` | also write a JSON report ([schema](schema/report.v1.json)) |
+| `-Json PATH` / `--json PATH` | also write a JSON report ([schema](schema/report.v1.json)); `-` writes only the JSON to stdout |
 | `-Redact` / `--redact` | hide hostname, user and profile paths |
 | `-Hours HH:mm-HH:mm` / `--hours` | only feeds `allowed_hours` in the snippet (start must differ from end) |
 | `-Quiet` / `--quiet` | verdict lines only |
@@ -93,19 +106,18 @@ A machine with no SSH server yet, so it correctly says "not ready". Advice lines
 lanq-makeready 0.1.0 (read-only: nothing is installed, changed or sent anywhere)
 
 [OK  ] OS: Windows 11 Pro build 26200, Professional
-[OK  ] Memory: 31.9 GB total, 10.5 GB free
-[OK  ] Disk: system drive 524.1 GB free, work drive 524.1 GB free, disk type: SSD
+[OK  ] Memory: 32.4 GB installed, 10.5 GB free
+[OK  ] Disk: system drive 524 GB free, work drive C: 524 GB free, work drive type: SSD
 [FAIL] OpenSSH Server: not installed
        advice: Install OpenSSH Server yourself (elevated PowerShell): Add-WindowsCapability -Online ...
+[WARN] SSH keys: user is an administrator; administrators_authorized_keys not found
 [WARN] git: git version 2.48.1.windows.1, core.longpaths not enabled
 [OK  ] tar: built-in bsdtar found
-[OK  ] .NET 10 SDK: supported OS (SDK majors found: 5, 9, 10)
+[OK  ] .NET 10 SDK: supported OS (Windows 11 24H2 or newer) (SDK majors found: 5, 9, 10)
 [OK  ] Docker: engine answering (server 29.9.2)
 [OK  ] Sleep/hibernate (AC): never sleeps or hibernates on AC
 [WARN] Pending reboot: a restart is pending
 [WARN] Update restarts vs job window: job window 00:00-07:00 is outside Windows Update active hours 08:00-02:00
-[WARN] Startup items: 31 items, e.g. Synapse3, OneDrive, Discord, NZXT.CAM, Steam
-[OK  ] Device drivers: no devices report problems
 
 Verdicts
   worker_git      FAIL
@@ -117,10 +129,10 @@ Verdicts
 # Paste into machines.yml (confirm the placeholders):
 # NOT READY yet: fix the FAIL items above first, then re-run.
 machines:
-  - name: old-pc
+  - name: "old-pc"
     os: windows
-    ssh: <user>@<hostname>.lan   # placeholder: confirm user and host name
-    work_root: C:/lq   # short path
+    ssh: "<user>@<hostname>.lan"   # placeholder: confirm user and host name
+    work_root: "C:/lq"   # short path
     capabilities: [dotnet, node, java, docker, windows]
     max_jobs: 2
     transfer: git
@@ -140,7 +152,7 @@ The snippet follows LanQueue's registry schema (`machines.example.yml`, [docs/WO
 | `os` | `windows` or `linux`. LanQueue workers are only these two, so on macOS the script prints a note instead of an entry |
 | `ssh` | `user@host.lan` **placeholder**: you confirm the real user and host name |
 | `work_root` | a short absolute path with forward slashes: `C:/lq` (or the fixed drive with the most free space) / `/srv/lq` |
-| `capabilities` | only tools that were **detected and working** (`dotnet`, `node`, `python`, `java`, `go`, `rust`, `docker`) plus `windows` / `linux` |
+| `capabilities` | only tools that were **detected and working** (`dotnet` only when an SDK of major 8 or newer is installed; `node`, `python`, `java`, `go`, `rust`, `docker`) plus `windows` / `linux` |
 | `max_jobs` | `1`; `2` only with 8 or more logical cores and 16 GB RAM |
 | `transfer` | `git` when git is present; `archive` when git is missing but a usable tar is (Windows bsdtar, GNU tar or bsdtar plus gzip; busybox tar is refused, as LanQueue does) |
 | `allowed_hours` | only when you pass `-Hours`; `"HH:mm-HH:mm"`, evaluated in the orchestrator's local time |
@@ -161,6 +173,17 @@ docker run --rm -v "$PWD:/w:ro" ubuntu:24.04 sh /w/tests/run.sh         # also t
 
 The verdict logic is in pure functions fed by a facts object (variables in `sh`), so the tests use fixtures such
 as "Windows 10 22H2, 4 GB, HDD, no sshd" or "glibc 2.26" without needing that machine.
+
+## Safety details
+
+- Probes (`git --version`, `node --version`, ...) run with a closed stdin, from a neutral directory (`%SystemRoot%` or `/`),
+  with `GOTOOLCHAIN=local`, `RUSTUP_AUTO_INSTALL=0` and prompts off, so a version probe cannot download a toolchain.
+  On macOS `git`, `python3` and `java` are only probed when the real tool exists (the stubs open an installer dialog).
+- `wsl.exe` is never run unless WSL is installed. A remote Docker endpoint (`DOCKER_HOST`, or a non-local context) is never probed.
+- Redaction replaces values before anything is printed or serialized, so a user or host named `false` or `linux` cannot damage the JSON.
+- On timeout the whole probe process tree is stopped (Windows uses `taskkill /T` on our own child only).
+- The guard tests parse the PowerShell with its AST and allow only a fixed list of read-only commands and member calls,
+  and check the sh script word by word against a command allow-list.
 
 ## Known limits (v0.1)
 

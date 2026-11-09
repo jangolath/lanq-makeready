@@ -6,7 +6,8 @@
   Every fix is printed as advice for you to run yourself (or not).
   Exit code: 0 = worker-ready, 1 = not ready, 2 = bad arguments.
 .PARAMETER Json
-  Also write a JSON report (schema lanq-makeready/v1) to this path.
+  Also write a JSON report (schema lanq-makeready/v1) to this path. Use '-' to write ONLY the JSON to
+  stdout (the human report is suppressed); this is the mode for running over SSH.
 .PARAMETER Redact
   Replace hostname, user name and user-profile paths with <redacted>.
 .PARAMETER Hours
@@ -14,8 +15,8 @@
 .PARAMETER Quiet
   Print only the verdict lines.
 #>
-[CmdletBinding()]
-param([string]$Json, [switch]$Redact, [string]$Hours, [switch]$Quiet)
+[CmdletBinding(PositionalBinding = $false)]
+param([string]$Json, [switch]$Redact, [string]$Hours, [switch]$Quiet, [Parameter(ValueFromRemainingArguments = $true)][string[]]$Extra)
 
 $ToolVersion = '0.1.0'
 
@@ -35,7 +36,9 @@ $Advice = @{
   'longpaths.on' = 'Optional: enable long paths (Settings registry LongPathsEnabled=1, reboot) and keep work_root short, for example C:/lq.'
   'win10.eol'    = 'Windows 10 is past end of support (2025-10-14; consumer ESU runs to 2027-10-12) and consumer 22H2 is not on the .NET 10 supported list. It usually runs; consider Windows 11 or Linux.'
   'os.old'       = 'This Windows version is too old for .NET 10 and Docker. Use a newer Windows or Linux.'
-  'arch32'       = '32-bit systems cannot run the .NET 10 SDK or Docker. Install a 64-bit OS (the CPU may support it).'
+  'arch32'       = '32-bit systems cannot run Docker (and 32-bit x86 Linux is not supported by .NET 10). Install a 64-bit OS (the CPU may support it).'
+  'arch32.win'   = '.NET 10 supports 32-bit (x86) Windows, but a 64-bit OS is strongly recommended: more RAM, Docker, and current toolchains need it.'
+  'docker.server'= 'Docker Desktop is not available on Windows Server. Docker Engine or Linux may be an option.'
   'ram.low'      = 'Less than 4 GB RAM: builds will swap and be slow. Fewer jobs (max_jobs: 1) and a lighter toolchain help; below 2 GB .NET SDK builds are unreliable.'
   'disk.hdd'     = 'A spinning disk makes builds slow. An SSD (even a small cheap one) is the single best upgrade for an old PC.'
   'disk.low'     = 'Free disk space is low. Each job needs room for a worktree plus build output; keep at least 20 GB free, below 10 GB the worker is refused.'
@@ -45,7 +48,7 @@ $Advice = @{
   'docker.virt'  = 'Hardware virtualization is off. Turn on Intel VT-x / AMD-V (SVM) in the BIOS/UEFI setup yourself.'
   'docker.ram'   = 'Docker Desktop wants 8 GB RAM. With less, use Linux with Docker Engine, or Docker Engine inside WSL 2 with a memory cap in .wslconfig (memory=2GB). Below 4 GB, containers are not recommended.'
   'docker.wsl'   = 'WSL 2 was not found. Docker Desktop (WSL 2 backend) needs it; see learn.microsoft.com/windows/wsl/install.'
-  'docker.build' = 'Docker Desktop needs Windows 10 22H2 (build 19045) or Windows 11 23H2+. Update Windows or use Linux.'
+  'docker.build' = 'Docker Desktop needs Windows 10 22H2 (build 19045) or Windows 11 23H2 (build 22631) and newer. Update Windows or use Linux.'
   'docker.daemon'= 'The Docker client is installed but the engine is not answering. Start Docker Desktop (or the docker service) yourself.'
   'power.sleep'  = 'The PC will sleep or hibernate mid-job. Review it yourself in Power Options, or in an elevated prompt: powercfg /change standby-timeout-ac 0 and powercfg /change hibernate-timeout-ac 0'
   'reboot.pending'= 'A restart is pending; the PC may reboot during a job. Restart it at a time you choose.'
@@ -88,9 +91,12 @@ function Test-UpdateOverlap([string]$H, [int]$ActStart, [int]$ActEnd) {
 }
 
 # Seconds from `powercfg /q` text (AC value); $null when not found. 0 means "never".
+# Works on localized Windows: the AC value is the second-to-last 0x........ value in the output.
 function Get-PowercfgAcSeconds([string]$Text) {
   if ($Text -match 'Current AC Power Setting Index:\s*0x([0-9a-fA-F]+)') { return [Convert]::ToInt64($Matches[1], 16) }
-  return $null
+  $hex = @([regex]::Matches($Text, '0x([0-9a-fA-F]{8})\s*(?:\r?\n|$)'))
+  if ($hex.Count -lt 2) { return $null }
+  return [Convert]::ToInt64($hex[$hex.Count - 2].Groups[1].Value, 16)
 }
 
 function Get-Worst($Statuses) {
@@ -99,12 +105,61 @@ function Get-Worst($Statuses) {
   return $w
 }
 
+# A non-elevated administrator still has S-1-5-32-544 as a deny-only group, which .Groups omits.
+function Test-AdminSid($GroupSids, $DenyOnlySids) {
+  $a = 'S-1-5-32-544'
+  return ((@($GroupSids) -contains $a) -or (@($DenyOnlySids) -contains $a))
+}
+
+function Get-SafeName([string]$S) {
+  $n = ("$S".ToLowerInvariant() -replace '[^a-z0-9-]', '-').Trim('-')
+  if (-not $n) { return 'old-pc' }
+  if ($n.Length -gt 63) { $n = $n.Substring(0, 63).Trim('-') }
+  return $n
+}
+
+function Test-SshUser([string]$U) { return [bool]($U -match '^[A-Za-z0-9][A-Za-z0-9._-]*$') }
+
+# True when the docker client would talk to a remote engine (do not probe it).
+function Test-DockerRemote([string]$DockerHost, [string]$Context) {
+  if ($DockerHost -and $DockerHost -notmatch '^(unix|npipe)://') { return $true }
+  if ($Context -and @('default', 'desktop-linux', 'desktop-windows', 'orbstack', 'colima', 'rancher-desktop') -notcontains $Context) { return $true }
+  return $false
+}
+
+# Work drive: >= 20 GB free, SSD preferred, then most free space; else >= 10 GB; else the system drive.
+function Select-WorkDrive($Drives, [string]$SysDrive) {
+  $list = @($Drives)
+  foreach ($min in @(20, 10)) {
+    $ok = @($list | Where-Object { $_.FreeGB -ge $min })
+    if ($ok.Count -eq 0) { continue }
+    $ssd = @($ok | Where-Object { $_.Media -eq 'SSD' })
+    if ($ssd.Count -gt 0) { $ok = $ssd }
+    return ($ok | Sort-Object { $_.FreeGB } -Descending | Select-Object -First 1)
+  }
+  $s = @($list | Where-Object { $_.Letter -eq $SysDrive })
+  if ($s.Count -gt 0) { return $s[0] }
+  return @{ Letter = $SysDrive; FreeGB = 0; Media = 'Unknown' }
+}
+
+# Never run wsl.exe unless WSL is installed (the inbox stub can offer to install it).
+function Get-WslState([bool]$Installed, [scriptblock]$Run) {
+  if (-not $Installed) { return $false }
+  $r = & $Run
+  return [bool]($r -and $r.Ok)
+}
+
+function Test-Sdk8([object[]]$Majors) { return [bool](@($Majors | Where-Object { [int]$_ -ge 8 }).Count) }
+
 function Get-DockerCheck($F) {
   $t = 'Docker'
+  if ($F.DockerCli -and $F.DockerRemote) { return New-Check 'docker' $t 'SKIP' 'remote docker endpoint not probed' }
   if ($F.DockerServerOk) { return New-Check 'docker' $t 'OK' "engine answering (server $($F.DockerServer))" }
   if ($F.DockerCli) { return New-Check 'docker' $t 'WARN' 'client installed but engine not reachable' 'docker.daemon' }
   if (-not $F.Is64) { return New-Check 'docker' $t 'FAIL' '32-bit Windows cannot run Docker' 'arch32' }
   if ($F.Build -lt 19045) { return New-Check 'docker' $t 'FAIL' "Windows build $($F.Build) is older than 19045 (22H2)" 'docker.build' }
+  if ($F.IsServer) { return New-Check 'docker' $t 'WARN' 'Docker Desktop is not available on Windows Server' 'docker.server' }
+  if ($F.Build -ge 22000 -and $F.Build -lt 22631) { return New-Check 'docker' $t 'FAIL' "Windows 11 build $($F.Build) is older than 22631 (23H2)" 'docker.build' }
   $virt = ($F.HypervisorPresent -eq $true) -or ($F.VirtFirmware -eq $true)
   $note = ''
   if ($F.HypervisorPresent -eq $true) { $note = ' (a hypervisor is already running, so virtualization is enabled)' }
@@ -115,23 +170,27 @@ function Get-DockerCheck($F) {
   return New-Check 'docker' $t 'OK' "not installed; prerequisites look fine$note"
 }
 
+# .NET 10 supported-OS list (dotnet/core release-notes/10.0/supported-os.md), see docs/DESIGN.md.
 function Get-DotnetCheck($F) {
   $t = '.NET 10 SDK'
   $have = 'no SDK found'
   if ($F.DotnetSdks -and @($F.DotnetSdks).Count -gt 0) { $have = 'SDK majors found: ' + (@($F.DotnetSdks) -join ', ') }
-  if (-not $F.Is64 -and -not $F.IsArm) { return New-Check 'dotnet' $t 'FAIL' "32-bit Windows cannot run the .NET 10 SDK ($have)" 'arch32' }
   if ($F.RamGB -lt 2) { return New-Check 'dotnet' $t 'FAIL' "under 2 GB RAM ($have)" 'ram.low' }
+  $ed = "$($F.EditionId)"; $b = [int]$F.Build
+  $st = 'OK'; $adv = ''; $why = 'supported OS'
   if ($F.IsServer) {
-    if ($F.Build -lt 9200) { return New-Check 'dotnet' $t 'FAIL' "$($F.Caption) is not supported ($have)" 'os.old' }
-  } elseif ($F.Build -ge 22000) {
-  } elseif ($F.Build -ge 10240) {
-    $listed = @(14393, 17763, 19044) -contains [int]$F.Build
-    if (-not ($listed -and $F.EditionId -match 'Enterprise|IoT|Education')) {
-      return New-Check 'dotnet' $t 'WARN' "not on the .NET 10 supported list, usually runs ($have)" 'dotnet.os'
-    }
-  } else { return New-Check 'dotnet' $t 'FAIL' "Windows build $($F.Build) is too old ($have)" 'os.old' }
-  if ($F.RamGB -lt 4) { return New-Check 'dotnet' $t 'WARN' "supported OS but low RAM ($have)" 'ram.low' }
-  return New-Check 'dotnet' $t 'OK' "supported OS ($have)"
+    if ($b -lt 9200) { return New-Check 'dotnet' $t 'FAIL' "$($F.Caption) is not supported ($have)" 'os.old' }
+    if ($b -lt 14393) { $st = 'WARN'; $adv = 'dotnet.os'; $why = 'Server 2012/2012 R2 is listed only with ESU' }
+  } elseif ($b -ge 26100) { $why = 'supported OS (Windows 11 24H2 or newer)'
+  } elseif ($b -eq 22631) {
+    if ($ed -notmatch '^(Enterprise|IoTEnterprise)') { $st = 'WARN'; $adv = 'dotnet.os'; $why = 'Windows 11 23H2 is listed for Enterprise/IoT only, not on the published list for this edition' }
+  } elseif ($b -ge 22000) { $st = 'WARN'; $adv = 'dotnet.os'; $why = 'this Windows 11 version is not on the published list'
+  } elseif ($b -ge 10240) {
+    if (-not (@(14393, 17763, 19044) -contains $b -and $ed -match '^(Enterprise|IoTEnterprise)')) { $st = 'WARN'; $adv = 'dotnet.os'; $why = 'not on the published list, usually runs' }
+  } else { return New-Check 'dotnet' $t 'FAIL' "Windows build $b is too old ($have)" 'os.old' }
+  if (-not $F.Is64 -and -not $F.IsArm) { if ($st -eq 'OK') { $st = 'WARN'; $adv = 'arch32.win' }; $why += '; 32-bit (x86) Windows' }
+  if ($st -eq 'OK' -and $F.RamGB -lt 4) { $st = 'WARN'; $adv = 'ram.low'; $why += ' but low RAM' }
+  return New-Check 'dotnet' $t $st "$why ($have)" $adv
 }
 
 function Get-Checks($F) {
@@ -144,12 +203,12 @@ function Get-Checks($F) {
   elseif (-not $F.IsServer -and $F.Build -lt 10240) { [void]$c.Add((New-Check 'os.version' 'OS' 'FAIL' $d 'os.old')) }
   else { [void]$c.Add((New-Check 'os.version' 'OS' 'OK' $d)) }
   if ($F.Is64 -or $F.IsArm) { [void]$c.Add((New-Check 'os.arch' 'Architecture' 'OK' "$($F.Arch)")) }
-  else { [void]$c.Add((New-Check 'os.arch' 'Architecture' 'FAIL' "32-bit ($($F.Arch))" 'arch32')) }
+  else { [void]$c.Add((New-Check 'os.arch' 'Architecture' 'WARN' "32-bit ($($F.Arch))" 'arch32.win')) }
   [void]$c.Add((New-Check 'cpu' 'CPU' 'OK' "$($F.CpuName), $($F.Cores) cores / $($F.Logical) threads, AVX2: $($F.Avx2) (informational)"))
   $rs = 'OK'; $ra = ''
   if ($F.RamGB -lt 2) { $rs = 'FAIL'; $ra = 'ram.low' } elseif ($F.RamGB -lt 4) { $rs = 'WARN'; $ra = 'ram.low' }
-  [void]$c.Add((New-Check 'ram' 'Memory' $rs "$($F.RamGB) GB total, $($F.FreeRamGB) GB free" $ra))
-  $ds = 'OK'; $da = ''; $dd = "system drive $($F.SysFreeGB) GB free, work drive $($F.WorkFreeGB) GB free, disk type: $($F.DiskMedia)"
+  [void]$c.Add((New-Check 'ram' 'Memory' $rs "$($F.RamGB) GB installed, $($F.FreeRamGB) GB free" $ra))
+  $ds = 'OK'; $da = ''; $dd = "system drive $($F.SysFreeGB) GB free, work drive $($F.WorkDrive) $($F.WorkFreeGB) GB free, work drive type: $($F.DiskMedia)"
   $minFree = [math]::Min([double]$F.SysFreeGB, [double]$F.WorkFreeGB)
   if ($minFree -lt 10) { $ds = 'FAIL'; $da = 'disk.low' }
   elseif ($F.DiskMedia -eq 'HDD') { $ds = 'WARN'; $da = 'disk.hdd' }
@@ -185,7 +244,7 @@ function Get-Checks($F) {
     if ($v) { [void]$c.Add((New-Check $k $k 'OK' "$v")) } else { [void]$c.Add((New-Check $k $k 'SKIP' 'not installed (optional, only if your jobs use it)')) }
   }
   # --- overnight
-  if ($null -eq $F.StandbyAcSec -or $null -eq $F.HibernateAcSec) { [void]$c.Add((New-Check 'power.sleep' 'Sleep/hibernate (AC)' 'SKIP' 'could not read powercfg')) }
+  if ($null -eq $F.StandbyAcSec) { [void]$c.Add((New-Check 'power.sleep' 'Sleep/hibernate (AC)' 'SKIP' 'could not read powercfg')) }
   elseif ($F.StandbyAcSec -gt 0 -or $F.HibernateAcSec -gt 0) {
     [void]$c.Add((New-Check 'power.sleep' 'Sleep/hibernate (AC)' 'WARN' "sleeps after $([math]::Round($F.StandbyAcSec / 60)) min, hibernates after $([math]::Round($F.HibernateAcSec / 60)) min (0 = never)" 'power.sleep'))
   } else { [void]$c.Add((New-Check 'power.sleep' 'Sleep/hibernate (AC)' 'OK' 'never sleeps or hibernates on AC')) }
@@ -233,9 +292,9 @@ function Get-Verdicts($Checks, $F) {
 
 function Get-Machine($F, $V, [string]$H, [bool]$Redact) {
   $name = 'old-pc'
-  if (-not $Redact -and $F.Hostname) { $n = ($F.Hostname.ToLowerInvariant() -replace '[^a-z0-9-]', '-'); if ($n) { $name = $n } }
+  if (-not $Redact) { $name = Get-SafeName $F.Hostname }
   $caps = @()
-  if ($F.DotnetSdks -and @($F.DotnetSdks).Count -gt 0) { $caps += 'dotnet' }
+  if (Test-Sdk8 $F.DotnetSdks) { $caps += 'dotnet' }
   if ($F.Tools) { foreach ($p in @(@('node', 'node'), @('python', 'python'), @('java', 'java'), @('go', 'go'), @('rustc', 'rust'))) { if ($F.Tools[$p[0]]) { $caps += $p[1] } } }
   if ($F.DockerServerOk) { $caps += 'docker' }
   $caps += 'windows'
@@ -244,8 +303,10 @@ function Get-Machine($F, $V, [string]$H, [bool]$Redact) {
   if ($F.GitVer) { $tr = 'git' } elseif ($F.TarBsd) { $tr = 'archive' }
   $root = 'C:/lq'
   if ($F.WorkDrive) { $root = "$($F.WorkDrive)/lq" }
-  $ssh = 'user@' + $name + '.lan'
-  if ($Redact) { $ssh = '<user>@<hostname>.lan' } elseif ($F.User) { $ssh = "$($F.User)@$name.lan" }
+  $user = '<user>'
+  if (-not $Redact -and (Test-SshUser $F.User)) { $user = $F.User }
+  $ssh = "$user@$name.lan"
+  if ($Redact) { $ssh = '<user>@<hostname>.lan' }
   $m = [ordered]@{ name = $name; os = 'windows'; ssh = $ssh; work_root = $root; capabilities = $caps; max_jobs = $jobs; transfer = $tr }
   if ($H) { $m['allowed_hours'] = $H }
   return $m
@@ -256,10 +317,10 @@ function Format-Snippet($M, $V) {
   $ready = ($V.worker_git -ne 'FAIL') -or ($V.worker_archive -ne 'FAIL')
   if (-not $ready) { $o += '# NOT READY yet: fix the FAIL items above first, then re-run.' }
   $o += 'machines:'
-  $o += "  - name: $($M.name)"
+  $o += "  - name: `"$($M.name)`""
   $o += "    os: $($M.os)"
-  $o += "    ssh: $($M.ssh)   # placeholder: confirm user and host name"
-  $o += "    work_root: $($M.work_root)   # short path"
+  $o += "    ssh: `"$($M.ssh)`"   # placeholder: confirm user and host name"
+  $o += "    work_root: `"$($M.work_root)`"   # short path"
   $o += "    capabilities: [$(@($M.capabilities) -join ', ')]"
   $o += "    max_jobs: $($M.max_jobs)"
   if ($M.transfer -eq 'none') { $o += '    # transfer: needs git (transfer: git) or built-in tar (transfer: archive); neither found' }
@@ -268,27 +329,86 @@ function Format-Snippet($M, $V) {
   return $o
 }
 
-function Protect-Text([string]$T, $F) {
-  foreach ($v in @($F.Profile, $F.User, $F.Hostname)) {
-    if ($v -and $v.Length -ge 2) { $T = [regex]::Replace($T, '(?<![A-Za-z0-9])' + [regex]::Escape($v) + '(?![A-Za-z0-9])', '<redacted>', 'IgnoreCase') }
+# Redaction happens on VALUES, before anything is serialized or printed. Only free-text facts are
+# touched, never fields that drive logic or the JSON structure.
+function Protect-Facts($F) {
+  $toks = @()
+  foreach ($v in @($F.Profile, $F.User, $F.Hostname)) { if ($v -and "$v".Length -ge 2) { $toks += "$v" } }
+  $fix = { param($s) foreach ($t in $toks) { $s = [regex]::Replace("$s", '(?<![A-Za-z0-9_])' + [regex]::Escape($t) + '(?![A-Za-z0-9_])', '<redacted>', 'IgnoreCase') }; $s }
+  $o = @{}; foreach ($k in $F.Keys) { $o[$k] = $F[$k] }
+  foreach ($k in @('Caption', 'CpuName', 'GitVer', 'DockerServer', 'DefaultShell')) { if ($o[$k]) { $o[$k] = & $fix $o[$k] } }
+  foreach ($k in @('StartupNames', 'ProblemDevices')) { if ($o[$k]) { $o[$k] = @($o[$k] | ForEach-Object { & $fix $_ }) } }
+  if ($o.Tools) { $t2 = @{}; foreach ($k in $o.Tools.Keys) { $t2[$k] = & $fix $o.Tools[$k] }; $o.Tools = $t2 }
+  $o.Hostname = '<redacted>'; $o.User = '<redacted>'; $o.Profile = '<redacted>'
+  return $o
+}
+
+function New-Report($F, $Checks, $V, $M, [string]$Version) {
+  [ordered]@{
+    schema = 'lanq-makeready/v1'; tool = [ordered]@{ name = 'lanq-makeready'; version = $Version }
+    generatedAt = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    host = [ordered]@{ hostname = $F.Hostname; user = $F.User; os = "$($F.Caption) build $($F.Build)"; arch = $F.Arch }
+    verdicts = $V
+    checks = @($Checks | ForEach-Object { [ordered]@{ id = $_.id; title = $_.title; status = $_.status; detail = $_.detail; advice = $_.advice; needsAdmin = $_.needsAdmin } })
+    capabilities = @($M.capabilities | Where-Object { $_ -ne 'windows' })
+    suggestedMachine = $M
   }
-  return $T
+}
+
+# JSON as pure ASCII (non-ASCII becomes \uXXXX) so console encodings cannot corrupt it.
+function ConvertTo-AsciiJson($Obj) {
+  $t = $Obj | ConvertTo-Json -Depth 6
+  return [regex]::Replace($t, '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value })
 }
 
 # ---------- probes (read-only) ----------
 
+# Environment for every probe: no toolchain auto-download, no prompts, no hints.
+function Get-ProbeEnv {
+  @{ GOTOOLCHAIN = 'local'; RUSTUP_AUTO_INSTALL = '0'; GIT_TERMINAL_PROMPT = '0'; DOCKER_CLI_HINTS = 'false'
+     NPM_CONFIG_UPDATE_NOTIFIER = 'false'; PIP_DISABLE_PIP_VERSION_CHECK = '1' }
+}
+
+function Stop-Tree([int]$ProcId) {
+  [void](Invoke-Bounded "$env:SystemRoot\System32\taskkill.exe" "/T /F /PID $ProcId" 5 -NoKill)
+}
+
+# Runs one external program with closed stdin, a neutral working directory, and a hard deadline
+# (the whole process tree is stopped on timeout). Returns $null if it cannot start.
 function Invoke-Bounded {
-  param([string]$Exe, [string]$ArgText = '', [int]$Sec = 8, [switch]$Utf16)
+  param([string]$Exe, [string]$ArgText = '', [int]$Sec = 8, [switch]$Utf16, [switch]$NoKill)
   try {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Exe; $psi.Arguments = $ArgText; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
-    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $psi.WorkingDirectory = $env:SystemRoot
+    $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $pe = Get-ProbeEnv; foreach ($k in $pe.Keys) { $psi.EnvironmentVariables[$k] = $pe[$k] }
     if ($Utf16) { $psi.StandardOutputEncoding = [System.Text.Encoding]::Unicode }
     $p = [System.Diagnostics.Process]::Start($psi)
+    $p.StandardInput.Close()
     $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()
-    if (-not $p.WaitForExit($Sec * 1000)) { try { $p.Kill() } catch { }; return @{ Ok = $false; TimedOut = $true; Code = -1; Out = '' } }
+    if (-not $p.WaitForExit($Sec * 1000)) {
+      if (-not $NoKill) { Stop-Tree $p.Id }
+      try { $p.Kill() } catch { }
+      return @{ Ok = $false; TimedOut = $true; Code = -1; Out = '' }
+    }
     [void]$o.Wait(2000); [void]$e.Wait(2000)
-    return @{ Ok = ($p.ExitCode -eq 0); TimedOut = $false; Code = $p.ExitCode; Out = ($o.Result + "`n" + $e.Result) }
+    $so = ''; if ($o.IsCompleted) { $so = $o.Result }
+    $se = ''; if ($e.IsCompleted) { $se = $e.Result }
+    return @{ Ok = ($p.ExitCode -eq 0); TimedOut = $false; Code = $p.ExitCode; Out = ($so + "`n" + $se) }
+  } catch { return $null }
+}
+
+# Runs a cmdlet block in a separate runspace with a deadline; $null on timeout or error.
+function Invoke-WithTimeout([scriptblock]$Block, $Arg, [int]$Sec = 15) {
+  $ps = $null
+  try {
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    [void]$ps.AddScript($Block.ToString()).AddArgument($Arg)
+    $h = $ps.BeginInvoke()
+    if ($h.AsyncWaitHandle.WaitOne($Sec * 1000)) { $r = $ps.EndInvoke($h); $ps.Dispose(); return , @($r) }
+    [void]$ps.BeginStop($null, $null); $script:Hung = $true
+    return $null
   } catch { return $null }
 }
 
@@ -325,12 +445,33 @@ function Get-DirSizeMB([string]$Path, [int]$Sec = 5) {
   return @{ MB = [int][math]::Round($total / 1MB); Capped = $capped }
 }
 
+function Get-IsAdminUser {
+  try {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $g = @($id.Groups | ForEach-Object { $_.Value })
+    $d = @($id.Claims | Where-Object { $_.Type -like '*denyonlysid' } | ForEach-Object { $_.Value })
+    return (Test-AdminSid $g $d)
+  } catch { return $false }
+}
+
+function Get-DockerContext {
+  $ctx = $env:DOCKER_CONTEXT
+  if (-not $ctx) {
+    try { $cfg = "$env:USERPROFILE\.docker\config.json"
+      if (Test-Path -LiteralPath $cfg) { $ctx = (Get-Content -LiteralPath $cfg -Raw | ConvertFrom-Json).currentContext } } catch { }
+  }
+  return "$ctx"
+}
+
 function Get-Facts([string]$H) {
   $F = @{ Hours = $H; Hostname = $env:COMPUTERNAME; User = $env:USERNAME; Profile = $env:USERPROFILE }
   try { $os = Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 15
     $F.Caption = ($os.Caption -replace '^Microsoft\s+', ''); $F.Build = [int]$os.BuildNumber; $F.IsServer = ($os.ProductType -ne 1)
-    $F.RamGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1); $F.FreeRamGB = [math]::Round($os.FreePhysicalMemory / 1MB, 1)
+    $F.RamGB = [math]::Round($os.TotalVisibleMemorySize / 1MB + 0.5, 1); $F.FreeRamGB = [math]::Round($os.FreePhysicalMemory / 1MB, 1)
   } catch { $F.Caption = 'Windows (unreadable)'; $F.Build = 0; $F.RamGB = 0; $F.FreeRamGB = 0; $F.IsServer = $false }
+  # installed RAM, not the usable amount (usable is a little lower on every PC)
+  try { $cap = (@(Get-CimInstance Win32_PhysicalMemory -OperationTimeoutSec 15) | Measure-Object Capacity -Sum).Sum
+    if ($cap -gt 0 -and [math]::Round($cap / 1GB, 1) -gt $F.RamGB) { $F.RamGB = [math]::Round($cap / 1GB, 1) } } catch { }
   try { $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop; $F.EditionId = $cv.EditionID } catch { $F.EditionId = '' }
   $F.Is64 = [Environment]::Is64BitOperatingSystem
   $F.IsArm = ("$env:PROCESSOR_ARCHITECTURE $env:PROCESSOR_ARCHITEW6432" -match 'ARM64')
@@ -341,26 +482,28 @@ function Get-Facts([string]$H) {
   } catch { $F.CpuName = 'unknown'; $F.Cores = 0; $F.Logical = 0 }
   try { $F.Avx2 = [string][System.Runtime.Intrinsics.X86.Avx2]::IsSupported } catch { $F.Avx2 = 'not queried on Windows PowerShell 5.1' }
   try { $F.HypervisorPresent = [bool](Get-CimInstance Win32_ComputerSystem -OperationTimeoutSec 15).HypervisorPresent } catch { }
-  # disks
-  $sysLetter = ($env:SystemDrive).TrimEnd(':'); $best = $null
-  try {
-    $fixed = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -OperationTimeoutSec 15)
-    foreach ($d in $fixed) { if ($d.DeviceID -eq $env:SystemDrive) { $F.SysFreeGB = [math]::Round($d.FreeSpace / 1GB, 1) }
-      if ($d.FreeSpace -ge 10GB -and (-not $best -or $d.FreeSpace -gt ($best.FreeSpace * 2))) { $best = $d } }
-    if (-not $best) { $best = $fixed | Where-Object { $_.DeviceID -eq $env:SystemDrive } | Select-Object -First 1 }
-    if ($best) { $F.WorkDrive = $best.DeviceID; $F.WorkFreeGB = [math]::Round($best.FreeSpace / 1GB, 1); }
-  } catch { }
-  if ($null -eq $F.SysFreeGB) { $F.SysFreeGB = 0 }; if ($null -eq $F.WorkFreeGB) { $F.WorkFreeGB = $F.SysFreeGB }
-  $F.DiskMedia = 'Unknown'
-  try { $pt = Get-Partition -DriveLetter $sysLetter -ErrorAction Stop; $pd = Get-PhysicalDisk -ErrorAction Stop | Where-Object { $_.DeviceId -eq "$($pt.DiskNumber)" } | Select-Object -First 1
-    if ($pd -and "$($pd.MediaType)" -match 'SSD|HDD') { $F.DiskMedia = "$($pd.MediaType)" } } catch { }
+  # disks: media type (SSD/HDD) per drive letter, then pick the work drive
+  $media = @{}
+  $mm = Invoke-WithTimeout { param($x)
+    $pd = @(Get-PhysicalDisk -ErrorAction Stop)
+    Get-Partition -ErrorAction Stop | Where-Object { $_.DriveLetter } | ForEach-Object { $n = "$($_.DiskNumber)"; $d = $pd | Where-Object { $_.DeviceId -eq $n } | Select-Object -First 1
+      "$($_.DriveLetter)=$($d.MediaType)" } } $null 20
+  foreach ($line in @($mm)) { if ("$line" -match '^([A-Za-z])=(SSD|HDD)$') { $media[$Matches[1].ToUpper()] = $Matches[2] } }
+  $drives = @()
+  try { foreach ($d in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -OperationTimeoutSec 15)) {
+      $m = 'Unknown'; $l = $d.DeviceID.Substring(0, 1).ToUpper(); if ($media.ContainsKey($l)) { $m = $media[$l] }
+      $drives += @{ Letter = $d.DeviceID; FreeGB = [math]::Round($d.FreeSpace / 1GB, 1); Media = $m } } } catch { }
+  $sel = Select-WorkDrive $drives $env:SystemDrive
+  $F.WorkDrive = $sel.Letter; $F.WorkFreeGB = $sel.FreeGB; $F.DiskMedia = $sel.Media
+  $sys = @($drives | Where-Object { $_.Letter -eq $env:SystemDrive }); $F.SysFreeGB = 0; if ($sys.Count -gt 0) { $F.SysFreeGB = $sys[0].FreeGB }
   # ssh
   $svc = Get-Service sshd -ErrorAction SilentlyContinue
   $F.SshdInstalled = [bool]($svc -or (Test-Path "$env:WINDIR\System32\OpenSSH\sshd.exe"))
   if ($svc) { $F.SshdRunning = ($svc.Status -eq 'Running'); $F.SshdStartType = "$($svc.StartType)" }
-  try { $r = Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction Stop; $F.SshFirewall = ("$($r.Enabled)" -eq 'True') } catch { $F.SshFirewall = $null }
+  $fw = Invoke-WithTimeout { param($x) (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction Stop).Enabled } $null 15
+  if ($fw) { $F.SshFirewall = ("$($fw[0])" -eq 'True') } else { $F.SshFirewall = $null }
   try { $F.DefaultShell = (Get-ItemProperty 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -ErrorAction Stop).DefaultShell } catch { }
-  try { $F.IsAdminUser = [bool]([Security.Principal.WindowsIdentity]::GetCurrent().Groups | Where-Object { $_.Value -eq 'S-1-5-32-544' }) } catch { $F.IsAdminUser = $false }
+  $F.IsAdminUser = Get-IsAdminUser
   $ak = Join-Path $env:USERPROFILE '.ssh\authorized_keys'
   $F.AuthKeysNonEmpty = [bool]((Test-Path -LiteralPath $ak) -and ((Get-Item -LiteralPath $ak).Length -gt 0))
   $adm = "$env:ProgramData\ssh\administrators_authorized_keys"
@@ -381,11 +524,13 @@ function Get-Facts([string]$H) {
   $majors = @()
   foreach ($rt in $roots) { if ($rt -and (Test-Path -LiteralPath "$rt\sdk")) { foreach ($dir in (Get-ChildItem -LiteralPath "$rt\sdk" -Directory -ErrorAction SilentlyContinue)) { if ($dir.Name -match '^(\d+)\.') { $majors += [int]$Matches[1] } } } }
   $F.DotnetSdks = @($majors | Sort-Object -Unique)
-  # docker, wsl
+  # docker (a remote endpoint is never probed), wsl (never run unless installed)
   $dk = Find-Exe 'docker'; $F.DockerCli = [bool]$dk; $F.DockerServerOk = $false
-  if ($dk) { $r = Invoke-Bounded $dk "version --format {{.Server.Version}}" 10; if ($r -and $r.Ok -and (Get-FirstLine $r.Out)) { $F.DockerServerOk = $true; $F.DockerServer = Get-FirstLine $r.Out } }
+  $F.DockerRemote = Test-DockerRemote $env:DOCKER_HOST (Get-DockerContext)
+  if ($dk -and -not $F.DockerRemote) { $r = Invoke-Bounded $dk "version --format {{.Server.Version}}" 10; if ($r -and $r.Ok -and (Get-FirstLine $r.Out)) { $F.DockerServerOk = $true; $F.DockerServer = Get-FirstLine $r.Out } }
   $wsl = "$env:SystemRoot\System32\wsl.exe"
-  if (Test-Path -LiteralPath $wsl) { $r = Invoke-Bounded $wsl '--status' 8 -Utf16; $F.WslOk = [bool]($r -and $r.Ok) } else { $F.WslOk = $false }
+  $lx = [bool]((Get-Service LxssManager -ErrorAction SilentlyContinue) -or (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss'))
+  $F.WslOk = Get-WslState ($lx -and (Test-Path -LiteralPath $wsl)) { Invoke-Bounded $wsl '--status' 8 -Utf16 }
   # other tools
   $F.Tools = @{}
   foreach ($t in @(@('node', '--version'), @('python', '--version'), @('java', '-version'), @('go', 'version'), @('rustc', '--version'))) {
@@ -399,13 +544,15 @@ function Get-Facts([string]$H) {
     ((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -ErrorAction SilentlyContinue).PendingFileRenameOperations))
   try { $ah = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings' -ErrorAction Stop
     if ($null -ne $ah.ActiveHoursStart) { $F.ActiveStart = [int]$ah.ActiveHoursStart; $F.ActiveEnd = [int]$ah.ActiveHoursEnd } } catch { }
-  try { $F.WolAdapters = @(Get-NetAdapterPowerManagement -ErrorAction Stop | Where-Object { "$($_.WakeOnMagicPacket)" -eq 'Enabled' }).Count } catch { $F.WolAdapters = $null }
+  $wol = Invoke-WithTimeout { param($x) @(Get-NetAdapterPowerManagement -ErrorAction Stop | Where-Object { "$($_.WakeOnMagicPacket)" -eq 'Enabled' }).Count } $null 15
+  if ($wol) { $F.WolAdapters = [int]$wol[0] } else { $F.WolAdapters = $null }
   # slowdowns
   try { $su = @(Get-CimInstance Win32_StartupCommand -OperationTimeoutSec 15); $F.StartupCount = $su.Count; $F.StartupNames = @($su | Select-Object -First 5 | ForEach-Object { $_.Name }) } catch { }
   $F.TempSizes = @()
   foreach ($p in @(@('user temp', $env:TEMP), @('Windows temp', "$env:WINDIR\Temp"), @('NuGet packages', "$env:USERPROFILE\.nuget\packages"), @('npm cache', "$env:LOCALAPPDATA\npm-cache"))) {
     $z = Get-DirSizeMB $p[1] 3; if ($z) { $F.TempSizes += @{ Name = $p[0]; MB = $z.MB; Capped = $z.Capped } } }
-  try { $F.DefenderRtp = [bool](Get-MpComputerStatus -ErrorAction Stop).RealTimeProtectionEnabled } catch { $F.DefenderRtp = $null }
+  $df = Invoke-WithTimeout { param($x) (Get-MpComputerStatus -ErrorAction Stop).RealTimeProtectionEnabled } $null 15
+  if ($df) { $F.DefenderRtp = [bool]$df[0] } else { $F.DefenderRtp = $null }
   $F.DevDrive = ($F.Build -ge 22631)
   try { $F.ProblemDevices = @(Get-CimInstance Win32_PnPEntity -OperationTimeoutSec 20 | Where-Object { $_.ConfigManagerErrorCode -ne 0 } | ForEach-Object { $_.Name }) } catch { $F.ProblemDevices = $null }
   return $F
@@ -413,21 +560,31 @@ function Get-Facts([string]$H) {
 
 # ---------- main ----------
 
-if ($env:LANQ_MAKEREADY_LIB -eq '1') { return }
-
-if ($Hours -and -not (Test-Hours $Hours)) {
-  Write-Host 'lanq-makeready: -Hours must look like 00:00-07:00 (HH:mm-HH:mm, start different from end).'
+if ($env:LANQ_MAKEREADY_LIB -eq '1') {
+  if ($MyInvocation.InvocationName -eq '.') { return }
+  [Console]::Error.WriteLine('lanq-makeready: LANQ_MAKEREADY_LIB=1 is only for tests that dot-source this file; unset it.')
   exit 2
 }
+if ($Extra -and @($Extra).Count -gt 0) {
+  [Console]::Error.WriteLine("lanq-makeready: unknown argument(s): $(@($Extra) -join ' ')")
+  [Console]::Error.WriteLine('usage: lanq-makeready.ps1 [-Json <path|->] [-Redact] [-Hours HH:mm-HH:mm] [-Quiet]   (PowerShell-style flags; the sh script uses --json/--redact)')
+  exit 2
+}
+if ($Hours -and -not (Test-Hours $Hours)) {
+  [Console]::Error.WriteLine('lanq-makeready: -Hours must look like 00:00-07:00 (HH:mm-HH:mm, start different from end).')
+  exit 2
+}
+$StdoutJson = ($Json -eq '-')
 $rank = @{ OK = 'OK  '; WARN = 'WARN'; FAIL = 'FAIL'; SKIP = 'SKIP' }
 $color = @{ OK = 'Green'; WARN = 'Yellow'; FAIL = 'Red'; SKIP = 'DarkGray' }
 $facts = Get-Facts $Hours
+if ($Redact) { $facts = Protect-Facts $facts }
 $checks = Get-Checks $facts
 $verdicts = Get-Verdicts $checks $facts
 $machine = Get-Machine $facts $verdicts $Hours ([bool]$Redact)
 
 function Write-Out([string]$Text, [string]$Color = 'Gray') {
-  if ($Redact) { $Text = Protect-Text $Text $facts }
+  if ($StdoutJson) { return }
   Write-Host $Text -ForegroundColor $Color
 }
 
@@ -458,23 +615,16 @@ if (-not $ready) {
 
 if ($Json) {
   try {
-    $hostName = $facts.Hostname; $userName = $facts.User
-    if ($Redact) { $hostName = '<redacted>'; $userName = '<redacted>' }
-    $report = [ordered]@{
-      schema = 'lanq-makeready/v1'; tool = [ordered]@{ name = 'lanq-makeready'; version = $ToolVersion }
-      generatedAt = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
-      host = [ordered]@{ hostname = $hostName; user = $userName; os = "$($facts.Caption) build $($facts.Build)"; arch = $facts.Arch }
-      verdicts = $verdicts
-      checks = @($checks | ForEach-Object { [ordered]@{ id = $_.id; title = $_.title; status = $_.status; detail = $_.detail; advice = $_.advice; needsAdmin = $_.needsAdmin } })
-      capabilities = @($machine.capabilities | Where-Object { $_ -ne 'windows' })
-      suggestedMachine = $machine
+    $text = ConvertTo-AsciiJson (New-Report $facts $checks $verdicts $machine $ToolVersion)
+    if ($StdoutJson) { [Console]::Out.Write($text + "`n") }
+    else {
+      $full = $Json
+      if (-not [System.IO.Path]::IsPathRooted($full)) { $full = Join-Path (Get-Location).ProviderPath $Json }
+      [System.IO.File]::WriteAllText($full, $text, (New-Object System.Text.UTF8Encoding($false)))
+      if (-not $Quiet) { Write-Out 'JSON report written to the path you gave.' }
     }
-    $text = $report | ConvertTo-Json -Depth 6
-    if ($Redact) { $text = Protect-Text $text $facts }
-    $full = $Json
-    if (-not [System.IO.Path]::IsPathRooted($full)) { $full = Join-Path (Get-Location).ProviderPath $Json }
-    [System.IO.File]::WriteAllText($full, $text, (New-Object System.Text.UTF8Encoding($false)))
-    if (-not $Quiet) { Write-Out "JSON report written to the path you gave." }
-  } catch { Write-Out "Could not write the JSON report: $($_.Exception.Message)" 'Yellow' }
+  } catch { [Console]::Error.WriteLine("lanq-makeready: could not write the JSON report: $($_.Exception.Message)") }
 }
-if ($ready) { exit 0 } else { exit 1 }
+$code = 1; if ($ready) { $code = 0 }
+if ($script:Hung) { [Console]::Out.Flush(); [Environment]::Exit($code) }
+exit $code
