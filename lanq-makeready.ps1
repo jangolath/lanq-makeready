@@ -256,8 +256,13 @@ function Test-WakeArmed([string]$Text, [string]$Desc) {
 
 function Test-SshShellOk([string]$Shell) { return ((-not $Shell) -or $Shell -match '(?i)(^|\\)(cmd|powershell|pwsh)(\.exe)?$') }
 
-# Fast Startup only matters when hibernation is on: HiberbootEnabled=1 (Session Manager\Power) AND HibernateEnabled=1 (Control\Power).
-function Test-FastStartup($Hiberboot, $HibernateEnabled) { return (($Hiberboot -eq 1) -and ($HibernateEnabled -eq 1)) }
+# Fast Startup only matters when hibernation is on: HiberbootEnabled=1 (Session Manager\Power) AND hibernation on (Control\Power:
+# HibernateEnabled if present, else HibernateEnabledDefault; many PCs have neither value, and then hibernation is on).
+function Test-FastStartup($Hiberboot, $HibernateEnabled, $HibernateDefault) {
+  $h = 1
+  if ($null -ne $HibernateEnabled) { $h = $HibernateEnabled } elseif ($null -ne $HibernateDefault) { $h = $HibernateDefault }
+  return (($Hiberboot -eq 1) -and ($h -eq 1))
+}
 
 # Port 22: the named rule (Get-NetFirewallRule works without admin) decides; only when it is missing is the port-filter scan used.
 function Get-FirewallCheck($F) {
@@ -738,10 +743,10 @@ function Get-Facts([string]$H) {
     if ($null -ne $pm -and @($pm).Count -gt 0) { $F.WolMagic = "$(@($pm)[0])" }
     if ($pc) { $r = Invoke-Bounded $pc '/devicequery wake_armed' 8; if ($r -and $r.Ok) { $F.WolArmed = Test-WakeArmed $r.Out $sel.Nic.Desc } }
   }
-  $hb = $null; $he = $null
+  $hb = $null; $he = $null; $hd = $null
   try { $hb = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -ErrorAction Stop).HiberbootEnabled } catch { }
-  try { $he = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' -ErrorAction Stop).HibernateEnabled } catch { }
-  $F.FastStartup = Test-FastStartup $hb $he
+  try { $cp = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' -ErrorAction Stop; $he = $cp.HibernateEnabled; $hd = $cp.HibernateEnabledDefault } catch { }
+  $F.FastStartup = Test-FastStartup $hb $he $hd
   try { $F.SwapMB = [int](@(Get-CimInstance Win32_PageFileUsage -OperationTimeoutSec 15) | Measure-Object AllocatedBaseSize -Sum).Sum } catch { $F.SwapMB = $null }
   # slowdowns
   try { $su = @(Get-CimInstance Win32_StartupCommand -OperationTimeoutSec 15); $F.StartupCount = $su.Count; $F.StartupNames = @($su | Select-Object -First 5 | ForEach-Object { $_.Name }) } catch { }

@@ -158,12 +158,16 @@ $r = Run (New-Facts @{ WolMagic = $null })
 Assert-True ((St $r 'wol') -eq 'SKIP' -and (Ck $r 'wol').needsAdmin -and (Ck $r 'wol').detail -match '10:20:30:aa:bb:cc') 'unreadable without admin: SKIP, MAC still shown'
 $r = Run (New-Facts @{ WolMac = $null; WolNic = $null; WolWifi = $true })
 Assert-True ((St $r 'wol') -eq 'WARN' -and (Ck $r 'wol').detail -match 'Wi-Fi only') 'Wi-Fi only: WARN'
-Assert-True (Test-FastStartup 1 1) 'Fast Startup: HiberbootEnabled=1 and hibernation on -> on'
-Assert-True (-not (Test-FastStartup 1 0)) 'Fast Startup: hibernation off -> not effective'
-Assert-True (-not (Test-FastStartup 1 $null)) 'Fast Startup: hibernation unknown -> no WARN'
-Assert-True (-not (Test-FastStartup 0 1)) 'Fast Startup: HiberbootEnabled=0 -> off'
+Assert-True (Test-FastStartup 1 1 $null) 'Fast Startup: HiberbootEnabled=1, HibernateEnabled=1 -> on'
+Assert-True (-not (Test-FastStartup 1 0 $null)) 'Fast Startup: HibernateEnabled=0 -> not effective'
+Assert-True (-not (Test-FastStartup 1 0 1)) 'Fast Startup: HibernateEnabled=0 overrides HibernateEnabledDefault=1'
+Assert-True (Test-FastStartup 1 $null 1) 'Fast Startup: HibernateEnabled missing, HibernateEnabledDefault=1 -> on'
+Assert-True (-not (Test-FastStartup 1 $null 0)) 'Fast Startup: HibernateEnabled missing, HibernateEnabledDefault=0 -> off'
+Assert-True (Test-FastStartup 1 $null $null) 'Fast Startup: both hibernation values missing -> treated as on'
+Assert-True (-not (Test-FastStartup 0 $null $null)) 'Fast Startup: HiberbootEnabled=0 -> off'
+Assert-True (-not (Test-FastStartup $null 1 1)) 'Fast Startup: HiberbootEnabled missing -> off'
 $ps1txt = Get-Content -LiteralPath (Join-Path $root 'lanq-makeready.ps1') -Raw
-Assert-True ($ps1txt -match [regex]::Escape("'HKLM:\SYSTEM\CurrentControlSet\Control\Power'") -and $ps1txt -match 'HibernateEnabled') 'Fast Startup: HibernateEnabled is read from Control\Power'
+Assert-True ($ps1txt -match [regex]::Escape("'HKLM:\SYSTEM\CurrentControlSet\Control\Power'") -and $ps1txt -match 'HibernateEnabledDefault') 'Fast Startup: HibernateEnabled and HibernateEnabledDefault are read from Control\Power'
 $fr = Protect-Facts (New-Facts); $rr = Run $fr
 $sn = (Format-Snippet $rr.M $rr.V $fr) -join "`n"
 Assert-True ($sn -match '(?m)^    #   mac: "<mac>"' -and $sn -notmatch '(?m)^    wake:' -and $sn -match 'placeholder') 'redacted snippet: <mac> commented out, said to be a placeholder'
