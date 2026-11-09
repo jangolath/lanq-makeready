@@ -198,7 +198,9 @@ pick_wired() { # lines "name type has-device wireless operstate mac" -> "name ma
 }
 
 sshd_pw_auth() { # sshd config text on stdin -> yes | no | unset (the first value wins, as in sshd; Match blocks are not evaluated)
-  awk 'BEGIN { v = "unset" } { sub(/^[ \t]+/, ""); n = split($0, a, /[ \t=]+/); k = tolower(a[1]) } k == "match" { exit } k == "passwordauthentication" && n >= 2 { v = tolower(a[2]); exit } END { print v }'
+  # Reads to the end instead of exiting early: an early exit closes the pipe while sshd_conf_lines is still writing, and
+  # dash then prints "printf: I/O error" once per remaining line (seen on GitHub's Ubuntu runner).
+  awk 'BEGIN { v = "unset" } d { next } { sub(/^[ \t]+/, ""); n = split($0, a, /[ \t=]+/); k = tolower(a[1]) } k == "match" { d = 1; next } k == "passwordauthentication" && n >= 2 { v = tolower(a[2]); d = 1 } END { print v }'
 }
 
 logind_values() { # logind.conf text (main file, then drop-ins) on stdin -> "IdleAction HandleLidSwitch HandleLidSwitchExternalPower", "-" when unset; the last value wins

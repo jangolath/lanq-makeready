@@ -158,6 +158,12 @@ eq "$(printf '# x\nPasswordAuthentication no\nPasswordAuthentication yes\n' | ss
 eq "$(printf '#PasswordAuthentication no\nUsePAM yes\n' | sshd_pw_auth)" unset "commented out: unset (default yes)"
 eq "$(printf 'Match User x\nPasswordAuthentication no\n' | sshd_pw_auth)" unset "Match blocks are not applied globally"
 eq "$(printf '  passwordauthentication=YES\n' | sshd_pw_auth)" yes "case and = form"
+# sshd_pw_auth must read to the end: if it exits early, a writer that ignores SIGPIPE (as on CI runners) gets EPIPE on
+# every remaining line and dash prints "printf: I/O error" for each. 20000 lines exceed any pipe buffer.
+_pw=$( (trap '' PIPE; { printf 'PasswordAuthentication no\n'; i=0; while [ "$i" -lt 20000 ]; do printf '%s\n' "# filler $i"; i=$((i + 1)); done; } | sshd_pw_auth) 2>"${TMPDIR:-/tmp}/lanq-pw.$$")
+eq "$_pw" no "a long config after the first value still gives the first value"
+eq "$(wc -l < "${TMPDIR:-/tmp}/lanq-pw.$$" | tr -d ' ')" 0 "reads the whole config, so a writer ignoring SIGPIPE prints no I/O errors"
+rm -f "${TMPDIR:-/tmp}/lanq-pw.$$"; unset _pw
 cfg=${TMPDIR:-/tmp}/lanq-sshd.$$; mkdir -p "$cfg/d"
 printf 'Include %s/d/*.conf\nPasswordAuthentication yes\n' "$cfg" > "$cfg/main"; printf 'PasswordAuthentication no\n' > "$cfg/d/10-keys.conf"
 eq "$(sshd_conf_lines "$cfg/main" 0 | sshd_pw_auth)" no "Include drop-in read first, first value wins"
