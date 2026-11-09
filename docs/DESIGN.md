@@ -126,8 +126,8 @@ Slowdowns (report only, never act)
 git, tar (git/tar also when neither transfer tool exists). Otherwise `READY WITH WARNINGS (n)` (every other WARN/FAIL) or
 `READY`. Next steps list WARN/FAIL checks, blockers first, each with its advice text and an admin flag from a second
 table in the ADVICE region (`$AdviceAdmin` / `advice_admin`). Sizing (`max_jobs`, `min_free_mem_gb`, suited-for tier)
-uses the thresholds `lanq health` uses: under 6 GB → 1 job / light; under 12 GB → 2 / medium; under 24 GB → 3 (4 with
-8+ CPUs); else 6 (8 with 16+ CPUs); capped by logical CPUs; heavy = 16 GB+ and 4+ CPUs.
+uses the thresholds LanQueue 0.5.1+ `lanq health` uses: under 6 GB → 1 job / light; under 12 GB → 2 / medium; under 24 GB → 3 (4 with
+8+ CPUs); else 6 (8 with 16+ CPUs; 24-31 GB is this top band); capped by logical CPUs; heavy = 16 GB+ and 4+ logical CPUs.
 
 ## Suggested machines.yml snippet
 
@@ -175,8 +175,9 @@ With `--redact`: hostname, user and any absolute user-profile paths replaced by 
 ## Note on the guard tests
 
 0.2 widened the allow-lists deliberately: ps1 `Get-NetAdapter`, `Get-NetFirewallPortFilter`, the `powercfg /devicequery
-wake_armed` probe, and `[System.IO.File]::Open` with `CreateNew` (only inside `Save-OutFile`, for `-Out`); sh `set` (for
-`set -C` noclobber) and the `> "$OUT_PATH"` redirection. The sh guard now also flags `ethtool -s/-K/...`, `nmcli` and `swapon`.
+wake_armed` probe, and `[System.IO.File]::Open` with `CreateNew` (only inside `Save-OutFile`, for `-Out`). For sh `--out` (a temp file plus
+`ln`, so there is no noclobber race on FIFOs or devices) the guard allows exactly three lines in `save_out` (`mktemp`, `ln --`, `rm -f --` on the
+temp file) and the `> "$_otmp"` redirection, and a test checks those are the only `ln`, `rm` and `mktemp` in the script. The sh guard now also flags `ethtool -s/-K/...`, `nmcli` and `swapon`.
 
 The read-only guard tests (AST allow-list for PowerShell, command-word allow-list for sh, plus injected-mutation tests) are a
 test-time tripwire against accidental mutating code. They are not a sandbox and cannot prove the scripts are safe: the read-only
