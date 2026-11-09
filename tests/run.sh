@@ -1,15 +1,15 @@
 #!/bin/sh
 # shellcheck disable=SC2034,SC2153
-# POSIX test runner: sources lanq-ready.sh as a library (LANQ_READY_LIB=1) and feeds fixtures.
+# POSIX test runner: sources lanq-makeready.sh as a library (LANQ_MAKEREADY_LIB=1) and feeds fixtures.
 # Usage: sh tests/run.sh        (from anywhere)
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(dirname "$here")
 pass=0; fail=0
 
-LANQ_READY_LIB=1
-export LANQ_READY_LIB
+LANQ_MAKEREADY_LIB=1
+export LANQ_MAKEREADY_LIB
 # shellcheck disable=SC1091
-. "$root/lanq-ready.sh"
+. "$root/lanq-makeready.sh"
 
 ok() { pass=$((pass + 1)); echo "  ok   $1"; }
 bad() { fail=$((fail + 1)); echo "  FAIL $1 : expected '$3' got '$2'"; }
@@ -90,24 +90,24 @@ if valid_hours 22:00-07:00; then ok "hours: wraps midnight"; else bad "hours: wr
 if valid_hours 07:00-07:00; then bad "hours: equal rejected" accepted rejected; else ok "hours: equal start/end rejected"; fi
 if valid_hours 7-8; then bad "hours: bad format rejected" accepted rejected; else ok "hours: bad format rejected"; fi
 if valid_hours 24:00-07:00; then bad "hours: 24:00 rejected" accepted rejected; else ok "hours: 24:00 rejected"; fi
-eq "$(LANQ_READY_LIB=0 sh "$root/lanq-ready.sh" --hours 07:00-07:00 >/dev/null 2>&1; echo $?)" 2 "equal --hours: exit code 2"
-eq "$(LANQ_READY_LIB=0 sh "$root/lanq-ready.sh" --bogus >/dev/null 2>&1; echo $?)" 2 "unknown flag: exit code 2"
+eq "$(LANQ_MAKEREADY_LIB=0 sh "$root/lanq-makeready.sh" --hours 07:00-07:00 >/dev/null 2>&1; echo $?)" 2 "equal --hours: exit code 2"
+eq "$(LANQ_MAKEREADY_LIB=0 sh "$root/lanq-makeready.sh" --bogus >/dev/null 2>&1; echo $?)" 2 "unknown flag: exit code 2"
 eq "$(ver_num 2.35-0ubuntu3)" 2035000 "ver_num strips suffix"
 
 echo "read-only guard"
-begin=$(grep -c '^# BEGIN ADVICE$' "$root/lanq-ready.sh"); eq "$begin" 1 "one advice-table start marker"
-code=$(awk '/^# BEGIN ADVICE$/ {skip=1} !skip {print} /^# END ADVICE$/ {skip=0}' "$root/lanq-ready.sh")
+begin=$(grep -c '^# BEGIN ADVICE$' "$root/lanq-makeready.sh"); eq "$begin" 1 "one advice-table start marker"
+code=$(awk '/^# BEGIN ADVICE$/ {skip=1} !skip {print} /^# END ADVICE$/ {skip=0}' "$root/lanq-makeready.sh")
 hits=$(printf '%s\n' "$code" | grep -nE 'Set-ItemProperty|New-Item|Remove-Item|Set-Service|Start-Service|Stop-Service|reg add|powercfg [/-]change|pnputil [/-]add|Add-WindowsCapability|(^|[^A-Za-z-])rm[[:space:]]|[[:space:]]sudo([[:space:]]|$)|systemctl[[:space:]]+(enable|disable|start|stop)|(^|[^A-Za-z-])apt(-get)?([^A-Za-z]|$)|(^|[^A-Za-z])(dnf|yum)([^A-Za-z]|$)|Invoke-WebRequest|Invoke-RestMethod|(^|[^A-Za-z])(curl|wget)([^A-Za-z]|$)|Start-BitsTransfer|New-NetFirewallRule' || true)
 eq "$hits" "" "no mutating or network command outside the advice table"
-lines=$(wc -l < "$root/lanq-ready.sh" | tr -d ' ')
+lines=$(wc -l < "$root/lanq-makeready.sh" | tr -d ' ')
 if [ "$lines" -le 700 ]; then ok "script is $lines lines (max 700)"; else bad "line count" "$lines" "<=700"; fi
 
 echo "smoke: real run of the script on this machine"
-out=${TMPDIR:-/tmp}/lanq-ready-smoke.$$.json
-LANQ_READY_LIB=0 sh "$root/lanq-ready.sh" --json "$out" --redact --hours 00:00-07:00 >"$out.txt" 2>&1
+out=${TMPDIR:-/tmp}/lanq-makeready-smoke.$$.json
+LANQ_MAKEREADY_LIB=0 sh "$root/lanq-makeready.sh" --json "$out" --redact --hours 00:00-07:00 >"$out.txt" 2>&1
 rc=$?
 case "$rc" in 0|1) ok "smoke: exit code $rc in {0,1}" ;; *) bad "smoke exit code" "$rc" "0 or 1"; cat "$out.txt" ;; esac
-for k in '"schema": "lanq-ready/v1"' '"verdicts"' '"checks"' '"capabilities"' '"suggestedMachine"' '"generatedAt"' '"hostname": "<redacted>"'; do
+for k in '"schema": "lanq-makeready/v1"' '"verdicts"' '"checks"' '"capabilities"' '"suggestedMachine"' '"generatedAt"' '"hostname": "<redacted>"'; do
   if grep -q "$k" "$out" 2>/dev/null; then ok "smoke: json has $k"; else bad "smoke: json has $k" missing present; fi
 done
 if command -v python3 >/dev/null 2>&1; then

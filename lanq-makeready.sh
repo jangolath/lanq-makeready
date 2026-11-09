@@ -1,9 +1,9 @@
 #!/bin/sh
-# lanq-ready: READ-ONLY check of whether this Linux/macOS machine can be a LanQueue worker.
+# lanq-makeready: READ-ONLY check of whether this Linux/macOS machine can be a LanQueue worker.
 # Changes nothing, installs nothing, makes no network calls, needs no root.
 # Every fix is printed as advice for you to run yourself (or not).
 #
-# Usage: lanq-ready.sh [--json PATH] [--redact] [--hours HH:MM-HH:MM] [--quiet]
+# Usage: lanq-makeready.sh [--json PATH] [--redact] [--hours HH:MM-HH:MM] [--quiet]
 # Exit:  0 = worker-ready, 1 = not ready, 2 = bad arguments.
 
 TOOL_VERSION=0.1.0
@@ -251,7 +251,7 @@ render_snippet() {
 }
 
 render_human() {
-  echo "lanq-ready $TOOL_VERSION (read-only: nothing is installed, changed or sent anywhere)"
+  echo "lanq-makeready $TOOL_VERSION (read-only: nothing is installed, changed or sent anywhere)"
   if [ "$QUIET" != 1 ]; then
     echo
     printf '%s' "$CHECKS" | while IFS="$SEP" read -r _i _ti _s _d _a _adm; do
@@ -284,7 +284,7 @@ json_esc() { printf '%s' "$1" | tr '\n\t' '  ' | sed -e 's/\\/\\\\/g' -e 's/"/\\
 render_json() { # $1 = 1 when redacting
   _h=$F_HOST; _u=$F_USER
   if [ "$1" = 1 ]; then _h="<redacted>"; _u="<redacted>"; fi
-  printf '{\n  "schema": "lanq-ready/v1",\n  "tool": {"name": "lanq-ready", "version": "%s"},\n' "$TOOL_VERSION"
+  printf '{\n  "schema": "lanq-makeready/v1",\n  "tool": {"name": "lanq-makeready", "version": "%s"},\n' "$TOOL_VERSION"
   printf '  "generatedAt": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '  "host": {"hostname": "%s", "user": "%s", "os": "%s", "arch": "%s"},\n' "$(json_esc "$_h")" "$(json_esc "$_u")" "$(json_esc "${F_OSNAME:-$F_OS}")" "$(json_esc "$F_ARCH")"
   printf '  "verdicts": {"worker_git": "%s", "worker_archive": "%s", "dotnet10": "%s", "docker": "%s", "overnight": "%s"},\n' "$V_GIT" "$V_ARCHIVE" "$V_DOTNET" "$V_DOCKER" "$V_OVERNIGHT"
@@ -431,22 +431,22 @@ gather_facts() {
 # ---------- main ----------
 
 # shellcheck disable=SC2317
-if [ "${LANQ_READY_LIB:-}" = 1 ]; then return 0 2>/dev/null || exit 0; fi
+if [ "${LANQ_MAKEREADY_LIB:-}" = 1 ]; then return 0 2>/dev/null || exit 0; fi
 
 JSON_PATH=""; REDACT=0; HOURS=""; QUIET=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --json) [ $# -ge 2 ] || { echo "lanq-ready: --json needs a path" >&2; exit 2; }; JSON_PATH=$2; shift ;;
+    --json) [ $# -ge 2 ] || { echo "lanq-makeready: --json needs a path" >&2; exit 2; }; JSON_PATH=$2; shift ;;
     --redact) REDACT=1 ;;
-    --hours) [ $# -ge 2 ] || { echo "lanq-ready: --hours needs a value" >&2; exit 2; }; HOURS=$2; shift ;;
+    --hours) [ $# -ge 2 ] || { echo "lanq-makeready: --hours needs a value" >&2; exit 2; }; HOURS=$2; shift ;;
     --quiet) QUIET=1 ;;
     -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "lanq-ready: unknown argument: $1" >&2; exit 2 ;;
+    *) echo "lanq-makeready: unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
 done
 if [ -n "$HOURS" ] && ! valid_hours "$HOURS"; then
-  echo "lanq-ready: --hours must look like 00:00-07:00 (HH:MM-HH:MM, start different from end)." >&2
+  echo "lanq-makeready: --hours must look like 00:00-07:00 (HH:MM-HH:MM, start different from end)." >&2
   exit 2
 fi
 

@@ -10,9 +10,9 @@ function Assert-Equal($Actual, $Expected, [string]$Name) {
 }
 function Assert-True($Cond, [string]$Name) { Assert-Equal ([bool]$Cond) 'True' $Name }
 
-$env:LANQ_READY_LIB = '1'
-. (Join-Path $root 'lanq-ready.ps1')
-Remove-Item Env:\LANQ_READY_LIB
+$env:LANQ_MAKEREADY_LIB = '1'
+. (Join-Path $root 'lanq-makeready.ps1')
+Remove-Item Env:\LANQ_MAKEREADY_LIB
 
 function New-Facts([hashtable]$Over = @{}) {
   $f = @{ Hostname = 'box'; User = 'builder'; Profile = 'C:\Users\builder'; Caption = 'Windows 11 Pro'; Build = 26100; IsServer = $false
@@ -103,7 +103,7 @@ Write-Host 'read-only guard: no mutating or network commands outside the advice 
 $patterns = @('Set-ItemProperty', 'New-Item', 'Remove-Item', 'Set-Service', 'Start-Service', 'Stop-Service', '\breg(\.exe)?\s+add\b', 'powercfg\s+[/-]change',
   'pnputil\s+[/-]add', 'Add-WindowsCapability', '(?<![\w-])rm\s', '\bsudo\b', 'systemctl\s+(enable|disable|start|stop)', '\bapt(-get)?\b', '\bdnf\b', '\byum\b',
   'Invoke-WebRequest', 'Invoke-RestMethod', '\bcurl\b', '\bwget\b', 'Start-BitsTransfer', 'New-NetFirewallRule')
-foreach ($f in @('lanq-ready.ps1', 'lanq-ready.sh')) {
+foreach ($f in @('lanq-makeready.ps1', 'lanq-makeready.sh')) {
   $text = Get-Content -LiteralPath (Join-Path $root $f) -Raw
   $isPs = $f.EndsWith('.ps1')
   $b = if ($isPs) { '#region ADVICE' } else { '# BEGIN ADVICE' }; $e = if ($isPs) { '#endregion ADVICE' } else { '# END ADVICE' }
@@ -122,20 +122,20 @@ if (-not $SkipSmoke) {
   Write-Host 'smoke: real run, non-elevated, -Json -Redact'
   $isAdmin = (New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
   Assert-True (-not $isAdmin) 'smoke runs non-elevated'
-  $out = Join-Path ([IO.Path]::GetTempPath()) ("lanq-ready-smoke-" + [Guid]::NewGuid().ToString('N') + '.json')
-  $console = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'lanq-ready.ps1') -Json $out -Redact -Hours 00:00-07:00 | Out-String
+  $out = Join-Path ([IO.Path]::GetTempPath()) ("lanq-makeready-smoke-" + [Guid]::NewGuid().ToString('N') + '.json')
+  $console = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'lanq-makeready.ps1') -Json $out -Redact -Hours 00:00-07:00 | Out-String
   $code = $LASTEXITCODE
   Assert-True (@(0, 1) -contains $code) "smoke: exit code in {0,1} (got $code)"
   Assert-True (Test-Path -LiteralPath $out) 'smoke: JSON written'
   $raw = Get-Content -LiteralPath $out -Raw; $j = $raw | ConvertFrom-Json
-  Assert-Equal $j.schema 'lanq-ready/v1' 'smoke: schema id'
+  Assert-Equal $j.schema 'lanq-makeready/v1' 'smoke: schema id'
   foreach ($k in 'tool', 'generatedAt', 'host', 'verdicts', 'checks', 'capabilities', 'suggestedMachine') { Assert-True ($null -ne $j.PSObject.Properties[$k]) "smoke: key $k" }
   foreach ($k in 'worker_git', 'worker_archive', 'dotnet10', 'docker', 'overnight') { Assert-True (@('OK', 'WARN', 'FAIL', 'SKIP') -contains $j.verdicts.$k) "smoke: verdict $k valid" }
   Assert-True (@($j.checks).Count -ge 15) 'smoke: has checks'
   Assert-Equal $j.host.hostname '<redacted>' 'smoke: hostname redacted'
   $tok = { param($v) '(?<![A-Za-z0-9])' + [regex]::Escape($v) + '(?![A-Za-z0-9])' }
   Assert-True (($raw -notmatch (& $tok $env:COMPUTERNAME)) -and ($console -notmatch (& $tok $env:COMPUTERNAME)) -and ($console -notmatch (& $tok $env:USERNAME)) -and ($raw -notmatch (& $tok $env:USERNAME))) 'smoke: no hostname/user in output'
-  $r2 = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'lanq-ready.ps1') -Hours 07:00-07:00 | Out-String
+  $r2 = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'lanq-makeready.ps1') -Hours 07:00-07:00 | Out-String
   Assert-Equal $LASTEXITCODE 2 'equal -Hours start/end: exit code 2'
   [IO.File]::Delete($out)
 }

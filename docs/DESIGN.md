@@ -1,6 +1,6 @@
-# lanq-ready — design (v0.1 prototype)
+# lanq-makeready — design (v0.1 prototype)
 
-Working name; owner picks the final name before anything is published.
+Name approved by the owner 2026-11-08 (formerly the working name lanq-ready).
 
 ## What it is
 
@@ -36,9 +36,9 @@ Then it prints a ready-to-paste `machines.yml` entry for LanQueue, and optionall
 ## Files
 
 ```
-lanq-ready/
-  lanq-ready.ps1          # Windows (PowerShell 5.1+, also runs on pwsh 7)
-  lanq-ready.sh           # Linux + macOS (POSIX sh)
+lanq-makeready/
+  lanq-makeready.ps1          # Windows (PowerShell 5.1+, also runs on pwsh 7)
+  lanq-makeready.sh           # Linux + macOS (POSIX sh)
   schema/report.v1.json   # JSON Schema for --json output
   tests/                  # see Testing
   docs/DESIGN.md          # this file
@@ -49,8 +49,8 @@ lanq-ready/
 ## CLI
 
 ```
-lanq-ready.ps1 [-Json <path>] [-Redact] [-Hours "00:00-07:00"] [-Quiet]
-lanq-ready.sh  [--json <path>] [--redact] [--hours 00:00-07:00] [--quiet]
+lanq-makeready.ps1 [-Json <path>] [-Redact] [-Hours "00:00-07:00"] [-Quiet]
+lanq-makeready.sh  [--json <path>] [--redact] [--hours 00:00-07:00] [--quiet]
 ```
 - `--hours` only feeds the suggested `allowed_hours` in the machines.yml snippet (validated HH:MM-HH:MM).
 - Exit code: 0 = worker-ready (at least one transfer mode OK), 1 = not ready (lists blockers), 2 = bad arguments.
@@ -131,7 +131,7 @@ Slowdowns (report only, never act)
 
 ## JSON report v1
 
-`{ schema: "lanq-ready/v1", tool: {name, version}, generatedAt (UTC ISO8601), host: {hostname?, user?, os, arch},
+`{ schema: "lanq-makeready/v1", tool: {name, version}, generatedAt (UTC ISO8601), host: {hostname?, user?, os, arch},
    verdicts: { worker_git, worker_archive, dotnet10, docker, overnight } (OK|WARN|FAIL|SKIP),
    checks: [ {id, title, status, detail, advice, needsAdmin} ], capabilities: [..], suggestedMachine: {...} }`
 With `--redact`: hostname, user and any absolute user-profile paths replaced by `<redacted>`.
@@ -143,7 +143,7 @@ With `--redact`: hostname, user and any absolute user-profile paths replaced by 
 - Windows: Pester if available (Pester 3.4 ships inbox with PowerShell 5.1 — tests must work on 3.4 AND 5.x, or use a
   tiny hand-rolled assert runner to avoid version drift). Also a smoke test: run the script for real with `-Json`,
   parse it, validate required keys, assert exit code in {0,1}.
-- sh: a small POSIX test runner sourcing the script with `LANQ_READY_LIB=1` (skips main) and asserting verdict
+- sh: a small POSIX test runner sourcing the script with `LANQ_MAKEREADY_LIB=1` (skips main) and asserting verdict
   functions; `shellcheck` clean if available; smoke-run in an Ubuntu and an Alpine container and natively on WSL if present.
 - A **read-only guard test**: grep both scripts for mutating commands (`Set-ItemProperty`, `New-Item`, `Remove-`,
   `Stop-Service`, `Set-Service`, `reg add`, `powercfg /change`, `pnputil /add`, `rm `, `sudo`, `systemctl (enable|disable|stop|start)`, `apt`, `Invoke-WebRequest`, `curl`, `wget`, ...)

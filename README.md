@@ -1,4 +1,4 @@
-# lanq-ready
+# lanq-makeready
 
 A small, **read-only** readiness check for a PC you want to use as a worker for
 [LanQueue](https://github.com/jangolath/lanqueue) (it sends build/test jobs to spare LAN PCs over SSH).
@@ -11,7 +11,7 @@ Run it on the old PC. It tells you, in plain words:
 
 Then it prints a ready-to-paste `machines.yml` entry and can write a JSON report.
 
-Status: v0.1 prototype. Files: `lanq-ready.ps1` (Windows PowerShell 5.1 and PowerShell 7), `lanq-ready.sh`
+Status: v0.1 prototype. Files: `lanq-makeready.ps1` (Windows PowerShell 5.1 and PowerShell 7), `lanq-makeready.sh`
 (POSIX `sh`, Linux and macOS), `schema/report.v1.json`, `tests/`.
 
 ## The read-only promise
@@ -34,13 +34,13 @@ Status: v0.1 prototype. Files: `lanq-ready.ps1` (Windows PowerShell 5.1 and Powe
 
 Do not pipe a download into a shell. Download, read, verify, then run.
 
-1. Download `lanq-ready.ps1` (Windows) or `lanq-ready.sh` (Linux/macOS) and `SHA256SUMS` from the release page.
+1. Download `lanq-makeready.ps1` (Windows) or `lanq-makeready.sh` (Linux/macOS) and `SHA256SUMS` from the release page.
 2. Verify the hash.
 
    Windows (PowerShell):
    ```powershell
-   (Get-FileHash .\lanq-ready.ps1 -Algorithm SHA256).Hash.ToLower()
-   # compare with the line for lanq-ready.ps1 in SHA256SUMS
+   (Get-FileHash .\lanq-makeready.ps1 -Algorithm SHA256).Hash.ToLower()
+   # compare with the line for lanq-makeready.ps1 in SHA256SUMS
    ```
    Linux / macOS:
    ```sh
@@ -49,7 +49,7 @@ Do not pipe a download into a shell. Download, read, verify, then run.
 3. Optional but better, since a checksum from the same page only catches corruption: verify the GitHub
    build attestation (needs the [GitHub CLI](https://cli.github.com/)):
    ```sh
-   gh attestation verify lanq-ready.ps1 -R jangolath/lanq-ready
+   gh attestation verify lanq-makeready.ps1 -R jangolath/lanq-makeready
    ```
 4. Open the script in a text editor and read it. It is about 500 lines and has no dependencies.
 
@@ -62,16 +62,16 @@ Windows (no admin needed). Files from the internet carry a "mark of the web", so
 use a per-process execution-policy bypass (nothing is changed permanently):
 
 ```powershell
-Unblock-File .\lanq-ready.ps1
-powershell -ExecutionPolicy Bypass -File .\lanq-ready.ps1
-powershell -ExecutionPolicy Bypass -File .\lanq-ready.ps1 -Hours "00:00-07:00" -Redact -Json .\report.json
+Unblock-File .\lanq-makeready.ps1
+powershell -ExecutionPolicy Bypass -File .\lanq-makeready.ps1
+powershell -ExecutionPolicy Bypass -File .\lanq-makeready.ps1 -Hours "00:00-07:00" -Redact -Json .\report.json
 ```
 
 Linux / macOS:
 
 ```sh
-sh ./lanq-ready.sh
-sh ./lanq-ready.sh --hours 00:00-07:00 --redact --json ./report.json
+sh ./lanq-makeready.sh
+sh ./lanq-makeready.sh --hours 00:00-07:00 --redact --json ./report.json
 ```
 
 | Option (ps1 / sh) | Meaning |
@@ -90,7 +90,7 @@ cache-folder sizes).
 A machine with no SSH server yet, so it correctly says "not ready". Advice lines are cut for width.
 
 ```text
-lanq-ready 0.1.0 (read-only: nothing is installed, changed or sent anywhere)
+lanq-makeready 0.1.0 (read-only: nothing is installed, changed or sent anywhere)
 
 [OK  ] OS: Windows 11 Pro build 26200, Professional
 [OK  ] Memory: 31.9 GB total, 10.5 GB free

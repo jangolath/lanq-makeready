@@ -1,16 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "lanq-ready/v1",
-  "title": "lanq-ready report v1",
+  "$id": "lanq-makeready/v1",
+  "title": "lanq-makeready report v1",
   "type": "object",
   "required": ["schema", "tool", "generatedAt", "host", "verdicts", "checks", "capabilities", "suggestedMachine"],
   "additionalProperties": false,
   "properties": {
-    "schema": { "const": "lanq-ready/v1" },
+    "schema": { "const": "lanq-makeready/v1" },
     "tool": {
       "type": "object",
       "required": ["name", "version"],
-      "properties": { "name": { "const": "lanq-ready" }, "version": { "type": "string" } }
+      "properties": { "name": { "const": "lanq-makeready" }, "version": { "type": "string" } }
     },
     "generatedAt": { "type": "string", "format": "date-time", "description": "UTC, ISO 8601" },
     "host": {

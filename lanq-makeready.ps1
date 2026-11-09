@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-  lanq-ready: READ-ONLY check of whether this PC can be a LanQueue worker.
+  lanq-makeready: READ-ONLY check of whether this PC can be a LanQueue worker.
 .DESCRIPTION
   Changes nothing, installs nothing, makes no network calls, needs no admin rights.
   Every fix is printed as advice for you to run yourself (or not).
   Exit code: 0 = worker-ready, 1 = not ready, 2 = bad arguments.
 .PARAMETER Json
-  Also write a JSON report (schema lanq-ready/v1) to this path.
+  Also write a JSON report (schema lanq-makeready/v1) to this path.
 .PARAMETER Redact
   Replace hostname, user name and user-profile paths with <redacted>.
 .PARAMETER Hours
@@ -413,10 +413,10 @@ function Get-Facts([string]$H) {
 
 # ---------- main ----------
 
-if ($env:LANQ_READY_LIB -eq '1') { return }
+if ($env:LANQ_MAKEREADY_LIB -eq '1') { return }
 
 if ($Hours -and -not (Test-Hours $Hours)) {
-  Write-Host 'lanq-ready: -Hours must look like 00:00-07:00 (HH:mm-HH:mm, start different from end).'
+  Write-Host 'lanq-makeready: -Hours must look like 00:00-07:00 (HH:mm-HH:mm, start different from end).'
   exit 2
 }
 $rank = @{ OK = 'OK  '; WARN = 'WARN'; FAIL = 'FAIL'; SKIP = 'SKIP' }
@@ -431,7 +431,7 @@ function Write-Out([string]$Text, [string]$Color = 'Gray') {
   Write-Host $Text -ForegroundColor $Color
 }
 
-Write-Out "lanq-ready $ToolVersion (read-only: nothing is installed, changed or sent anywhere)"
+Write-Out "lanq-makeready $ToolVersion (read-only: nothing is installed, changed or sent anywhere)"
 if (-not $Quiet) {
   Write-Out ''
   foreach ($c in $checks) {
@@ -461,7 +461,7 @@ if ($Json) {
     $hostName = $facts.Hostname; $userName = $facts.User
     if ($Redact) { $hostName = '<redacted>'; $userName = '<redacted>' }
     $report = [ordered]@{
-      schema = 'lanq-ready/v1'; tool = [ordered]@{ name = 'lanq-ready'; version = $ToolVersion }
+      schema = 'lanq-makeready/v1'; tool = [ordered]@{ name = 'lanq-makeready'; version = $ToolVersion }
       generatedAt = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
       host = [ordered]@{ hostname = $hostName; user = $userName; os = "$($facts.Caption) build $($facts.Build)"; arch = $facts.Arch }
       verdicts = $verdicts
