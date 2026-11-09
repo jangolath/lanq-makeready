@@ -28,7 +28,8 @@ Status: v0.2 (unreleased). Files: `lanq-makeready.ps1` (Windows PowerShell 5.1 a
 - The only files it ever writes are the ones you name: the JSON report (`-Json` / `--json` with a path) and the
   human report (`-Out` / `--out`, a NEW file only: an existing file is never overwritten, the run stops with exit 2).
   The sh script writes it to a temp file in the same folder and links it into place with `ln`, which fails if the name
-  exists as anything (file, FIFO, device or link); the temp file is removed. Windows uses CreateNew.
+  exists as anything (file, FIFO, device or link); the temp file is removed (also on Ctrl-C). On a filesystem without
+  hard links (FAT/exFAT USB sticks) it says so; choose another folder. Windows uses CreateNew.
 - No admin/root needed. Checks that need it print `SKIP` with the reason. Running elevated just fills those rows in.
 - **No network calls at all**: no telemetry, no update check, no downloads, no DNS lookups, no pings.
 - It does not read SSH private keys. It only checks that `authorized_keys` exists and is non-empty (and, for a
@@ -224,7 +225,8 @@ What else is checked, per OS:
   CentOS, Mint), sshd `PasswordAuthentication` (a security note; `sshd -T` as root, otherwise `sshd_config` and its
   `Include` files), and automatic suspend: WARN (with the `systemctl mask` command) only when something that would
   suspend the PC is found without root: logind `IdleAction=suspend`, a laptop lid that suspends (`HandleLidSwitch`), or
-  the current user's GNOME `sleep-inactive-ac-type`. Unmasked sleep targets alone are OK with a note. An end-of-life
+  the current user's GNOME `sleep-inactive-ac-type`, or a desktop (active display manager) whose settings cannot be read
+  over SSH, since GNOME and GDM suspend on AC by default. Otherwise unmasked sleep targets are OK with a note. An end-of-life
   release means standard security support ended; Ubuntu Pro/ESM or Debian LTS may still cover it.
 - **Wake-on-LAN**: the wired adapter and its MAC; on Windows the "Wake on Magic Packet" setting, whether the adapter
   may wake the PC (`powercfg /devicequery wake_armed`) and Fast Startup (`HiberbootEnabled`); on Linux `ethtool`'s
