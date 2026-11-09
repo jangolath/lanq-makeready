@@ -170,6 +170,7 @@ function Get-DockerCheck($F) {
   if ($F.DockerServerOk) { return New-Check 'docker' $t 'OK' "engine answering (server $($F.DockerServer))" }
   if ($F.DockerCli) { return New-Check 'docker' $t 'WARN' 'client installed but engine not reachable' 'docker.daemon' }
   if (-not $F.Is64) { return New-Check 'docker' $t 'FAIL' '32-bit Windows cannot run Docker' 'arch32' }
+  if ($F.Build -lt 19041) { return New-Check 'docker' $t 'FAIL' "Windows build $($F.Build) has no WSL 2 (needs Windows 10 2004 / 19041 or newer), so Docker Desktop cannot run" 'docker.build' }
   if ($F.Build -lt 19045) { return New-Check 'docker' $t 'WARN' "Windows build $($F.Build) is below Docker's listed minimum (19045 / 22H2); usually runs" 'docker.build' }
   if ($F.IsServer) { return New-Check 'docker' $t 'WARN' 'Docker Desktop is not available on Windows Server' 'docker.server' }
   if ($F.Build -ge 22000 -and $F.Build -lt 22631) { return New-Check 'docker' $t 'WARN' "Windows 11 build $($F.Build) is below Docker's listed minimum (22631 / 23H2); usually runs" 'docker.build' }
