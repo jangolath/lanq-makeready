@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lanq-ready/v1",
+  "title": "lanq-ready report v1",
+  "type": "object",
+  "required": ["schema", "tool", "generatedAt", "host", "verdicts", "checks", "capabilities", "suggestedMachine"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "lanq-ready/v1" },
+    "tool": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": { "name": { "const": "lanq-ready" }, "version": { "type": "string" } }
+    },
+    "generatedAt": { "type": "string", "format": "date-time", "description": "UTC, ISO 8601" },
+    "host": {
+      "type": "object",
+      "required": ["os", "arch"],
+      "properties": {
+        "hostname": { "type": "string", "description": "<redacted> with --redact" },
+        "user": { "type": "string", "description": "<redacted> with --redact" },
+        "os": { "type": "string" },
+        "arch": { "type": "string" }
+      }
+    },
+    "verdicts": {
+      "type": "object",
+      "required": ["worker_git", "worker_archive", "dotnet10", "docker", "overnight"],
+      "additionalProperties": false,
+      "properties": {
+        "worker_git": { "$ref": "#/$defs/status" },
+        "worker_archive": { "$ref": "#/$defs/status" },
+        "dotnet10": { "$ref": "#/$defs/status" },
+        "docker": { "$ref": "#/$defs/status" },
+        "overnight": { "$ref": "#/$defs/status" }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "status", "detail", "advice", "needsAdmin"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "status": { "$ref": "#/$defs/status" },
+          "detail": { "type": "string" },
+          "advice": { "type": "string", "description": "Printed advice only; the tool never runs it." },
+          "needsAdmin": { "type": "boolean" }
+        }
+      }
+    },
+    "capabilities": { "type": "array", "items": { "type": "string" }, "description": "Detected AND working; OS tag omitted." },
+    "suggestedMachine": {
+      "type": "object",
+      "required": ["name", "os", "ssh", "work_root", "capabilities", "max_jobs", "transfer"],
+      "properties": {
+        "name": { "type": "string" },
+        "os": { "enum": ["windows", "linux", "macos-unsupported"] },
+        "ssh": { "type": "string", "description": "Placeholder; the user must confirm." },
+        "work_root": { "type": "string" },
+        "capabilities": { "type": "array", "items": { "type": "string" } },
+        "max_jobs": { "type": "integer", "minimum": 1 },
+        "transfer": { "enum": ["git", "archive", "none"] },
+        "allowed_hours": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$" }
+      }
+    }
+  },
+  "$defs": { "status": { "enum": ["OK", "WARN", "FAIL", "SKIP"] } }
+}
