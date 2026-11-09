@@ -20,7 +20,7 @@ advice() {
     ssh.start) echo "sshd is installed but not running. Start it yourself: sudo systemctl enable --now ssh   (the unit is called sshd on Fedora/RHEL)" ;;
     ssh.nokeys) echo "As the build user: mkdir -p ~/.ssh ; chmod 700 ~/.ssh ; append the orchestrator public key (one line) to ~/.ssh/authorized_keys ; chmod 600 ~/.ssh/authorized_keys . Fine to ignore if another user is the build user." ;;
     ssh.password) echo "Security note: sshd accepts passwords. Once key login works, make it key-only: sudoedit /etc/ssh/sshd_config.d/10-key-only.conf and add the two lines PasswordAuthentication no and KbdInteractiveAuthentication no (no sshd_config.d folder: put them near the top of /etc/ssh/sshd_config), then: sudo sshd -t && sudo systemctl reload ssh   (the unit is sshd on Fedora/RHEL)" ;;
-    os.eol) echo "This release no longer gets security updates. It still works for LanQueue, but upgrade when you can: Ubuntu: sudo do-release-upgrade (to a supported LTS such as 24.04) ; Debian: follow the release notes for Debian 13 ; or reinstall a supported release." ;;
+    os.eol) echo "Standard security support for this release has ended (Ubuntu LTS: Ubuntu Pro/ESM may still cover it, check with: pro status ; Debian: Debian LTS/ELTS may cover older releases). It still works for LanQueue, but upgrade when you can: Ubuntu: sudo do-release-upgrade (to a supported LTS such as 24.04) ; Debian: follow the release notes for Debian 13 ; or reinstall a supported release." ;;
     ssh.mac) echo "On macOS check System Settings > General > Sharing > Remote Login yourself. Note: LanQueue v0.3 workers are windows|linux only." ;;
     git.install) echo "git is only needed for transfer: git. Without it use transfer: archive, or install git with your package manager." ;;
     tar.busybox) echo "busybox tar (Alpine, minimal images) is refused by LanQueue for transfer: archive. Install GNU tar or bsdtar, for example on Alpine: apk add tar" ;;
@@ -171,19 +171,19 @@ classify_tar() { # text of tar --version (stderr included) -> gnu | bsd | busybo
   esac
 }
 
-distro_eol() { # $1 = os-release ID, $2 = VERSION_ID -> last month with security support (YYYYMM); empty = unknown
+distro_eol() { # $1 = os-release ID, $2 = VERSION_ID -> last month with standard security support (YYYYMM), "old" = older than this table, empty = unknown
   _M=${2%%.*}; _m=${2#*.}; [ "$_m" = "$2" ] && _m=0; _m=${_m%%.*}; case "$_m" in 0?*) _m=${_m#0} ;; esac
   case "$_M:$_m" in *[!0-9:]*|:*|*:) return 0 ;; esac
   case "$1" in
     ubuntu) _y=$((2000 + _M))
-      if [ "$_m" = 4 ] && [ $((_M % 2)) = 0 ]; then _y=$((_y + 5)); echo "$((_y * 100 + 5))" # LTS: 5 years
+      if [ "$_M" -lt 16 ]; then echo old
+      elif [ "$_M" = 16 ] && [ "$_m" = 4 ]; then echo 202104
+      elif [ "$_m" = 4 ] && [ $((_M % 2)) = 0 ]; then _y=$((_y + 5)); echo "$((_y * 100 + 5))" # LTS: 5 years
       else _t=$((_y * 12 + _m + 8)); _y=$((_t / 12)); echo "$((_y * 100 + _t % 12 + 1))"; fi ;; # interim: 9 months
-    debian|raspbian) case "$_M" in 10) echo 202406 ;; 11) echo 202608 ;; 12) echo 202806 ;; 13) echo 203006 ;; *) [ "$_M" -lt 10 ] && echo 201801 ;; esac ;;
-    alpine) [ "$_M" = 3 ] || return 0
-      if [ "$_m" -lt 17 ]; then echo 202001
-      elif [ $((_m % 2)) = 1 ]; then _y=$((_m - 17)); _y=$((2024 + _y / 2)); echo "$((_y * 100 + 11))"
-      else _y=$((_m - 18)); _y=$((2025 + _y / 2)); echo "$((_y * 100 + 5))"; fi ;;
-    fedora) case "$_M" in 39) echo 202411 ;; 40) echo 202505 ;; 41) echo 202511 ;; 42) echo 202605 ;; 43) echo 202612 ;; *) [ "$_M" -lt 39 ] && echo 202001 ;; esac ;;
+    debian|raspbian) case "$_M" in 10) echo 202406 ;; 11) echo 202608 ;; 12) echo 202806 ;; 13) echo 203006 ;; *) [ "$_M" -lt 10 ] && echo old ;; esac ;;
+    alpine) [ "$_M" = 3 ] || return 0 # official end dates (alpinelinux.org/releases) are the 1st of a month: the month before is the last
+      case "$_m" in 17) echo 202410 ;; 18) echo 202504 ;; 19) echo 202510 ;; 20) echo 202603 ;; 21) echo 202610 ;; 22) echo 202704 ;; 23) echo 202710 ;; *) [ "$_m" -lt 17 ] && echo old ;; esac ;;
+    fedora) case "$_M" in 39) echo 202411 ;; 40) echo 202505 ;; 41) echo 202512 ;; 42) echo 202605 ;; 43) echo 202612 ;; *) [ "$_M" -lt 39 ] && echo old ;; esac ;;
     centos) case "$_M" in 7) echo 202406 ;; 8) echo 202112 ;; 9) echo 202705 ;; esac ;;
     linuxmint) case "$_M" in 19) echo 202304 ;; 20) echo 202504 ;; 21) echo 202704 ;; 22) echo 202904 ;; esac ;;
     *) ;;
@@ -200,7 +200,22 @@ sshd_pw_auth() { # sshd config text on stdin -> yes | no | unset (the first valu
   awk 'BEGIN { v = "unset" } { sub(/^[ \t]+/, ""); n = split($0, a, /[ \t=]+/); k = tolower(a[1]) } k == "match" { exit } k == "passwordauthentication" && n >= 2 { v = tolower(a[2]); exit } END { print v }'
 }
 
-# Pool sizing: LanQueue's lanq health uses the same thresholds. $1 = RAM in whole GB, $2 = logical CPUs.
+logind_values() { # logind.conf text (main file, then drop-ins) on stdin -> "IdleAction HandleLidSwitch HandleLidSwitchExternalPower", "-" when unset; the last value wins
+  awk '/^[ \t]*[#;]/ { next } { gsub(/[ \t]/, "") } /^IdleAction=/ { i = substr($0, 12) } /^HandleLidSwitch=/ { l = substr($0, 17) } /^HandleLidSwitchExternalPower=/ { e = substr($0, 30) } END { print (i == "" ? "-" : i) " " (l == "" ? "-" : l) " " (e == "" ? "-" : e) }'
+}
+
+logind_auto_suspend() { # $1 idle $2 lid $3 lid-on-AC $4 laptop(yes|no) -> what would suspend this PC, empty = nothing found
+  case "$1" in suspend|hibernate|hybrid-sleep|suspend-then-hibernate|sleep) echo "logind IdleAction=$1"; return 0 ;; esac
+  [ "$4" = yes ] || return 0
+  _la=$3; [ "$_la" = - ] && _la=$2
+  case "$_la" in
+    -) echo "laptop lid: HandleLidSwitch default (suspend)" ;;
+    suspend|hibernate|hybrid-sleep|suspend-then-hibernate|sleep) echo "laptop lid: HandleLidSwitch=$_la" ;;
+  esac
+  return 0
+}
+
+# Pool sizing, the thresholds LanQueue 0.5.1+ lanq health uses. $1 = RAM in whole GB, $2 = logical CPUs (24-31 GB counts as the top band).
 suggest_jobs() {
   if [ "$1" -lt 6 ]; then _j=1; elif [ "$1" -lt 12 ]; then _j=2
   elif [ "$1" -lt 24 ]; then _j=3; [ "$2" -ge 8 ] && _j=4
@@ -224,7 +239,8 @@ eval_checks() { # reads F_* facts, fills CHECKS
   if [ "$F_OS" = Darwin ]; then add_check os.version OS FAIL "$_os (macOS): LanQueue workers are windows|linux only" os.mac
   else
     _eol=$(distro_eol "${F_OSID:-}" "${F_OSVERID:-}")
-    if [ -n "$_eol" ] && [ "${F_NOW_YM:-0}" -gt "$_eol" ]; then add_check os.version OS WARN "$_os: end of life (security updates ended ${_eol%??}-${_eol#????})" os.eol
+    if [ "$_eol" = old ]; then add_check os.version OS WARN "$_os: end of life (older than this table)" os.eol
+    elif [ -n "$_eol" ] && [ "${F_NOW_YM:-0}" -gt "$_eol" ]; then add_check os.version OS WARN "$_os: end of life: standard security support ended after ${_eol%??}-${_eol#????}" os.eol
     else add_check os.version OS OK "$_os"; fi
   fi
   case "$F_ARCH" in
@@ -278,7 +294,7 @@ eval_checks() { # reads F_* facts, fills CHECKS
   case "$F_SLEEP" in
     never|masked) add_check power.sleep "Sleep/suspend" OK "will not sleep ($F_SLEEP)" ;;
     sleeps) add_check power.sleep "Sleep/suspend" WARN "may sleep: ${F_SLEEP_DETAIL:-idle suspend enabled}" power.sleep ;;
-    unmasked) add_check power.sleep "Sleep/suspend" WARN "systemd sleep targets are not masked: the PC can suspend (idle, lid or power key)" power.sleep ;;
+    unmasked) add_check power.sleep "Sleep/suspend" OK "sleep targets are not masked, but no automatic suspend is configured (logind idle and lid, GNOME); masking them makes an always-on PC certain" ;;
     *) add_check power.sleep "Sleep/suspend" SKIP "could not determine (no pmset, gsettings or systemd)" ;;
   esac
   if [ "$F_REBOOT" = yes ]; then add_check reboot.pending "Pending reboot" WARN "a restart is pending" reboot.pending
@@ -443,6 +459,9 @@ render_snippet() {
   if [ -n "$M_HOURS" ]; then echo "    allowed_hours: \"$M_HOURS\"   # the PC's own clock"
   else echo "    # allowed_hours: \"22:00-07:00\"   # optional: run jobs only overnight (the PC's own clock)"; fi
   if [ -z "$F_WOL_IF" ]; then echo "    # wake: not suggested: no wired Ethernet adapter found"
+  elif [ "$M_WAKE" = yes ] && [ "$F_WOL_MAC" = "<mac>" ]; then
+    echo "    # wake:   # Wake-on-LAN looks ready; <mac> is a placeholder (redacted): put this PC's wired MAC here and uncomment"
+    echo "    #   mac: \"<mac>\""
   elif [ "$M_WAKE" = yes ]; then
     echo "    wake:   # Wake-on-LAN (LanQueue 0.5+); test it: lanq wake $M_NAME --wait"
     echo "      mac: \"$F_WOL_MAC\""
@@ -593,8 +612,7 @@ sshd_conf_lines() { # $1 = file, $2 = depth: prints its lines in order with Incl
           case "$_g" in /*) ;; *) _g=/etc/ssh/$_g ;; esac
           for _f in $_g; do sshd_conf_lines "$_f" $(($2 + 1)); done
         done ;;
-      *) printf '%s
-' "$_l" ;;
+      *) printf '%s\n' "$_l" ;;
     esac
   done < "$1"
 }
@@ -616,10 +634,8 @@ gather_wol() { # physical wired NIC, its MAC, and ethtool Wake-on when readable 
   if have ethtool; then _et=ethtool; elif [ -x /usr/sbin/ethtool ]; then _et=/usr/sbin/ethtool; elif [ -x /sbin/ethtool ]; then _et=/sbin/ethtool; fi
   [ -n "$_et" ] || return 0
   _eo=$(run_t 5 "$_et" "$F_WOL_IF" 2>/dev/null)
-  F_WOL_SUP=$(printf '%s
-' "$_eo" | sed -n 's/^[[:space:]]*Supports Wake-on:[[:space:]]*//p' | head -n 1)
-  F_WOL_ON=$(printf '%s
-' "$_eo" | sed -n 's/^[[:space:]]*Wake-on:[[:space:]]*//p' | head -n 1)
+  F_WOL_SUP=$(printf '%s\n' "$_eo" | sed -n 's/^[[:space:]]*Supports Wake-on:[[:space:]]*//p' | head -n 1)
+  F_WOL_ON=$(printf '%s\n' "$_eo" | sed -n 's/^[[:space:]]*Wake-on:[[:space:]]*//p' | head -n 1)
 }
 
 gather_facts() {
@@ -676,11 +692,18 @@ gather_facts() {
     done
     if [ "$_ssd" = 1 ]; then F_DISK=SSD; elif [ "$_hdd" = 1 ]; then F_DISK=HDD; fi
     if have systemctl && { [ "$(run_t 5 systemctl is-enabled sleep.target 2>/dev/null)" = masked ] || [ "$(run_t 5 systemctl is-enabled suspend.target 2>/dev/null)" = masked ]; }; then F_SLEEP=masked
-    elif have gsettings && have_session_bus; then
-      _gt=$(run_t 5 gsettings get org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 2>/dev/null)
-      case "$_gt" in *nothing*) F_SLEEP=never ;; ?*) F_SLEEP=sleeps; F_SLEEP_DETAIL="GNOME idle action $_gt on AC" ;; esac
+    elif have systemctl && [ -d /run/systemd/system ]; then
+      F_SLEEP=unmasked
+      _lap=no; for _x in /proc/acpi/button/lid/*; do [ -e "$_x" ] && _lap=yes; done
+      _lv=$(for _x in /etc/systemd/logind.conf /usr/lib/systemd/logind.conf.d/*.conf /run/systemd/logind.conf.d/*.conf /etc/systemd/logind.conf.d/*.conf; do [ -r "$_x" ] && cat "$_x"; done | logind_values)
+      # shellcheck disable=SC2086
+      _ld=$(logind_auto_suspend $_lv "$_lap")
+      if [ -n "$_ld" ]; then F_SLEEP=sleeps; F_SLEEP_DETAIL=$_ld
+      elif have gsettings && have_session_bus; then
+        _gt=$(run_t 5 gsettings get org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 2>/dev/null)
+        case "$_gt" in *nothing*|"") ;; *) F_SLEEP=sleeps; F_SLEEP_DETAIL="GNOME idle action $_gt on AC (this user)" ;; esac
+      fi
     fi
-    [ "$F_SLEEP" = unknown ] && have systemctl && [ -d /run/systemd/system ] && F_SLEEP=unmasked
     [ -e /var/run/reboot-required ] && F_REBOOT=yes
     gather_wol
     if have systemctl && have_session_bus; then F_STARTUP=$(run_t 5 systemctl --user list-unit-files --state=enabled 2>/dev/null | grep -c '\.service'); fi
@@ -728,6 +751,18 @@ gather_facts() {
   F_TEMP=$_tm
 }
 
+# --out: the report goes to a new temp file (created with O_EXCL) in the same folder, then ln puts it in place.
+# link(2) fails if the name exists as anything (file, FIFO, device, link), so nothing is ever overwritten or written through.
+save_out() {
+  [ -e "$OUT_PATH" ] || [ -L "$OUT_PATH" ] && return 1
+  case "$OUT_PATH" in */*) _odir=${OUT_PATH%/*}; [ -n "$_odir" ] || _odir=/ ;; *) _odir=. ;; esac
+  _otmp=$(mktemp "$_odir/.lanq-makeready.XXXXXX" 2>/dev/null) || return 1
+  printf '%s\n' "$1" > "$_otmp"
+  ln -- "$_otmp" "$OUT_PATH" 2>/dev/null; _ok=$?
+  rm -f -- "$_otmp"
+  return "$_ok"
+}
+
 # ---------- main ----------
 
 main() {
@@ -761,14 +796,12 @@ main() {
   _report=$(render_human)
   if [ "$JSON_PATH" = "-" ]; then render_json "$REDACT"
   else
-    printf '%s
-' "$_report"
+    printf '%s\n' "$_report"
     [ -n "$JSON_PATH" ] && render_json "$REDACT" > "$JSON_PATH"
   fi
-  # the only other write: a NEW file the user named (noclobber refuses an existing one)
-  if [ -n "$OUT_PATH" ] && ! ( set -C; printf '%s
-' "$_report" > "$OUT_PATH" ) 2>/dev/null; then
-    echo "lanq-makeready: could not create $OUT_PATH (it exists now, or the folder is not writable)." >&2
+  # the only other write: a NEW file the user named
+  if [ -n "$OUT_PATH" ] && ! save_out "$_report"; then
+    echo "lanq-makeready: could not create $OUT_PATH (it exists now, or the folder is not writable); nothing was written." >&2
   fi
   if [ "$V_GIT" != FAIL ] || [ "$V_ARCHIVE" != FAIL ]; then exit 0; fi
   exit 1

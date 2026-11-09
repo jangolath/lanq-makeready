@@ -126,12 +126,27 @@ eq "$(distro_eol ubuntu 24.04)" 202905 "Ubuntu 24.04 LTS: 2029-05"
 eq "$(distro_eol ubuntu 25.10)" 202607 "Ubuntu 25.10 interim: 9 months"
 eq "$(distro_eol debian 11)" 202608 "Debian 11: LTS to 2026-08"
 eq "$(distro_eol debian 12)" 202806 "Debian 12: LTS to 2028-06"
-eq "$(distro_eol alpine 3.21.2)" 202611 "Alpine 3.21: 2026-11"
-eq "$(distro_eol alpine 3.22.0)" 202705 "Alpine 3.22: 2027-05"
+eq "$(distro_eol alpine 3.19.1)" 202510 "Alpine 3.19: EOL 2025-11-01, last month 2025-10"
+eq "$(distro_eol alpine 3.20.3)" 202603 "Alpine 3.20: EOL 2026-04-01, last month 2026-03"
+eq "$(distro_eol alpine 3.21.2)" 202610 "Alpine 3.21: EOL 2026-11-01, last month 2026-10"
+eq "$(distro_eol alpine 3.22.0)" 202704 "Alpine 3.22: EOL 2027-05-01, last month 2027-04"
+eq "$(distro_eol alpine 3.23.0)" 202710 "Alpine 3.23: EOL 2027-11-01, last month 2027-10"
+eq "$(distro_eol alpine 3.16.0)" old "Alpine 3.16: older than the table"
+eq "$(distro_eol fedora 41)" 202512 "Fedora 41: 2025-12-15"
+eq "$(distro_eol ubuntu 16.04)" 202104 "Ubuntu 16.04: 2021-04"
+eq "$(distro_eol ubuntu 14.04)" old "Ubuntu 14.04: older than the table"
+eq "$(distro_eol debian 9)" old "Debian 9: older than the table"
+fixture_ubuntu; F_OSID=alpine; F_OSVERID=3.21.2; F_NOW_YM=202611; run
+eq "$(st os.version)" WARN "Alpine 3.21 on 2026-11-09 is end of life"
+fixture_ubuntu; F_OSID=alpine; F_OSVERID=3.21.2; F_NOW_YM=202610; run
+eq "$(st os.version)" OK "Alpine 3.21 in 2026-10 is still supported"
+fixture_ubuntu; F_OSID=debian; F_OSVERID=8; run
+contains "$(printf '%s' "$CHECKS" | grep '^os.version')" "end of life (older than this table)" "catch-all bucket: no invented date"
 eq "$(distro_eol arch "")" "" "unknown distro: no date"
 fixture_ubuntu; F_OSVERID=20.04; F_OSNAME="Ubuntu 20.04.6 LTS"; run
 eq "$(st os.version)" WARN "Ubuntu 20.04 in 2026-11: os.version WARN"
-contains "$(printf '%s' "$CHECKS" | grep '^os.version')" "end of life (security updates ended 2025-05)" "EOL detail has the date"
+contains "$(printf '%s' "$CHECKS" | grep '^os.version')" "standard security support ended after 2025-05" "EOL detail has the last month"
+contains "$(printf '%s' "$CHECKS" | grep '^os.version')" "Ubuntu Pro/ESM may still cover it" "EOL advice is honest about ESM"
 contains "$(printf '%s' "$CHECKS" | grep '^os.version')" "do-release-upgrade" "EOL advice has the command"
 fixture_ubuntu; F_OSID=debian; F_OSVERID=11; run
 eq "$(st os.version)" WARN "Debian 11 in 2026-11: WARN"
@@ -156,8 +171,20 @@ eq "$(st ssh.password)" SKIP "unreadable config: SKIP"
 
 echo "Linux: sleep targets"
 fixture_ubuntu; F_SLEEP=unmasked; run
-eq "$(st power.sleep)" WARN "sleep targets not masked: WARN"
+eq "$(st power.sleep)" OK "sleep targets not masked, no auto-suspend configured: OK with a note"
+contains "$(printf '%s' "$CHECKS" | grep '^power.sleep')" "not masked, but no automatic suspend" "OK row explains"
+fixture_ubuntu; F_SLEEP=sleeps; F_SLEEP_DETAIL="logind IdleAction=suspend"; run
+eq "$(st power.sleep)" WARN "auto-suspend configured: WARN"
 contains "$(printf '%s' "$CHECKS" | grep '^power.sleep')" "sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target" "mask command printed"
+eq "$(printf '[Login]\n#IdleAction=ignore\nIdleAction=suspend\n' | logind_values)" "suspend - -" "logind: IdleAction read, comments skipped"
+eq "$(printf '[Login]\nIdleAction=suspend\n[Login]\nIdleAction=ignore\nHandleLidSwitch=lock\n' | logind_values)" "ignore lock -" "logind: later drop-in wins"
+eq "$(printf 'HandleLidSwitchExternalPower = ignore\n' | logind_values)" "- - ignore" "logind: external-power lid action"
+eq "$(logind_auto_suspend suspend - - no)" "logind IdleAction=suspend" "idle suspend detected"
+eq "$(logind_auto_suspend ignore - - no)" "" "desktop, idle ignore: no auto-suspend"
+eq "$(logind_auto_suspend - - - yes)" "laptop lid: HandleLidSwitch default (suspend)" "laptop with default lid action: suspends"
+eq "$(logind_auto_suspend - ignore - yes)" "" "laptop, lid ignored: no auto-suspend"
+eq "$(logind_auto_suspend - suspend ignore yes)" "" "laptop on AC, external-power lid ignored: no auto-suspend"
+eq "$(logind_auto_suspend - - - no)" "" "desktop without lid: lid setting irrelevant"
 
 echo "Linux: Wake-on-LAN"
 nics='lo 772 no no unknown 00:00:00:00:00:00
@@ -186,7 +213,9 @@ eq "$(st wol)" WARN "Wi-Fi only: WARN"
 contains "$(render_snippet)" "# wake: not suggested" "snippet: no wake block without a wired NIC"
 red=$( fixture_ubuntu; redact_facts; run; render_snippet; render_json 1 )
 if printf '%s' "$red" | grep -q '10:20:30:aa:bb:cc'; then bad "MAC redacted" leaked hidden; else ok "redaction hides the MAC"; fi
-contains "$red" 'mac: "<mac>"' "redacted snippet uses a <mac> placeholder"
+contains "$red" '    #   mac: "<mac>"' "redacted snippet: <mac> placeholder is commented out"
+contains "$red" "placeholder" "redacted snippet says the MAC is a placeholder"
+if printf '%s\n' "$red" | grep -q '^    wake:'; then bad "redacted wake active" yes no; else ok "redacted snippet: no active wake: with a placeholder MAC"; fi
 
 echo "low RAM and swap"
 fixture_ubuntu; F_RAMMB=4096; F_SWAPMB=0; run
@@ -206,7 +235,8 @@ fixture_ubuntu; F_SYSFREEGB=15; run
 contains "$(printf '%s' "$CHECKS" | grep '^disk')" "15 GB free" "low disk: says the free space"
 contains "$(printf '%s' "$CHECKS" | grep '^disk')" "recommended: at least 20 GB free" "low disk: says the recommended minimum"
 
-echo "pool sizing tiers (same thresholds as lanq health)"
+echo "pool sizing tiers (the thresholds LanQueue 0.5.1+ lanq health uses)"
+eq "$(suggest_jobs 24 8)" 6 "24-31 GB counts as the top band"
 eq "$(suggest_jobs 4 4)" 1 "4 GB: max_jobs 1"
 eq "$(suggest_jobs 8 8)" 2 "8 GB: max_jobs 2"
 eq "$(suggest_jobs 8 1)" 1 "8 GB, 1 CPU: capped by cores"
@@ -355,12 +385,13 @@ cmd_words() {
       }
     }' | sort -u
 }
-allowed=" printf echo awk sed tr cut head wc grep find cat command readlink uname hostname id df getconf ldd sw_vers sysctl vm_stat pmset launchctl pgrep systemctl gsettings xcode-select docker git tar gzip du date sleep kill wait timeout gtimeout sh exec cd exit return export eval read test /usr/libexec/java_home type shift sort true false break continue fi done esac then else elif do in while for if case until set [ ]] "
+allowed=" printf echo awk sed tr cut head wc grep find cat command readlink uname hostname id df getconf ldd sw_vers sysctl vm_stat pmset launchctl pgrep systemctl gsettings xcode-select docker git tar gzip du date sleep kill wait timeout gtimeout sh exec cd exit return export eval read test /usr/libexec/java_home type shift sort true false break continue fi done esac then else elif do in while for if case until [ ]] "
 forbidden=" sudo chmod chown apk apt apt-get dnf yum rm mv cp ln mkdir touch tee curl wget nc ssh scp mount dd su install useradd passwd iex bash "
 # guard_check FILE: prints one line per violation (nothing when clean)
 guard_check() {
   _f=$1
   _code=$(awk '/^# BEGIN ADVICE$/ {skip=1} !skip {print} /^# END ADVICE$/ {skip=0}' "$_f")
+  _code=$(printf '%s\n' "$_code" | grep -vxF -e '  _otmp=$(mktemp "$_odir/.lanq-makeready.XXXXXX" 2>/dev/null) || return 1' -e '  ln -- "$_otmp" "$OUT_PATH" 2>/dev/null; _ok=$?' -e '  rm -f -- "$_otmp"')
   _fns=$(grep -E '^[a-z_0-9]+\(\)' "$_f" | sed 's/().*//')
   for _w in $(printf '%s\n' "$_code" | cmd_words); do
     case "$allowed" in *" $_w "*) continue ;; esac
@@ -383,7 +414,7 @@ guard_check() {
   printf '%s\n' "$_code" | awk "$scan_awk"'
     /^[ \t]*#/ { next }
     { raw = $0
-      gsub(/2>\/dev\/null|>\/dev\/null|2>&1|>&2|>&1|> "\$JSON_PATH"|>"\$JSON_PATH"|> "\$out"|> "\$OUT_PATH"/, "", raw)
+      gsub(/2>\/dev\/null|>\/dev\/null|2>&1|>&2|>&1|> "\$JSON_PATH"|>"\$JSON_PATH"|> "\$out"|> "\$OUT_PATH"|> "\$_otmp"/, "", raw)
       if (scan(raw) ~ />/) print "redirection: " $0 }'
   printf '%s\n' "$_code" | grep -E 'eval ' | grep -vE 'F_T_|_v=' | sed 's/^/eval of something else: /'
 }
@@ -416,9 +447,13 @@ mutant "unknown command" "nmap localhost"
 mutant "ethtool -s (changes the NIC)" 'run_t 5 "$_et" -s eth0 wol g'
 mutant "ethtool -K" 'run_t 5 ethtool -K eth0 tso off'
 mutant "redirect to another variable" 'printf x > "$JSON_PATH.bak"'
+mutant "rm of something else" 'rm -f -- "$JSON_PATH"'
+mutant "ln of something else" 'ln -- /etc/passwd "$OUT_PATH"'
 mutant "set -C used to write elsewhere" '( set -C; echo x > /tmp/x )'
 rm -rf "$mut_dir"
 eq "$(printf '%s\n' "x=1" | cmd_words)" "" "tokenizer ignores assignments"
+eq "$(grep -c '^  ln -- "$_otmp" "$OUT_PATH"' "$root/lanq-makeready.sh"):$(grep -c 'rm -f -- "$_otmp"' "$root/lanq-makeready.sh"):$(grep -c 'mktemp' "$root/lanq-makeready.sh")" "1:1:1" "the only ln, rm and mktemp are the --out temp-file lines"
+eq "$([ -e "$root/SHA256SUMS" ] && echo committed || echo none)" none "SHA256SUMS is produced by the release workflow, never committed (a stale copy would mislead)"
 lines=$(wc -l < "$root/lanq-makeready.sh" | tr -d ' ')
 if [ "$lines" -le 900 ]; then ok "script is $lines lines (max 900)"; else bad "line count" "$lines" "<=900"; fi
 
@@ -448,7 +483,16 @@ printf 'keep me\n' > "$od/exists.txt"
 eq "$(LANQ_MAKEREADY_LIB=0 sh "$root/lanq-makeready.sh" --out "$od/exists.txt" >/dev/null 2>&1; echo $?)" 2 "--out to an existing file: exit 2"
 eq "$(cat "$od/exists.txt")" "keep me" "--out: existing file left untouched"
 eq "$(LANQ_MAKEREADY_LIB=0 sh "$root/lanq-makeready.sh" --out >/dev/null 2>&1; echo $?)" 2 "--out without a name: exit 2"
-eq "$(ls "$od" | wc -l | tr -d ' ')" 3 "--out: no other file written"
+eq "$(ls -a "$od" | wc -l | tr -d ' ')" 5 "--out: no other file written (no temp file left)"
+if command -v mkfifo >/dev/null 2>&1; then
+  mkfifo "$od/fifo"
+  eq "$(OUT_PATH="$od/fifo"; save_out "x" >/dev/null 2>&1; echo $?)" 1 "save_out: a FIFO that appeared after the first check is refused (no blocking write)"
+fi
+ln -s "$od/nowhere" "$od/dangling"
+eq "$(OUT_PATH="$od/dangling"; save_out "x" >/dev/null 2>&1; echo $?)" 1 "save_out: a dangling symlink is refused"
+eq "$([ -e "$od/nowhere" ] && echo created || echo absent)" absent "save_out: nothing created through the symlink"
+eq "$(OUT_PATH="$od/new.txt"; save_out "hello" 2>/dev/null; cat "$od/new.txt")" hello "save_out: writes a new file"
+eq "$(for _t in "$od"/.lanq-makeready.*; do [ -e "$_t" ] && echo left; done)" "" "save_out: temp files removed"
 rm -rf "$od"
 
 echo "smoke: stdout JSON mode (the SSH invocation)"
