@@ -490,7 +490,10 @@ od=${TMPDIR:-/tmp}/lanq-out.$$; mkdir -p "$od"
 LANQ_MAKEREADY_LIB=0 sh "$root/lanq-makeready.sh" --out "$od/r.txt" --redact >"$od/screen.txt" 2>&1; rc=$?
 case "$rc" in 0|1) ok "--out: exit $rc" ;; *) bad "--out exit" "$rc" "0 or 1" ;; esac
 eq "$(sed -n 2p "$od/r.txt" 2>/dev/null | cut -c1-8)" "VERDICT:" "--out: file holds the report (verdict on line 2)"
-eq "$(cmp -s "$od/r.txt" "$od/screen.txt" && echo same)" same "--out: file equals the screen report"
+if cmp -s "$od/r.txt" "$od/screen.txt"; then ok "--out: file equals the screen report"; else
+  bad "--out: file equals the screen report" differs same
+  echo "    --- diff (file vs screen, screen includes stderr):"; diff "$od/r.txt" "$od/screen.txt" | head -20 | sed 's/^/    /'
+fi
 printf 'keep me\n' > "$od/exists.txt"
 eq "$(LANQ_MAKEREADY_LIB=0 sh "$root/lanq-makeready.sh" --out "$od/exists.txt" >/dev/null 2>&1; echo $?)" 2 "--out to an existing file: exit 2"
 eq "$(cat "$od/exists.txt")" "keep me" "--out: existing file left untouched"
