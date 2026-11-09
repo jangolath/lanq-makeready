@@ -21,20 +21,22 @@ function New-Facts([hashtable]$Over = @{}) {
     SshdInstalled = $true; SshdRunning = $true; SshdStartType = 'Automatic'; SshFirewall = $true; IsAdminUser = $false; AuthKeysNonEmpty = $true
     GitVer = 'git version 2.45.0'; GitLongPaths = $true; TarBsd = $true; LongPaths = $true; DotnetSdks = @(10)
     DockerCli = $true; DockerServerOk = $true; DockerServer = '27.0'; WslOk = $true; Tools = @{ node = 'v22.1.0' }
-    StandbyAcSec = 0; HibernateAcSec = 0; RebootPending = $false; WolAdapters = 0; StartupCount = 5; StartupNames = @()
+    StandbyAcSec = 0; HibernateAcSec = 0; RebootPending = $false; StartupCount = 5; StartupNames = @()
+    WolProbe = $true; WolWifi = $false; WolNic = 'Ethernet'; WolMac = '10:20:30:aa:bb:cc'; WolMagic = 'Enabled'; WolArmed = $true; FastStartup = $false; SwapMB = 4096
     TempSizes = @(); DefenderRtp = $false; DevDrive = $true; ProblemDevices = @(); Hours = $null }
   foreach ($k in $Over.Keys) { $f[$k] = $Over[$k] }
   return $f
 }
-function Run($F) { $c = Get-Checks $F; return @{ C = $c; V = (Get-Verdicts $c $F); M = (Get-Machine $F $null $F.Hours $false) } }
+function Run($F) { $c = Get-Checks $F; $v = Get-Verdicts $c $F; return @{ C = $c; V = $v; M = (Get-Machine $F $v $F.Hours $false); S = (Get-Summary $c $v $F) } }
+function StepIds($R) { (@($R.S.nextSteps) | ForEach-Object { $_.id }) -join ' ' }
 function St($R, [string]$Id) { ($R.C | Where-Object { $_.id -eq $Id }).status }
 function Ck($R, [string]$Id) { $R.C | Where-Object { $_.id -eq $Id } }
 
 Write-Host 'verdicts: Windows 11, 16 GB, SSD, all good'
 $r = Run (New-Facts)
 foreach ($k in 'worker_git', 'worker_archive', 'dotnet10', 'docker', 'overnight') { Assert-Equal $r.V[$k] 'OK' "good: $k" }
-Assert-Equal $r.M.max_jobs 1 'good: 4 threads -> max_jobs 1'
-Assert-Equal (Run (New-Facts @{ Logical = 16 })).M.max_jobs 2 'good: 16 threads + 16 GB -> max_jobs 2'
+Assert-Equal $r.M.max_jobs 3 'good: 16 GB, 4 threads -> max_jobs 3 (16 GB tier)'
+Assert-Equal (Run (New-Facts @{ Logical = 16 })).M.max_jobs 4 'good: 16 threads + 16 GB -> max_jobs 4 (16 GB tier)'
 
 Write-Host 'verdicts: consumer Windows 10 22H2, 4 GB, HDD, no sshd'
 $r = Run (New-Facts @{ Caption = 'Windows 10 Home'; Build = 19045; EditionId = 'Core'; RamGB = 3; DiskMedia = 'HDD'; SshdInstalled = $false; SshdRunning = $null
@@ -61,7 +63,7 @@ $r = Run (New-Facts @{ GitVer = $null })
 Assert-Equal $r.V.worker_git 'FAIL' 'no git: worker_git FAIL'
 Assert-Equal $r.V.worker_archive 'OK' 'no git: worker_archive OK'
 Assert-Equal $r.M.transfer 'archive' 'no git: suggested transfer archive'
-Assert-True ((Format-Snippet $r.M $r.V) -contains '    transfer: archive') 'no git: snippet says transfer: archive'
+Assert-True ((Format-Snippet $r.M $r.V (New-Facts @{ GitVer = $null })) -contains '    transfer: archive') 'no git: snippet says transfer: archive'
 Assert-Equal (Run (New-Facts @{ GitVer = $null; TarBsd = $false })).V.worker_archive 'FAIL' 'no git, no tar: archive FAIL'
 
 Write-Host 'verdicts: Docker with HypervisorPresent true, firmware flag false'
@@ -79,6 +81,120 @@ Assert-Equal $r.V.docker 'WARN' '6 GB: docker WARN'
 Assert-True ((Ck $r 'docker').advice -match 'Docker Engine inside WSL') '6 GB: advice names Engine in WSL'
 Assert-Equal (St (Run (New-Facts @{ RamGB = 1.5 })) 'ram') 'FAIL' 'under 2 GB: ram FAIL'
 
+Write-Host 'verdict line and next steps'
+$r = Run (New-Facts)
+Assert-Equal $r.S.text 'READY' 'all good: READY'
+Assert-Equal @($r.S.nextSteps).Count 0 'all good: no next steps'
+$r = Run (New-Facts @{ RebootPending = $true; LongPaths = $false })
+Assert-Equal $r.S.text 'READY WITH WARNINGS (2)' 'two warnings: READY WITH WARNINGS (2)'
+$r = Run (New-Facts @{ SshdInstalled = $false; SshdRunning = $null; RebootPending = $true })
+Assert-Equal $r.S.text 'NOT READY (1 blocker)' 'no sshd: NOT READY (1 blocker)'
+Assert-Equal (StepIds $r) 'ssh.server reboot.pending' 'blocker first, then warnings'
+$fs = (Format-Steps $r.S) -join "`n"
+Assert-True ($fs -match ' 1\. \[MUST FIX\] OpenSSH Server: not installed') 'step 1 is MUST FIX'
+Assert-True ($fs -match 'do \(needs admin: elevated PowerShell\): Install OpenSSH Server yourself') 'step names the command and that it needs admin'
+Assert-True ($fs -match ' 2\. \[should fix\] Pending reboot' -and $fs -match 'do \(no admin needed\)') 'warning step: should fix, no admin'
+Assert-Equal (Run (New-Facts @{ SshdInstalled = $false; SshdRunning = $null; SysFreeGB = 5 })).S.text 'NOT READY (2 blockers)' 'two FAILs: 2 blockers'
+$r = Run (New-Facts @{ GitVer = $null; TarBsd = $false })
+Assert-Equal $r.S.text 'NOT READY (2 blockers)' 'no git and no tar: both are blockers'
+$r = Run (New-Facts @{ GitVer = $null; SshdInstalled = $false; SshdRunning = $null })
+Assert-Equal (StepIds $r) 'ssh.server git' 'no sshd, no git but tar ok: git stays a warning'
+Assert-Equal $r.S.blockers 1 'no sshd, no git but tar ok: 1 blocker'
+Assert-Equal (Run (New-Facts @{ Is64 = $false; Arch = 'x86'; DockerCli = $false; DockerServerOk = $false })).S.verdict 'READY_WITH_WARNINGS' 'a Docker FAIL does not block the worker'
+$j = ConvertTo-AsciiJson (New-Report (New-Facts) $r.C $r.V $r.M '0.2.0' $r.S) | ConvertFrom-Json
+Assert-Equal $j.summary.verdict 'NOT_READY' 'JSON summary.verdict'
+Assert-Equal $j.summary.nextSteps[0].id 'ssh.server' 'JSON first next step'
+Assert-True ($j.summary.nextSteps[0].blocker -is [bool] -and $j.summary.nextSteps[0].adminToFix -eq $true) 'JSON step: blocker and adminToFix are booleans'
+
+Write-Host 'Windows 10 specifics'
+$r = Run (New-Facts @{ Caption = 'Windows 10 Pro'; Build = 19045 })
+Assert-True ((Ck $r 'os.version').detail -match 'past end of support \(2025-10-14\)') 'Win10 22H2: end-of-support note'
+Assert-True ((Ck $r 'os.version').advice -match '22H2 \(build 19045\) is the last version' -and (Ck $r 'os.version').advice -match 'ESU') 'Win10 advice: 22H2 last, ESU'
+Assert-True ((Ck (Run (New-Facts @{ Caption = 'Windows 10 Pro'; Build = 19044 })) 'os.version').detail -match 'not on 22H2') 'Win10 21H2: says not on 22H2'
+Assert-Equal (St (Run (New-Facts @{ SshdStartType = 'Manual' })) 'ssh.server') 'WARN' 'sshd Manual start: WARN'
+Assert-Equal (St (Run (New-Facts @{ SshFirewall = $false })) 'ssh.firewall') 'WARN' 'no port-22 rule: ssh.firewall WARN'
+Assert-Equal (Run (New-Facts @{ SshFirewall = $false })).V.worker_git 'WARN' 'no port-22 rule: worker verdict WARN'
+Assert-Equal (St (Run (New-Facts @{ SshFirewall = $null })) 'ssh.firewall') 'SKIP' 'firewall unreadable: SKIP'
+Assert-Equal (St (Run (New-Facts @{ SshdStartType = 'Manual'; SshFirewall = $false })) 'ssh.firewall') 'WARN' 'manual start AND firewall both reported'
+Assert-Equal (St (Run (New-Facts @{ DefaultShell = $null })) 'ssh.shell') 'OK' 'default shell unset (cmd.exe): OK'
+Assert-Equal (St (Run (New-Facts @{ DefaultShell = 'C:\Windows\System32\WindowsPowerShell1.0\powershell.exe' })) 'ssh.shell') 'OK' 'powershell.exe default shell: OK'
+Assert-Equal (St (Run (New-Facts @{ DefaultShell = 'C:\Program Files\PowerShell\pwsh.exe' })) 'ssh.shell') 'OK' 'pwsh.exe default shell: OK'
+$r = Run (New-Facts @{ DefaultShell = 'C:\Program Files\Gitinash.exe' })
+Assert-Equal (St $r 'ssh.shell') 'WARN' 'bash.exe default shell: WARN'
+Assert-True ((Ck $r 'ssh.shell').advice -match [regex]::Escape('Remove-ItemProperty -Path HKLM:\SOFTWARE\OpenSSH -Name DefaultShell')) 'shell advice: exact command'
+
+Write-Host 'Wake-on-LAN (Windows)'
+$na = @('Wi-Fi|Intel(R) Wi-Fi 6 AX201|10-20-30-00-00-01|Native 802.11|Up', 'vEthernet|Hyper-V Virtual Ethernet Adapter|10-20-30-00-00-02|802.3|Up',
+  'Ethernet 2|Realtek USB GbE|10-20-30-00-00-03|802.3|Disconnected', 'Ethernet|Intel(R) Ethernet I219-V|10-20-30-AA-BB-CC|802.3|Up')
+$sel = Select-WiredNic $na
+Assert-Equal $sel.Nic.Name 'Ethernet' 'wired NIC: physical 802.3, Up first, virtual skipped'
+Assert-Equal $sel.Nic.Mac '10:20:30:aa:bb:cc' 'MAC normalised to aa:bb:.. lower case'
+Assert-True ($sel.Wifi) 'Wi-Fi seen'
+Assert-True ($null -eq (Select-WiredNic @('Wi-Fi|Intel Wireless|10-20-30-00-00-01|Native 802.11|Up')).Nic) 'Wi-Fi only: no wired NIC'
+Assert-True (Test-WakeArmed "HID Keyboard Device`r`nIntel(R) Ethernet I219-V`r`n" 'Intel(R) Ethernet I219-V') 'wake_armed lists the adapter'
+Assert-True (-not (Test-WakeArmed "NONE`r`n" 'Intel(R) Ethernet I219-V')) 'wake_armed NONE: not armed'
+$r = Run (New-Facts)
+Assert-Equal (St $r 'wol') 'OK' 'magic packet on, armed, Fast Startup off: OK'
+$sn = (Format-Snippet $r.M $r.V (New-Facts)) -join "`n"
+Assert-True ($sn -match "(?m)^    wake:" -and $sn -match 'mac: "10:20:30:aa:bb:cc"') 'snippet: active wake block with the MAC'
+$r = Run (New-Facts @{ FastStartup = $true })
+Assert-Equal (St $r 'wol') 'WARN' 'Fast Startup on: WARN'
+Assert-True ((Ck $r 'wol').advice -match 'untick "Turn on fast startup"') 'Fast Startup advice: GUI path'
+$sn = (Format-Snippet $r.M $r.V (New-Facts @{ FastStartup = $true })) -join "`n"
+Assert-True ($sn -match '(?m)^    # wake:' -and $sn -notmatch '(?m)^    wake:') 'snippet: wake commented out when not ready'
+$r = Run (New-Facts @{ WolMagic = 'Disabled' })
+Assert-True ((St $r 'wol') -eq 'WARN' -and (Ck $r 'wol').advice -match 'Wake on Magic Packet" to Enabled' -and (Ck $r 'wol').adminToFix) 'magic packet off: WARN, Device Manager path, needs admin'
+Assert-Equal (St (Run (New-Facts @{ WolArmed = $false })) 'wol') 'WARN' 'not allowed to wake the PC: WARN'
+$r = Run (New-Facts @{ WolMagic = $null })
+Assert-True ((St $r 'wol') -eq 'SKIP' -and (Ck $r 'wol').needsAdmin -and (Ck $r 'wol').detail -match '10:20:30:aa:bb:cc') 'unreadable without admin: SKIP, MAC still shown'
+$r = Run (New-Facts @{ WolMac = $null; WolNic = $null; WolWifi = $true })
+Assert-True ((St $r 'wol') -eq 'WARN' -and (Ck $r 'wol').detail -match 'Wi-Fi only') 'Wi-Fi only: WARN'
+$p = Protect-Facts (New-Facts)
+Assert-Equal $p.WolMac '<mac>' 'redaction hides the MAC'
+
+Write-Host 'low RAM, page file, disk'
+$r = Run (New-Facts @{ RamGB = 4; SwapMB = 0 })
+Assert-True ((St $r 'swap') -eq 'WARN' -and (Ck $r 'swap').advice -match 'SystemPropertiesAdvanced') '4 GB, no page file: WARN with the GUI path'
+Assert-Equal (St (Run (New-Facts @{ SwapMB = 0 })) 'swap') 'OK' '16 GB without page file: OK'
+Assert-Equal (St (Run (New-Facts @{ SwapMB = $null })) 'swap') 'SKIP' 'page file unreadable: SKIP'
+$f3 = New-Facts @{ RamGB = 3; Logical = 4 }; $r = Run $f3
+$sn = (Format-Snippet $r.M $r.V $f3) -join "`n"
+Assert-True ($sn -match 'max_jobs: 1 ' -and $sn -match 'min_free_mem_gb: 1.5' -and $sn -match '# Low-RAM PC: keep max_jobs: 1' -and $sn -match '#   NODE_OPTIONS') '3 GB: max_jobs 1, hold 1.5, note, env caps'
+Assert-True ((Ck $r 'ram').advice -match 'min_free_mem_gb') 'ram advice names the hold setting'
+Assert-True ($sn -match 'add -m:1 to dotnet build' -and (Get-Content -LiteralPath (Join-Path $root 'lanq-makeready.ps1') -Raw) -notmatch 'MSBUILDNODECOUNT') '3 GB: -m:1 comment; MSBUILDNODECOUNT never suggested'
+$acl = @($Advice.Values | Where-Object { $_ -match 'icacls' })
+Assert-True ($acl.Count -ge 1 -and @($acl | Where-Object { $_ -match '/grant "[^*]' }).Count -eq 0 -and $acl[0] -match '\*S-1-5-18:F') 'every icacls hint grants by SID (Administrators and SYSTEM)'
+Assert-True ($Advice['ssh.nokeys'] -match 'Add-LocalGroupMember -SID S-1-5-32-545' -and $Advice['ssh.nokeys'] -match 'log on once') 'build-user hint: Users by SID, log on once before .ssh'
+$r = Run (New-Facts @{ SysFreeGB = 15; WorkFreeGB = 15 })
+Assert-True ((Ck $r 'disk').detail -match '15 GB free' -and (Ck $r 'disk').detail -match 'recommended: at least 20 GB free') 'low disk: free space and recommended minimum'
+
+Write-Host 'pool sizing tiers (same thresholds as lanq health)'
+foreach ($t in @(@(4, 4, 1), @(8, 8, 2), @(8, 1, 1), @(16, 4, 3), @(16, 8, 4), @(16, 2, 2), @(32, 12, 6), @(64, 32, 8), @(32, 4, 4))) {
+  Assert-Equal (Get-SuggestedJobs $t[0] $t[1]) $t[2] "$($t[0]) GB, $($t[1]) CPUs: max_jobs $($t[2])"
+}
+Assert-Equal (Get-SuggestedMinMem 4) 1.5 'under 6 GB: min_free_mem_gb 1.5'
+Assert-Equal (Get-SuggestedMinMem 16) 2 '6 GB+: min_free_mem_gb 2'
+Assert-Equal (Get-SuitedTier 4 4) 'light' '4 GB: light'
+Assert-Equal (Get-SuitedTier 8 8) 'medium' '8 GB: medium'
+Assert-Equal (Get-SuitedTier 16 2) 'medium' '16 GB, 2 CPUs: medium'
+Assert-Equal (Get-SuitedTier 16 4) 'heavy' '16 GB, 4 CPUs: heavy'
+Assert-Equal (Get-SuitedText 'light' $false) 'light: lint and unit-test shards' 'light text'
+Assert-Equal (Get-SuitedText 'medium' $false) 'medium: test shards and builds' 'medium text'
+Assert-Equal (Get-SuitedText 'heavy' $true) 'heavy: full suites and large builds + container builds' 'heavy + docker text'
+$f = New-Facts @{ Logical = 8 }; $r = Run $f
+$j = ConvertTo-AsciiJson (New-Report $f $r.C $r.V $r.M '0.2.0' $r.S) | ConvertFrom-Json
+Assert-Equal $j.suitedFor.tier 'heavy' 'JSON suitedFor.tier'
+Assert-Equal $j.suitedFor.containers $true 'JSON suitedFor.containers'
+Assert-Equal $j.suggestedMachine.min_free_mem_gb 2 'JSON min_free_mem_gb'
+Assert-Equal $j.suggestedMachine.wake.mac '10:20:30:aa:bb:cc' 'JSON wake.mac when ready'
+Assert-True ($r.M.capabilities -contains 'git') 'git is a detected capability'
+
+Write-Host 'snippet keys are valid LanQueue 0.5 keys'
+$f = New-Facts; $r = Run $f
+$keys = @((Format-Snippet $r.M $r.V $f) | ForEach-Object { if ($_ -match '^[\s-]*([a-z_]+):') { $Matches[1] } } | Sort-Object -Unique) -join ' '
+Assert-Equal $keys 'capabilities mac machines max_jobs min_free_mem_gb name os ssh transfer wake work_root' 'only known keys (uncommented)'
+Assert-True (((Format-Snippet $r.M $r.V $f) -join "`n") -match '# allowed_hours: "22:00-07:00"') 'allowed_hours is a commented placeholder without -Hours'
+
 Write-Host 'helpers: hours, powercfg, active hours, redaction, snippet'
 Assert-True (Test-Hours '00:00-07:00') 'hours: valid'
 Assert-True (Test-Hours '22:00-07:00') 'hours: wraps midnight'
@@ -95,7 +211,7 @@ Assert-Equal $r.V.overnight 'WARN' 'sleep after 30 min -> overnight WARN'
 Assert-True ((Ck $r 'power.sleep').advice -match 'powercfg /change standby-timeout-ac 0') 'sleep advice is the exact powercfg command'
 $m = Get-Machine (New-Facts @{ Hours = '22:00-07:00' }) $null '22:00-07:00' $true
 Assert-Equal $m.name 'old-pc' 'redacted snippet name'
-$sn = (Format-Snippet $m (Run (New-Facts)).V) -join "`n"
+$sn = (Format-Snippet $m (Run (New-Facts)).V (New-Facts)) -join "`n"
 Assert-True ($sn -match 'allowed_hours: "22:00-07:00"') 'snippet: allowed_hours quoted HH:mm-HH:mm'
 Assert-True ($sn -match 'os: windows' -and $sn -notmatch 'builder') 'snippet: os windows, no user name when redacted'
 
@@ -152,7 +268,7 @@ Assert-True (-not (Test-SshUser 'John Smith')) 'ssh user: space rejected'
 Assert-True (-not (Test-SshUser "o'brien")) 'ssh user: quote rejected'
 $mm = Get-Machine (New-Facts @{ User = 'John Smith'; Hostname = 'My_PC' }) $null $null $false
 Assert-Equal $mm.ssh '<user>@my-pc.lan' 'machine: unusual user -> <user> placeholder'
-$sn = (Format-Snippet $mm (Run (New-Facts)).V) -join "`n"
+$sn = (Format-Snippet $mm (Run (New-Facts)).V (New-Facts)) -join "`n"
 Assert-True ($sn -match 'name: "my-pc"' -and $sn -match 'ssh: "<user>@my-pc.lan"' -and $sn -match 'work_root: "C:/lq"') 'snippet: name, ssh and work_root are YAML-quoted'
 $de = "  GUID des Energieschemas: x`r`n  Mindestwert: 0x00000000`r`n  Hoechstwert: 0xffffffff`r`n  Inkrement: 0x00000001`r`n  Aktueller Wechselstromeinstellungsindex: 0x00000708`r`n  Aktueller Gleichstromeinstellungsindex: 0x00000258`r`n"
 Assert-Equal (Get-PowercfgAcSeconds $de) 1800 'powercfg: localized (German) output still parses the AC value'
@@ -166,7 +282,6 @@ Assert-True ((Get-ProbeBool @($false)) -eq $false -and $null -ne (Get-ProbeBool 
 Assert-True ($null -eq (Get-ProbeBool $null)) 'timed-out probe is unknown ($null)'
 Assert-True ((Get-ProbeInt @(0)) -eq 0 -and $null -ne (Get-ProbeInt @(0))) 'zero WoL adapters ([0]) is 0, not unknown'
 Assert-Equal (St (Run (New-Facts @{ DefenderRtp = (Get-ProbeBool @($false)) })) 'defender') 'OK' 'Defender off shows OK, not SKIP'
-Assert-Equal (St (Run (New-Facts @{ WolAdapters = (Get-ProbeInt @(0)) })) 'wol') 'OK' 'zero WoL adapters shows OK, not SKIP'
 Assert-Equal (Invoke-WithTimeout { param($x) $false } $null 10).Count 1 'Invoke-WithTimeout keeps a single $false result'
 Assert-Equal (Get-WslInstalled $true $null) $true 'WSL: service/key present -> installed'
 Assert-Equal (Get-WslInstalled $false $true) $true 'WSL: Store package present -> installed'
@@ -231,7 +346,7 @@ $AstNs = 'System.Management.Automation.Language'
 foreach ($f in @('lanq-makeready.ps1', 'lanq-makeready.sh')) {
   $text = Get-Content -LiteralPath (Join-Path $root $f) -Raw
   Assert-True (-not ($text -match '[^\x00-\x7F]')) "$f is pure ASCII"
-  Assert-True (@(Get-Content -LiteralPath (Join-Path $root $f)).Count -le 750) "$f is at most 750 lines"
+  Assert-True (@(Get-Content -LiteralPath (Join-Path $root $f)).Count -le 900) "$f is at most 900 lines"
 }
 $psPath = Join-Path $root 'lanq-makeready.ps1'
 $tokens = $null; $perr = $null
@@ -241,7 +356,7 @@ $funcs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Languag
 $funcNames = @($funcs | ForEach-Object { $_.Name })
 function Get-Fn($Node) { $p = $Node.Parent; while ($p) { if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $p.Name }; $p = $p.Parent }; return '' }
 $okCmds = @('ConvertFrom-Json', 'ConvertTo-Json', 'ForEach-Object', 'Get-Acl', 'Get-ChildItem', 'Get-CimInstance', 'Get-Command', 'Get-Content', 'Get-Item', 'Get-ItemProperty',
-  'Get-Location', 'Get-MpComputerStatus', 'Get-NetAdapterPowerManagement', 'Get-NetFirewallRule', 'Get-Partition', 'Get-PhysicalDisk', 'Get-Service', 'Join-Path',
+  'Get-Location', 'Get-MpComputerStatus', 'Get-NetAdapter', 'Get-NetAdapterPowerManagement', 'Get-NetFirewallPortFilter', 'Get-NetFirewallRule', 'Get-Partition', 'Get-PhysicalDisk', 'Get-Service', 'Join-Path',
   'Measure-Object', 'Get-AppxPackage', 'New-Object', 'Select-Object', 'Sort-Object', 'Test-Path', 'Where-Object', 'Write-Host')
 $bad = @()
 foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
@@ -256,7 +371,7 @@ foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Lan
   if ($n -eq 'Invoke-Bounded') {
     $exe = $c.CommandElements[1].Extent.Text; $arg = ''; if ($c.CommandElements.Count -gt 2) { $arg = $c.CommandElements[2].Extent.Text }
     $okExe = @('$git', '$tar', '$dk', '$DockerExe', '$wsl', '$pc', '$e', '"$env:SystemRoot\System32\taskkill.exe"', 'param')
-    $okArg = @("'context show'", "'--version'", "'config --get core.longpaths'", '"version --format {{.Server.Version}}"', "'--status'", "'/q SCHEME_CURRENT SUB_SLEEP STANDBYIDLE'", "'/q SCHEME_CURRENT SUB_SLEEP HIBERNATEIDLE'", '$t[1]', '"/T /F /PID $ProcId"')
+    $okArg = @("'/devicequery wake_armed'", "'context show'", "'--version'", "'config --get core.longpaths'", '"version --format {{.Server.Version}}"', "'--status'", "'/q SCHEME_CURRENT SUB_SLEEP STANDBYIDLE'", "'/q SCHEME_CURRENT SUB_SLEEP HIBERNATEIDLE'", '$t[1]', '"/T /F /PID $ProcId"')
     if ($fn -ne 'Invoke-Bounded' -and $fn -ne 'Stop-Tree') {
       if ($okExe -notcontains $exe) { $bad += "Invoke-Bounded exe $exe" }
       if ($okArg -notcontains $arg) { $bad += "Invoke-Bounded args $arg" }
@@ -273,10 +388,11 @@ $okPairs = @(
   '$ps|AddScript', '$ps|BeginInvoke', '$ps|BeginStop', '$ps|Dispose', '$ps|EndInvoke', '$rank|ContainsKey', '$stack|Pop', '$stack|Push',
   '$w[0]|Substring', '$w[1]|Substring', '("$S".ToLowerInvariant() -replace ''[^a-z0-9-]'', ''-'')|Trim', '($cpu[0].Name -replace ''\s+'', '' '')|Trim',
   '[Console]::Error|WriteLine', '[Console]::Out|Flush', '[Console]::Out|Write', '[Convert]|ToInt64', '[DateTime]::UtcNow|ToString', '[Environment]|Exit',
-  '[math]|Min', '[math]|Round', '[regex]|Escape', '[regex]|Matches', '[regex]|Replace', '[Security.Principal.WindowsIdentity]|GetCurrent',
+  '[math]|Min', '[math]|Round', '"$l"|Split', '$p[2].ToLowerInvariant()|Replace', '$p[2]|ToLowerInvariant', '$r|Remove', '$PSBoundParameters|ContainsKey', '$Lines|Add',
+  '[System.IO.File]|Open', '(New-Object System.Text.UTF8Encoding($false))|GetBytes', '$fs|Write', '$fs|Dispose', '[regex]|Escape', '[regex]|Matches', '[regex]|Replace', '[Security.Principal.WindowsIdentity]|GetCurrent',
   '[System.Diagnostics.Process]|Start', '[System.Diagnostics.Stopwatch]|StartNew', '[System.IO.Directory]|EnumerateDirectories',
   '[System.IO.Directory]|EnumerateFiles', '[System.IO.File]|WriteAllText', '[System.IO.Path]|IsPathRooted', '[System.Management.Automation.PowerShell]|Create')
-$onlyIn = @{ Start = 'Invoke-Bounded'; Kill = 'Invoke-Bounded'; WaitForExit = 'Invoke-Bounded'; Create = 'Invoke-WithTimeout'; WriteAllText = ''; Exit = '' }
+$onlyIn = @{ Start = 'Invoke-Bounded'; Kill = 'Invoke-Bounded'; WaitForExit = 'Invoke-Bounded'; Create = 'Invoke-WithTimeout'; WriteAllText = ''; Exit = ''; Open = 'Save-OutFile' }
 foreach ($m in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
   $mn = $m.Member.Extent.Text; $fn = Get-Fn $m
   $pair = $m.Expression.Extent.Text + '|' + $mn
@@ -309,7 +425,9 @@ Assert-Equal @($ht.FindAll({ param($n) $n -is [System.Management.Automation.Lang
 Assert-Equal ($bad -join '; ') '' 'ps1: every command, member call and probe invocation is on the read-only allow-list'
 $ps1 = Get-Content -LiteralPath $psPath -Raw
 Assert-Equal ([regex]::Matches($ps1, "@\('(?:node|python|java|go|rustc)', '(?:-{1,2}version|version)'\)")).Count 5 'ps1: exactly five toolchain probes, each only --version / -version / version'
-Assert-True ($ps1 -match "\[System\.IO\.File\]::WriteAllText\(\`$full" -and ([regex]::Matches($ps1, 'WriteAllText')).Count -eq 1) 'ps1: the only file write is the --json report'
+Assert-True ($ps1 -match "\[System\.IO\.File\]::WriteAllText\(\`$full" -and ([regex]::Matches($ps1, 'WriteAllText')).Count -eq 1) 'ps1: WriteAllText only for the --json report'
+Assert-Equal ([regex]::Matches($ps1, '\[System\.IO\.File\]::Open\(')).Count 1 'ps1: one File.Open, for -Out'
+Assert-True ($ps1 -match "\[System\.IO\.File\]::Open\(\`$Path, \[System\.IO\.FileMode\]::CreateNew, \[System\.IO\.FileAccess\]::Write\)") 'ps1: -Out opens with CreateNew (never overwrites)'
 $sh = Get-Content -LiteralPath (Join-Path $root 'lanq-makeready.sh') -Raw
 $adv0 = $ps1.IndexOf('#region ADVICE'); $adv1 = $ps1.IndexOf('#endregion ADVICE')
 $noAdvice = $ps1.Substring(0, $adv0) + $ps1.Substring($adv1)
@@ -331,6 +449,20 @@ if (-not $SkipSmoke) {
   $libRc = $LASTEXITCODE
   Remove-Item Env:\LANQ_MAKEREADY_LIB
   Assert-Equal $libRc 2 'LANQ_MAKEREADY_LIB=1 on a direct run: exit 2'
+
+  Write-Host '-Out: saves the human report, never overwrites'
+  $od = Join-Path ([IO.Path]::GetTempPath()) ('lanq-out-' + [Guid]::NewGuid().ToString('N')); [void](New-Item -ItemType Directory -Path $od)
+  $null = & powershell -NoProfile -ExecutionPolicy Bypass -File $script -Out (Join-Path $od 'r.txt') -Redact
+  Assert-True (@(0, 1) -contains $LASTEXITCODE) "-Out: exit $LASTEXITCODE"
+  $rep = @(Get-Content -LiteralPath (Join-Path $od 'r.txt'))
+  Assert-True ($rep[1] -match '^VERDICT: (READY|NOT READY)' -and $rep[-1] -match '^VERDICT: ') '-Out: report with the verdict at the top and bottom'
+  Assert-True (-not (Hide-Leak ($rep -join "`n") $env:COMPUTERNAME)) '-Out: redacted'
+  Set-Content -LiteralPath (Join-Path $od 'x.txt') -Value 'keep me'
+  $null = & powershell -NoProfile -ExecutionPolicy Bypass -File $script -Out (Join-Path $od 'x.txt') 2>$null
+  Assert-Equal $LASTEXITCODE 2 '-Out to an existing file: exit 2'
+  Assert-Equal ((Get-Content -LiteralPath (Join-Path $od 'x.txt')) -join '') 'keep me' '-Out: existing file untouched'
+  Assert-Equal @(Get-ChildItem -LiteralPath $od).Count 2 '-Out: no other file written'
+  Remove-Item -LiteralPath $od -Recurse -Force
 
   Write-Host 'smoke: real run, non-elevated, -Json <file> -Redact'
   $isAdmin = (New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)

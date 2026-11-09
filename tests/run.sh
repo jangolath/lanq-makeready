@@ -24,8 +24,11 @@ fixture_ubuntu() { # Ubuntu 24.04, 16 GB, SSD, everything good
   F_GIT="git version 2.43.0"; F_TARKIND=gnu; F_GZIP=yes; F_DOTNET="8 10"; F_DOCKER_CLI=yes; F_DOCKER_SERVER=27.0
   F_CGROUP=v2; F_SLEEP=masked; F_SLEEP_DETAIL=""; F_REBOOT=no; F_STARTUP=5; F_TEMP="cache 100 MB"; F_TEMP_BIGMB=100; F_DOCKER_REMOTE=no
   F_T_node=v22.1.0; F_T_python=""; F_T_java=""; F_T_go=""; F_T_rustc=""
+  F_OSID=ubuntu; F_OSVERID=24.04; F_NOW_YM=202611; F_SSHD_PW=no; F_SWAPMB=2048
+  F_WOL_IF=enp1s0; F_WOL_MAC=10:20:30:aa:bb:cc; F_WOL_WIFI=no; F_WOL_SUP=pumbg; F_WOL_ON=g
 }
-run() { eval_checks; eval_verdicts; eval_machine "${1:-}" 0; }
+run() { eval_checks; eval_verdicts; eval_machine "${1:-}" 0; eval_summary; }
+step_ids() { printf '%s' "$S_STEPS" | while IFS="$SEP" read -r _i _; do printf '%s ' "$_i"; done; }
 
 echo "ubuntu 24.04 good"
 fixture_ubuntu; run
@@ -35,7 +38,7 @@ eq "$V_DOTNET" OK "ubuntu: dotnet10 OK"
 eq "$V_DOCKER" OK "ubuntu: docker OK"
 eq "$V_OVERNIGHT" OK "ubuntu: overnight OK"
 eq "$M_TRANSFER" git "ubuntu: transfer git"
-eq "$M_CAPS" "dotnet, node, docker, linux" "ubuntu: capabilities"
+eq "$M_CAPS" "dotnet, node, docker, git, linux" "ubuntu: capabilities (git detected too)"
 
 echo "glibc 2.26 -> .NET FAIL"
 fixture_ubuntu; F_LIBCVER=2.26; run
@@ -84,6 +87,156 @@ eq "$V_DOTNET" WARN "macOS 14: dotnet10 WARN"
 contains "$(render_snippet)" "windows|linux only" "macOS: snippet is a note, not an entry"
 eq "$V_GIT:$V_ARCHIVE" "FAIL:FAIL" "macOS: both worker verdicts FAIL (LanQueue rejects macOS workers)"
 
+echo "verdict line and next steps"
+fixture_ubuntu; run
+eq "$S_TEXT" READY "all good: READY"
+eq "$S_STEPS" "" "all good: no next steps"
+fixture_ubuntu; F_REBOOT=yes; F_SSHD_PW=yes; run
+eq "$S_TEXT" "READY WITH WARNINGS (2)" "two warnings: READY WITH WARNINGS (2)"
+eq "$S_VERDICT" READY_WITH_WARNINGS "verdict code READY_WITH_WARNINGS"
+fixture_ubuntu; F_SSHD=notinstalled; F_REBOOT=yes; run
+eq "$S_TEXT" "NOT READY (1 blocker)" "no sshd: NOT READY (1 blocker)"
+eq "$(step_ids)" "ssh.server reboot.pending " "blocker is step 1, warnings after"
+contains "$(render_steps)" " 1. [MUST FIX] SSH server: no sshd found" "step 1 is marked MUST FIX"
+contains "$(render_steps)" "do (needs root): Install and start an SSH server" "step names the command and that it needs root"
+contains "$(render_steps)" " 2. [should fix] Pending reboot" "warning step is should fix"
+fixture_ubuntu; F_SSHD=notinstalled; F_SYSFREEGB=5; run
+eq "$S_TEXT" "NOT READY (2 blockers)" "two FAILs: NOT READY (2 blockers)"
+fixture_ubuntu; F_GIT=""; F_TARKIND=none; run
+eq "$S_TEXT" "NOT READY (2 blockers)" "no git and no tar: both become blockers"
+eq "$(step_ids)" "git tar " "no transfer mode: git and tar steps"
+fixture_ubuntu; F_GIT=""; F_SSHD=notinstalled; run
+eq "$(step_ids)" "ssh.server git " "no sshd, no git but tar ok: git stays a warning after the blocker"
+eq "$S_BLOCKERS" 1 "no sshd, no git but tar ok: 1 blocker"
+fixture_ubuntu; F_ARCH=i686; F_DOCKER_CLI=no; F_DOCKER_SERVER=""; run
+eq "$S_VERDICT" READY_WITH_WARNINGS "a .NET/Docker FAIL does not block the worker: READY WITH WARNINGS"
+fixture_ubuntu; F_SSHD=notinstalled; run
+out=$(render_human)
+eq "$(printf '%s\n' "$out" | sed -n 2p)" "VERDICT: NOT READY (1 blocker)" "verdict is the second line"
+eq "$(printf '%s\n' "$out" | tail -n 1)" "VERDICT: NOT READY (1 blocker)" "verdict is the last line"
+js=$(render_json 0)
+contains "$js" '"summary": {"verdict": "NOT_READY", "text": "NOT READY (1 blocker)", "blockers": 1, "warnings": 0' "JSON summary"
+contains "$js" '"step": 1, "id": "ssh.server", "title": "SSH server", "status": "FAIL", "blocker": true' "JSON next step"
+contains "$js" '"adminToFix": true' "JSON step says it needs admin"
+eq "$(advice_admin ssh.nokeys)" false "ssh.nokeys needs no root"
+
+echo "Linux: distro end of life"
+eq "$(distro_eol ubuntu 20.04)" 202505 "Ubuntu 20.04 LTS: supported through 2025-05"
+eq "$(distro_eol ubuntu 24.04)" 202905 "Ubuntu 24.04 LTS: 2029-05"
+eq "$(distro_eol ubuntu 25.10)" 202607 "Ubuntu 25.10 interim: 9 months"
+eq "$(distro_eol debian 11)" 202608 "Debian 11: LTS to 2026-08"
+eq "$(distro_eol debian 12)" 202806 "Debian 12: LTS to 2028-06"
+eq "$(distro_eol alpine 3.21.2)" 202611 "Alpine 3.21: 2026-11"
+eq "$(distro_eol alpine 3.22.0)" 202705 "Alpine 3.22: 2027-05"
+eq "$(distro_eol arch "")" "" "unknown distro: no date"
+fixture_ubuntu; F_OSVERID=20.04; F_OSNAME="Ubuntu 20.04.6 LTS"; run
+eq "$(st os.version)" WARN "Ubuntu 20.04 in 2026-11: os.version WARN"
+contains "$(printf '%s' "$CHECKS" | grep '^os.version')" "end of life (security updates ended 2025-05)" "EOL detail has the date"
+contains "$(printf '%s' "$CHECKS" | grep '^os.version')" "do-release-upgrade" "EOL advice has the command"
+fixture_ubuntu; F_OSID=debian; F_OSVERID=11; run
+eq "$(st os.version)" WARN "Debian 11 in 2026-11: WARN"
+fixture_ubuntu; F_OSID=debian; F_OSVERID=12; run
+eq "$(st os.version)" OK "Debian 12: OK"
+
+echo "Linux: sshd PasswordAuthentication"
+eq "$(printf '# x\nPasswordAuthentication no\nPasswordAuthentication yes\n' | sshd_pw_auth)" no "first value wins"
+eq "$(printf '#PasswordAuthentication no\nUsePAM yes\n' | sshd_pw_auth)" unset "commented out: unset (default yes)"
+eq "$(printf 'Match User x\nPasswordAuthentication no\n' | sshd_pw_auth)" unset "Match blocks are not applied globally"
+eq "$(printf '  passwordauthentication=YES\n' | sshd_pw_auth)" yes "case and = form"
+cfg=${TMPDIR:-/tmp}/lanq-sshd.$$; mkdir -p "$cfg/d"
+printf 'Include %s/d/*.conf\nPasswordAuthentication yes\n' "$cfg" > "$cfg/main"; printf 'PasswordAuthentication no\n' > "$cfg/d/10-keys.conf"
+eq "$(sshd_conf_lines "$cfg/main" 0 | sshd_pw_auth)" no "Include drop-in read first, first value wins"
+rm -rf "$cfg"
+fixture_ubuntu; F_SSHD_PW="unset"; run
+eq "$(st ssh.password)" WARN "password auth by default: WARN (security note)"
+contains "$(printf '%s' "$CHECKS" | grep '^ssh.password')" "PasswordAuthentication no" "advice says how"
+eq "$V_GIT" OK "password note does not change the worker verdict"
+fixture_ubuntu; F_SSHD_PW=unknown; run
+eq "$(st ssh.password)" SKIP "unreadable config: SKIP"
+
+echo "Linux: sleep targets"
+fixture_ubuntu; F_SLEEP=unmasked; run
+eq "$(st power.sleep)" WARN "sleep targets not masked: WARN"
+contains "$(printf '%s' "$CHECKS" | grep '^power.sleep')" "sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target" "mask command printed"
+
+echo "Linux: Wake-on-LAN"
+nics='lo 772 no no unknown 00:00:00:00:00:00
+docker0 1 no no down 10:20:30:00:00:01
+wlp2s0 1 yes yes up 10:20:30:00:00:02
+enp1s0 1 yes no up 10:20:30:00:00:03
+enp3s0 1 yes no down 10:20:30:00:00:04'
+eq "$(printf '%s\n' "$nics" | pick_wired)" "enp1s0 10:20:30:00:00:03" "pick_wired: physical, wired, up first"
+eq "$(printf 'wlp2s0 1 yes yes up 10:20:30:00:00:02\n' | pick_wired)" "" "pick_wired: Wi-Fi only -> none"
+fixture_ubuntu; run
+eq "$(st wol)" OK "Wake-on: g -> OK"
+contains "$(render_snippet)" '      mac: "10:20:30:aa:bb:cc"' "snippet: wake mac when ready"
+contains "$(render_json 0)" '"wake": {"mac": "10:20:30:aa:bb:cc"}' "JSON: wake mac when ready"
+fixture_ubuntu; F_WOL_ON=d; run
+eq "$(st wol)" WARN "Wake-on: d -> WARN"
+contains "$(printf '%s' "$CHECKS" | grep '^wol')" "sudo ethtool -s enp1s0 wol g" "advice names the interface"
+contains "$(render_snippet)" '    # wake:' "snippet: wake commented out when not ready"
+if render_snippet | grep -q '^    wake:'; then bad "wake active when not ready" yes no; else ok "snippet: no active wake: when not ready"; fi
+fixture_ubuntu; F_WOL_ON=d; F_WOL_SUP=d; run
+contains "$(printf '%s' "$CHECKS" | grep '^wol')" "does not support" "no g in Supports: not supported"
+fixture_ubuntu; F_WOL_ON=""; F_WOL_SUP=""; run
+eq "$(st wol)" SKIP "unreadable without root: SKIP"
+contains "$(printf '%s' "$CHECKS" | grep '^wol')" "as root: ethtool enp1s0 | grep Wake-on" "says how to check"
+fixture_ubuntu; F_WOL_IF=""; F_WOL_MAC=""; F_WOL_WIFI=yes; run
+eq "$(st wol)" WARN "Wi-Fi only: WARN"
+contains "$(render_snippet)" "# wake: not suggested" "snippet: no wake block without a wired NIC"
+red=$( fixture_ubuntu; redact_facts; run; render_snippet; render_json 1 )
+if printf '%s' "$red" | grep -q '10:20:30:aa:bb:cc'; then bad "MAC redacted" leaked hidden; else ok "redaction hides the MAC"; fi
+contains "$red" 'mac: "<mac>"' "redacted snippet uses a <mac> placeholder"
+
+echo "low RAM and swap"
+fixture_ubuntu; F_RAMMB=4096; F_SWAPMB=0; run
+eq "$(st swap)" WARN "4 GB, no swap: WARN"
+contains "$(printf '%s' "$CHECKS" | grep '^swap')" "mkswap" "swap advice has the commands"
+fixture_ubuntu; F_SWAPMB=0; run
+eq "$(st swap)" OK "16 GB without swap: OK"
+fixture_ubuntu; F_RAMMB=3072; F_CORES=4; run
+contains "$(render_snippet)" "max_jobs: 1" "3 GB: max_jobs 1"
+contains "$(render_snippet)" "min_free_mem_gb: 1.5" "3 GB: min_free_mem_gb 1.5"
+contains "$(render_snippet)" "# Low-RAM PC: keep max_jobs: 1" "3 GB: low-RAM note"
+contains "$(render_snippet)" '#   NODE_OPTIONS: "--max-old-space-size=1024"' "3 GB: env caps offered (commented)"
+contains "$(render_snippet)" "add -m:1 to dotnet build" "3 GB: suggests -m:1, not an env var"
+if grep -q MSBUILDNODECOUNT "$root/lanq-makeready.sh"; then bad "no MSBUILDNODECOUNT" found absent; else ok "MSBUILDNODECOUNT is never suggested"; fi
+contains "$(printf '%s' "$CHECKS" | grep '^ram')" "min_free_mem_gb" "ram advice names the hold setting"
+fixture_ubuntu; F_SYSFREEGB=15; run
+contains "$(printf '%s' "$CHECKS" | grep '^disk')" "15 GB free" "low disk: says the free space"
+contains "$(printf '%s' "$CHECKS" | grep '^disk')" "recommended: at least 20 GB free" "low disk: says the recommended minimum"
+
+echo "pool sizing tiers (same thresholds as lanq health)"
+eq "$(suggest_jobs 4 4)" 1 "4 GB: max_jobs 1"
+eq "$(suggest_jobs 8 8)" 2 "8 GB: max_jobs 2"
+eq "$(suggest_jobs 8 1)" 1 "8 GB, 1 CPU: capped by cores"
+eq "$(suggest_jobs 16 4)" 3 "16 GB, 4 CPUs: 3"
+eq "$(suggest_jobs 16 8)" 4 "16 GB, 8 CPUs: 4"
+eq "$(suggest_jobs 16 2)" 2 "16 GB, 2 CPUs: capped by cores"
+eq "$(suggest_jobs 32 12)" 6 "32 GB, 12 CPUs: 6"
+eq "$(suggest_jobs 64 32)" 8 "64 GB, 32 CPUs: 8"
+eq "$(suggest_jobs 32 4)" 4 "32 GB, 4 CPUs: capped by cores"
+eq "$(suggest_minmem 4)" 1.5 "under 6 GB: min_free_mem_gb 1.5"
+eq "$(suggest_minmem 16)" 2 "6 GB+: min_free_mem_gb 2"
+eq "$(suited_tier 4 4)" light "4 GB: light"
+eq "$(suited_tier 8 8)" medium "8 GB: medium"
+eq "$(suited_tier 16 2)" medium "16 GB but 2 CPUs: medium"
+eq "$(suited_tier 16 4)" heavy "16 GB + 4 CPUs: heavy"
+eq "$(suited_text light no)" "light: lint and unit-test shards" "light text"
+eq "$(suited_text medium no)" "medium: test shards and builds" "medium text"
+eq "$(suited_text heavy yes)" "heavy: full suites and large builds + container builds" "heavy + docker text"
+fixture_ubuntu; F_RAMMB=16384; F_CORES=8; run
+contains "$(render_human)" "Suited for: heavy: full suites and large builds + container builds" "human report: suited-for line"
+contains "$(render_json 0)" '"suitedFor": {"tier": "heavy", "containers": true' "JSON: suitedFor"
+contains "$(render_snippet)" "max_jobs: 4" "snippet: 16 GB / 8 CPUs -> max_jobs 4"
+contains "$(render_json 0)" '"min_free_mem_gb": 2' "JSON: min_free_mem_gb"
+
+echo "snippet keys are valid LanQueue 0.5 keys"
+fixture_ubuntu; run
+keys=$(render_snippet | sed -n 's/^[ -]*\([a-z_]*\):.*/\1/p' | sort -u | tr '\n' ' ')
+eq "$keys" "capabilities mac machines max_jobs min_free_mem_gb name os ssh transfer wake work_root " "only known keys (uncommented)"
+contains "$(render_snippet)" '# allowed_hours: "22:00-07:00"' "allowed_hours is a commented placeholder without --hours"
+
 echo "helpers"
 fixture_ubuntu; run "00:00-07:00"
 contains "$(render_snippet)" 'allowed_hours: "00:00-07:00"' "snippet: allowed_hours quoted"
@@ -115,7 +268,7 @@ if docker_remote "unix:///var/run/docker.sock" "desktop-linux"; then bad "docker
 if sdk_ge8 "6 7"; then bad "sdk_ge8 old" yes no; else ok "dotnet capability needs SDK >= 8: 6,7 -> no"; fi
 if sdk_ge8 "6 10"; then ok "dotnet capability: 6,10 -> yes"; else bad "sdk_ge8 10" no yes; fi
 fixture_ubuntu; F_DOTNET="6"; run
-eq "$M_CAPS" "node, docker, linux" "SDK 6 only: no dotnet capability"
+eq "$M_CAPS" "node, docker, git, linux" "SDK 6 only: no dotnet capability"
 eq "$(safe_name 'My_PC.Local')" "my-pc-local" "safe_name: lowercase, [a-z0-9-]"
 eq "$(safe_name '--x--')" "x" "safe_name: no leading/trailing hyphen"
 eq "$(safe_name '___')" "old-pc" "safe_name: fallback"
@@ -202,7 +355,7 @@ cmd_words() {
       }
     }' | sort -u
 }
-allowed=" printf echo awk sed tr cut head wc grep find cat command readlink uname hostname id df getconf ldd sw_vers sysctl vm_stat pmset launchctl pgrep systemctl gsettings xcode-select docker git tar gzip du date sleep kill wait timeout gtimeout sh exec cd exit return export eval read test /usr/libexec/java_home type shift sort true false break continue fi done esac then else elif do in while for if case until [ ]] "
+allowed=" printf echo awk sed tr cut head wc grep find cat command readlink uname hostname id df getconf ldd sw_vers sysctl vm_stat pmset launchctl pgrep systemctl gsettings xcode-select docker git tar gzip du date sleep kill wait timeout gtimeout sh exec cd exit return export eval read test /usr/libexec/java_home type shift sort true false break continue fi done esac then else elif do in while for if case until set [ ]] "
 forbidden=" sudo chmod chown apk apt apt-get dnf yum rm mv cp ln mkdir touch tee curl wget nc ssh scp mount dd su install useradd passwd iex bash "
 # guard_check FILE: prints one line per violation (nothing when clean)
 guard_check() {
@@ -225,12 +378,12 @@ guard_check() {
   printf '%s\n' "$_code" | grep -nE 'awk' | grep -E '(print|printf)[^;}]*[^-=<]>[^=]|print[^;}]*\|[[:space:]]*"' | sed 's/^/awk write or pipe: /'
   printf '%s\n' "$_code" | grep -n '`' | sed 's/^/backtick: /'
   printf '%s\n' "$_code" | grep -nE 'eval ' | grep -E '\$\(|`' | sed 's/^/eval with substitution: /'
-  printf '%s\n' "$_code" | grep -nE 'systemctl[^|;&]*[[:space:]](enable|disable|start|stop|mask|unmask|restart|reload|daemon-reload|set-default|edit)([[:space:]]|$)|gsettings[[:space:]]+set|pmset[[:space:]]+-a|launchctl[[:space:]]+(load|unload|bootstrap|bootout|kickstart|enable|disable)|docker[[:space:]]+(run|pull|build|rm|rmi|exec|start|stop|system|volume|network|login|push|cp|commit)|git[[:space:]]+(clone|fetch|pull|push|checkout|add|commit)|Out-File|Set-Content|Start-Process|cmd /c' | sed 's/^/mutating subcommand: /'
+  printf '%s\n' "$_code" | grep -nE 'systemctl[^|;&]*[[:space:]](enable|disable|start|stop|mask|unmask|restart|reload|daemon-reload|set-default|edit)([[:space:]]|$)|gsettings[[:space:]]+set|pmset[[:space:]]+-a|launchctl[[:space:]]+(load|unload|bootstrap|bootout|kickstart|enable|disable)|docker[[:space:]]+(run|pull|build|rm|rmi|exec|start|stop|system|volume|network|login|push|cp|commit)|git[[:space:]]+(clone|fetch|pull|push|checkout|add|commit)|ethtool[^|;&]*[[:space:]]-[sKAGLEfW]([[:space:]]|$)|[[:space:]]wol[[:space:]]+[pumbgsd]+|nmcli|swapon|Out-File|Set-Content|Start-Process|cmd /c' | sed 's/^/mutating subcommand: /'
   printf '%s\n' "$_code" | grep -E 'git[[:space:]]+config' | grep -vE 'git[[:space:]]+config[[:space:]]+--get[[:space:]]' | sed 's/^/git config other than --get: /'
   printf '%s\n' "$_code" | awk "$scan_awk"'
     /^[ \t]*#/ { next }
     { raw = $0
-      gsub(/2>\/dev\/null|>\/dev\/null|2>&1|>&2|>&1|> "\$JSON_PATH"|>"\$JSON_PATH"|> "\$out"/, "", raw)
+      gsub(/2>\/dev\/null|>\/dev\/null|2>&1|>&2|>&1|> "\$JSON_PATH"|>"\$JSON_PATH"|> "\$out"|> "\$OUT_PATH"/, "", raw)
       if (scan(raw) ~ />/) print "redirection: " $0 }'
   printf '%s\n' "$_code" | grep -E 'eval ' | grep -vE 'F_T_|_v=' | sed 's/^/eval of something else: /'
 }
@@ -260,10 +413,14 @@ mutant "redirect to a file" "echo hi > /tmp/f"
 mutant "sudo in text" "echo 'sudo ls'"
 mutant "rm -rf" "rm -rf /tmp/x"
 mutant "unknown command" "nmap localhost"
+mutant "ethtool -s (changes the NIC)" 'run_t 5 "$_et" -s eth0 wol g'
+mutant "ethtool -K" 'run_t 5 ethtool -K eth0 tso off'
+mutant "redirect to another variable" 'printf x > "$JSON_PATH.bak"'
+mutant "set -C used to write elsewhere" '( set -C; echo x > /tmp/x )'
 rm -rf "$mut_dir"
 eq "$(printf '%s\n' "x=1" | cmd_words)" "" "tokenizer ignores assignments"
 lines=$(wc -l < "$root/lanq-makeready.sh" | tr -d ' ')
-if [ "$lines" -le 750 ]; then ok "script is $lines lines (max 750)"; else bad "line count" "$lines" "<=750"; fi
+if [ "$lines" -le 900 ]; then ok "script is $lines lines (max 900)"; else bad "line count" "$lines" "<=900"; fi
 
 echo "smoke: real run of the script on this machine"
 out=${TMPDIR:-/tmp}/lanq-makeready-smoke.$$.json
@@ -281,6 +438,19 @@ fi
 host=$(hostname 2>/dev/null)
 if [ ${#host} -ge 2 ] && grep -q "[^A-Za-z0-9]${host}[^A-Za-z0-9]" "$out.txt" "$out" 2>/dev/null; then bad "smoke: hostname redacted" leaked hidden; else ok "smoke: hostname not in redacted output"; fi
 rm -f "$out" "$out.txt"
+echo "--out: saves the human report, never overwrites"
+od=${TMPDIR:-/tmp}/lanq-out.$$; mkdir -p "$od"
+LANQ_MAKEREADY_LIB=0 sh "$root/lanq-makeready.sh" --out "$od/r.txt" --redact >"$od/screen.txt" 2>&1; rc=$?
+case "$rc" in 0|1) ok "--out: exit $rc" ;; *) bad "--out exit" "$rc" "0 or 1" ;; esac
+eq "$(sed -n 2p "$od/r.txt" 2>/dev/null | cut -c1-8)" "VERDICT:" "--out: file holds the report (verdict on line 2)"
+eq "$(cmp -s "$od/r.txt" "$od/screen.txt" && echo same)" same "--out: file equals the screen report"
+printf 'keep me\n' > "$od/exists.txt"
+eq "$(LANQ_MAKEREADY_LIB=0 sh "$root/lanq-makeready.sh" --out "$od/exists.txt" >/dev/null 2>&1; echo $?)" 2 "--out to an existing file: exit 2"
+eq "$(cat "$od/exists.txt")" "keep me" "--out: existing file left untouched"
+eq "$(LANQ_MAKEREADY_LIB=0 sh "$root/lanq-makeready.sh" --out >/dev/null 2>&1; echo $?)" 2 "--out without a name: exit 2"
+eq "$(ls "$od" | wc -l | tr -d ' ')" 3 "--out: no other file written"
+rm -rf "$od"
+
 echo "smoke: stdout JSON mode (the SSH invocation)"
 so=$(LANQ_MAKEREADY_LIB=0 sh -s -- --json - --redact < "$root/lanq-makeready.sh" 2>/dev/null); rc=$?
 case "$rc" in 0|1) ok "sh -s -- --json - --redact < script: exit $rc" ;; *) bad "stdin mode exit" "$rc" "0 or 1" ;; esac
