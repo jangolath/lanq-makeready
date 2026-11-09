@@ -120,7 +120,10 @@ Assert-Equal (& $mk 19045 'Enterprise').V.dotnet10 'WARN' '.NET: Windows 10 22H2
 Assert-Equal (& $mk 9600 'ServerStandard' $true).V.dotnet10 'WARN' '.NET: Server 2012 R2 only with ESU -> WARN'
 Assert-Equal (& $mk 17763 'ServerStandard' $true).V.dotnet10 'OK' '.NET: Server 2019 OK'
 $nd = @{ DockerCli = $false; DockerServerOk = $false; HypervisorPresent = $true }
-Assert-Equal (Run (New-Facts ($nd + @{ Build = 22621 }))).V.docker 'FAIL' 'Docker Desktop: Windows 11 22H2 is below the 23H2 floor'
+Assert-Equal (Run (New-Facts ($nd + @{ Build = 22621 }))).V.docker 'WARN' 'Docker Desktop: Windows 11 22H2 is below the 23H2 floor -> WARN (usually runs)'
+Assert-True ((Ck (Run (New-Facts ($nd + @{ Build = 22621 }))) 'docker').detail -match 'usually runs') 'Docker Desktop: old-Windows-11 detail says it usually runs'
+Assert-Equal (Run (New-Facts ($nd + @{ Build = 19044 }))).V.docker 'WARN' 'Docker Desktop: Windows 10 below 22H2 -> WARN, same handling'
+Assert-Equal (Run (New-Facts ($nd + @{ Build = 26100; WslOk = $null }))).V.docker 'SKIP' 'Docker prerequisites: WSL state undeterminable -> SKIP, not WARN'
 Assert-Equal (Run (New-Facts ($nd + @{ Build = 22631 }))).V.docker 'OK' 'Docker Desktop: Windows 11 23H2 meets the floor'
 Assert-Equal (Run (New-Facts ($nd + @{ IsServer = $true; Build = 20348 }))).V.docker 'WARN' 'Docker Desktop: not available on Windows Server -> WARN'
 Assert-Equal (Run (New-Facts @{ DockerCli = $true; DockerServerOk = $false; DockerRemote = $true })).V.docker 'SKIP' 'remote docker endpoint: SKIP'
@@ -153,6 +156,22 @@ Assert-Equal (Get-PowercfgAcSeconds "x`r`n Aktueller Wechselstromeinstellungsind
 Assert-True ($null -eq (Get-PowercfgAcSeconds 'nothing here')) 'powercfg: no hex values -> null (SKIP)'
 $r = Run (New-Facts @{ StandbyAcSec = 0; HibernateAcSec = $null })
 Assert-Equal (St $r 'power.sleep') 'OK' 'sleep check does not SKIP just because hibernate is unreadable'
+
+Write-Host 'review fixes round 2: falsy one-element results, WSL tri-state, docker context'
+Assert-True ((Get-ProbeBool @($false)) -eq $false -and $null -ne (Get-ProbeBool @($false))) 'Defender off ([$false]) is $false, not unknown'
+Assert-True ($null -eq (Get-ProbeBool $null)) 'timed-out probe is unknown ($null)'
+Assert-True ((Get-ProbeInt @(0)) -eq 0 -and $null -ne (Get-ProbeInt @(0))) 'zero WoL adapters ([0]) is 0, not unknown'
+Assert-Equal (St (Run (New-Facts @{ DefenderRtp = (Get-ProbeBool @($false)) })) 'defender') 'OK' 'Defender off shows OK, not SKIP'
+Assert-Equal (St (Run (New-Facts @{ WolAdapters = (Get-ProbeInt @(0)) })) 'wol') 'OK' 'zero WoL adapters shows OK, not SKIP'
+Assert-Equal (Invoke-WithTimeout { param($x) $false } $null 10).Count 1 'Invoke-WithTimeout keeps a single $false result'
+Assert-Equal (Get-WslInstalled $true $null) $true 'WSL: service/key present -> installed'
+Assert-Equal (Get-WslInstalled $false $true) $true 'WSL: Store package present -> installed'
+Assert-Equal (Get-WslInstalled $false $false) $false 'WSL: nothing found, Store query answered no -> not installed'
+Assert-True ($null -eq (Get-WslInstalled $false $null)) 'WSL: Store query undeterminable -> unknown'
+Assert-True ($null -eq (Get-WslState $null { throw 'must not run' })) 'WSL unknown: wsl.exe is not run, result unknown'
+$ps1src = Get-Content -LiteralPath (Join-Path $root 'lanq-makeready.ps1') -Raw
+Assert-True ($ps1src -notmatch 'config\.json') 'docker config.json (may hold credentials) is never read'
+$env:DOCKER_CONTEXT = 'staging'; Assert-Equal (Get-DockerContext $null) 'staging' 'docker context comes from DOCKER_CONTEXT'; Remove-Item Env:\DOCKER_CONTEXT
 
 Write-Host 'probes: closed stdin, neutral cwd, probe env, deadlines, no WSL stub'
 $cmd = "$env:SystemRoot\System32\cmd.exe"
@@ -219,7 +238,7 @@ $funcNames = @($funcs | ForEach-Object { $_.Name })
 function Get-Fn($Node) { $p = $Node.Parent; while ($p) { if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $p.Name }; $p = $p.Parent }; return '' }
 $okCmds = @('ConvertFrom-Json', 'ConvertTo-Json', 'ForEach-Object', 'Get-Acl', 'Get-ChildItem', 'Get-CimInstance', 'Get-Command', 'Get-Content', 'Get-Item', 'Get-ItemProperty',
   'Get-Location', 'Get-MpComputerStatus', 'Get-NetAdapterPowerManagement', 'Get-NetFirewallRule', 'Get-Partition', 'Get-PhysicalDisk', 'Get-Service', 'Join-Path',
-  'Measure-Object', 'New-Object', 'Select-Object', 'Sort-Object', 'Test-Path', 'Where-Object', 'Write-Host')
+  'Measure-Object', 'Get-AppxPackage', 'New-Object', 'Select-Object', 'Sort-Object', 'Test-Path', 'Where-Object', 'Write-Host')
 $bad = @()
 foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
   $n = $c.GetCommandName(); $fn = Get-Fn $c
@@ -232,8 +251,8 @@ foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Lan
   }
   if ($n -eq 'Invoke-Bounded') {
     $exe = $c.CommandElements[1].Extent.Text; $arg = ''; if ($c.CommandElements.Count -gt 2) { $arg = $c.CommandElements[2].Extent.Text }
-    $okExe = @('$git', '$tar', '$dk', '$wsl', '$pc', '$e', '"$env:SystemRoot\System32\taskkill.exe"', 'param')
-    $okArg = @("'--version'", "'config --get core.longpaths'", '"version --format {{.Server.Version}}"', "'--status'", "'/q SCHEME_CURRENT SUB_SLEEP STANDBYIDLE'", "'/q SCHEME_CURRENT SUB_SLEEP HIBERNATEIDLE'", '$t[1]', '"/T /F /PID $ProcId"')
+    $okExe = @('$git', '$tar', '$dk', '$DockerExe', '$wsl', '$pc', '$e', '"$env:SystemRoot\System32\taskkill.exe"', 'param')
+    $okArg = @("'context show'", "'--version'", "'config --get core.longpaths'", '"version --format {{.Server.Version}}"', "'--status'", "'/q SCHEME_CURRENT SUB_SLEEP STANDBYIDLE'", "'/q SCHEME_CURRENT SUB_SLEEP HIBERNATEIDLE'", '$t[1]', '"/T /F /PID $ProcId"')
     if ($fn -ne 'Invoke-Bounded' -and $fn -ne 'Stop-Tree') {
       if ($okExe -notcontains $exe) { $bad += "Invoke-Bounded exe $exe" }
       if ($okArg -notcontains $arg) { $bad += "Invoke-Bounded args $arg" }
@@ -241,15 +260,42 @@ foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Lan
     }
   }
 }
-$okMembers = @('ToLowerInvariant', 'Translate', 'ContainsKey', 'ToString', 'Add', 'ToArray', 'Substring', 'ToUpper', 'Wait', 'WaitOne', 'Split', 'Trim', 'Contains', 'ReadToEndAsync',
-  'Close', 'AddScript', 'AddArgument', 'BeginInvoke', 'BeginStop', 'Dispose', 'EndInvoke', 'Pop', 'Push', 'WriteLine', 'Flush', 'Write', 'ToInt64', 'Min', 'Round', 'Escape', 'Matches',
-  'Replace', 'GetCurrent', 'StartNew', 'EnumerateDirectories', 'EnumerateFiles', 'IsPathRooted')
+# (expression, member) PAIRS: a call is allowed only on the exact receiver it is used on today.
+$okPairs = @(
+  '"$S"|ToLowerInvariant', '$ace.IdentityReference|Translate', '$Advice|ContainsKey', '$Block|ToString', '$c|Add', '$c|ToArray',
+  '$d.DeviceID.Substring(0, 1)|ToUpper', '$d.DeviceID|Substring', '$e|Wait', '$h.AsyncWaitHandle|WaitOne', '$H|Split', '$l|Trim', '$M|Contains',
+  '$Matches[1]|ToUpper', '$media|ContainsKey', '$n.Substring(0, 63)|Trim', '$n|Substring', '$o|Wait', '$p.StandardError|ReadToEndAsync',
+  '$p.StandardInput|Close', '$p.StandardOutput|ReadToEndAsync', '$p|Kill', '$p|WaitForExit', '$ps.AddScript($Block.ToString())|AddArgument',
+  '$ps|AddScript', '$ps|BeginInvoke', '$ps|BeginStop', '$ps|Dispose', '$ps|EndInvoke', '$rank|ContainsKey', '$stack|Pop', '$stack|Push',
+  '$w[0]|Substring', '$w[1]|Substring', '("$S".ToLowerInvariant() -replace ''[^a-z0-9-]'', ''-'')|Trim', '($cpu[0].Name -replace ''\s+'', '' '')|Trim',
+  '[Console]::Error|WriteLine', '[Console]::Out|Flush', '[Console]::Out|Write', '[Convert]|ToInt64', '[DateTime]::UtcNow|ToString', '[Environment]|Exit',
+  '[math]|Min', '[math]|Round', '[regex]|Escape', '[regex]|Matches', '[regex]|Replace', '[Security.Principal.WindowsIdentity]|GetCurrent',
+  '[System.Diagnostics.Process]|Start', '[System.Diagnostics.Stopwatch]|StartNew', '[System.IO.Directory]|EnumerateDirectories',
+  '[System.IO.Directory]|EnumerateFiles', '[System.IO.File]|WriteAllText', '[System.IO.Path]|IsPathRooted', '[System.Management.Automation.PowerShell]|Create')
 $onlyIn = @{ Start = 'Invoke-Bounded'; Kill = 'Invoke-Bounded'; WaitForExit = 'Invoke-Bounded'; Create = 'Invoke-WithTimeout'; WriteAllText = ''; Exit = '' }
 foreach ($m in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
   $mn = $m.Member.Extent.Text; $fn = Get-Fn $m
-  if ($onlyIn.ContainsKey($mn)) { if ($fn -ne $onlyIn[$mn]) { $bad += "member $mn in '$fn'" } }
-  elseif ($okMembers -notcontains $mn) { $bad += "member $mn" }
+  $pair = $m.Expression.Extent.Text + '|' + $mn
+  if ($okPairs -notcontains $pair) { $bad += "call $pair" }
+  if ($onlyIn.ContainsKey($mn) -and $fn -ne $onlyIn[$mn]) { $bad += "member $mn in '$fn'" }
 }
+$SA = 'System.Management.Automation.Language'
+$redirs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.RedirectionAst] }, $true))
+Assert-Equal $redirs.Count 0 'ps1 has no output redirection at all (the JSON report is written with WriteAllText)'
+$driveVars = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.VariableExpressionAst] -and $n.VariablePath.IsDriveQualified -and $n.VariablePath.DriveName -ne 'env' }, $true))
+Assert-Equal @($driveVars | ForEach-Object { $_.Extent.Text }).Count 0 'ps1 uses no drive-qualified variable other than $env: (no ${C:\file} reads or writes)'
+$okTargets = @('$F', '$F.Tools', '$m', '$media', '$o', '$psi', '$psi.EnvironmentVariables', '$s', '$t2')
+$badAssign = @()
+foreach ($a2 in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+  $l = $a2.Left
+  if ($l -is [System.Management.Automation.Language.VariableExpressionAst]) { if ($l.VariablePath.IsDriveQualified) { $badAssign += "drive/env assignment $($l.Extent.Text)" }; continue }
+  $root2 = ''
+  if ($l -is [System.Management.Automation.Language.MemberExpressionAst]) { $root2 = $l.Expression.Extent.Text }
+  elseif ($l -is [System.Management.Automation.Language.IndexExpressionAst]) { $root2 = $l.Target.Extent.Text }
+  else { $root2 = $l.Extent.Text }
+  if ($okTargets -notcontains $root2) { $badAssign += "assignment target $root2" }
+}
+Assert-Equal ($badAssign -join '; ') '' 'ps1 assigns only to local hashtables and ProcessStartInfo ($psi), never to env:/drive/other objects'
 $assign = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$Advice' }, $true))
 Assert-Equal $assign.Count 1 'one advice table'
 $ht = $assign[0].Right.Find({ param($n) $n -is [System.Management.Automation.Language.HashtableAst] }, $true)
@@ -261,9 +307,12 @@ $ps1 = Get-Content -LiteralPath $psPath -Raw
 Assert-Equal ([regex]::Matches($ps1, "@\('(?:node|python|java|go|rustc)', '(?:-{1,2}version|version)'\)")).Count 5 'ps1: exactly five toolchain probes, each only --version / -version / version'
 Assert-True ($ps1 -match "\[System\.IO\.File\]::WriteAllText\(\`$full" -and ([regex]::Matches($ps1, 'WriteAllText')).Count -eq 1) 'ps1: the only file write is the --json report'
 $sh = Get-Content -LiteralPath (Join-Path $root 'lanq-makeready.sh') -Raw
-foreach ($pat in @('Set-ItemProperty', 'Remove-Item', 'Set-Service', 'Start-Service', 'Stop-Service', 'Invoke-WebRequest', 'Invoke-RestMethod', 'Start-BitsTransfer', 'New-NetFirewallRule', 'Invoke-Expression')) {
-  Assert-True ($ps1 -notmatch [regex]::Escape($pat) -or $ps1.Contains("'" )) "ps1 has no $pat" | Out-Null
+$adv0 = $ps1.IndexOf('#region ADVICE'); $adv1 = $ps1.IndexOf('#endregion ADVICE')
+$noAdvice = $ps1.Substring(0, $adv0) + $ps1.Substring($adv1)
+foreach ($pat in @('Set-ItemProperty', 'Remove-Item', 'Set-Service', 'Start-Service', 'Stop-Service', 'Invoke-WebRequest', 'Invoke-RestMethod', 'Start-BitsTransfer', 'New-NetFirewallRule', 'Invoke-Expression', 'Out-File', 'Set-Content', 'Add-Content', 'Start-Process', 'New-Item')) {
+  Assert-True ($noAdvice -notmatch [regex]::Escape($pat)) "ps1 outside the advice table has no $pat"
 }
+Assert-True (('x Remove-Item y' -match [regex]::Escape('Remove-Item'))) 'the text scan can fail (sanity)'
 Assert-True ((Get-Content -LiteralPath (Join-Path $root 'schema/report.v1.json') -Raw | ConvertFrom-Json).title) 'schema parses as JSON'
 
 if (-not $SkipSmoke) {
@@ -308,8 +357,10 @@ if (-not $SkipSmoke) {
   $p.StandardInput.Write((Get-Content -LiteralPath $script -Raw)); $p.StandardInput.Close()
   [void]$p.WaitForExit(180000)
   $txt = $so.Result
-  Assert-True (@(0, 1) -contains $p.ExitCode) "stdin mode: exit code in {0,1} (got $($p.ExitCode))"
   $j2 = $txt | ConvertFrom-Json
+  $expect = 1; if ($j2.verdicts.worker_git -ne 'FAIL' -or $j2.verdicts.worker_archive -ne 'FAIL') { $expect = 0 }
+  Assert-Equal $p.ExitCode $expect "stdin mode: exit code equals the one implied by the verdicts ($expect)"
+  Assert-Equal ($se.Result.Trim()) '' 'stdin mode: nothing on stderr'
   Assert-Equal $j2.schema 'lanq-makeready/v1' 'stdin mode: stdout is the JSON report'
   Assert-True ($txt.TrimStart().StartsWith('{') -and $txt -notmatch 'read-only: nothing is installed') 'stdin mode: nothing but JSON on stdout'
   Assert-True (-not (Hide-Leak $txt $env:COMPUTERNAME) -and -not (Hide-Leak $txt $env:USERNAME)) 'stdin mode: redacted'

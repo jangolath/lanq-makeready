@@ -1,5 +1,5 @@
 #!/bin/sh
-# shellcheck disable=SC2034,SC2153
+# shellcheck disable=SC2034,SC2153,SC2016,SC2329,SC2116,SC2086
 # POSIX test runner: sources lanq-makeready.sh as a library (LANQ_MAKEREADY_LIB=1) and feeds fixtures.
 # Usage: sh tests/run.sh        (from anywhere)
 here=$(cd "$(dirname "$0")" && pwd)
@@ -8,6 +8,7 @@ pass=0; fail=0
 
 LANQ_MAKEREADY_LIB=1
 export LANQ_MAKEREADY_LIB
+__lanq_makeready_test_harness() { :; } # the script refuses LANQ_MAKEREADY_LIB=1 unless this exists
 # shellcheck disable=SC1091
 . "$root/lanq-makeready.sh"
 
@@ -98,8 +99,10 @@ eq "$(ver_num 2.35-0ubuntu3)" 2035000 "ver_num strips suffix"
 leaks() { printf '%s\n' "$1" | grep -Eq "(^|[^A-Za-z0-9_])$2([^A-Za-z0-9_]|\$)"; }
 
 echo "review fixes: ram, ssh socket, docker remote, dotnet rule, names, redaction, json_esc"
-eq "$([ "$(ram_installed_mb 3900)" -ge 4096 ] && echo yes)" yes "4 GB machine (MemTotal 3900 MB) counts as 4 GB installed"
-eq "$([ "$(ram_installed_mb 3300)" -lt 4096 ] && echo yes)" yes "3.2 GB MemTotal is still below 4 GB"
+eq "$(ram_installed_mb 3900)" 4096 "4 GB machine (MemTotal 3900 MB) counts as 4 GB installed"
+eq "$(ram_installed_mb 2900)" 3072 "2.8 GiB MemTotal is a 3 GiB machine, still below 4 GB"
+eq "$(ram_installed_mb 16179)" 16384 "15.8 GiB MemTotal rounds up to 16 GiB"
+eq "$(ram_installed_mb 7900)" 8192 "7.7 GiB MemTotal rounds up to 8 GiB"
 fixture_ubuntu; F_SSHD=socket; run
 eq "$(st ssh.server)" OK "socket-activated sshd: OK"
 contains "$(printf '%s' "$CHECKS" | grep '^ssh.server')" "socket-activated" "socket-activated detail"
@@ -152,11 +155,18 @@ eq "$(printf '%s' "$red2" | grep -c '"status": "')" "$(printf '%s' "$red2" | gre
 
 echo "arguments and stdin mode"
 eq "$(LANQ_MAKEREADY_LIB=1 sh "$root/lanq-makeready.sh" >/dev/null 2>&1; echo $?)" 2 "LANQ_MAKEREADY_LIB=1 on a direct run: exit 2"
+eq "$(LANQ_MAKEREADY_LIB=1 sh -s < "$root/lanq-makeready.sh" >/dev/null 2>&1; echo $?)" 2 "LANQ_MAKEREADY_LIB=1 under 'sh -s' (\$0 is sh): exit 2, not a silent 0"
+eq "$(grep -c 'config.json' "$root/lanq-makeready.sh")" 0 "docker config.json (may hold credentials) is never read"
 
-echo "read-only guard (command allow-list)"
-begin=$(grep -c '^# BEGIN ADVICE$' "$root/lanq-makeready.sh"); eq "$begin" 1 "one advice-table start marker"
-code=$(awk '/^# BEGIN ADVICE$/ {skip=1} !skip {print} /^# END ADVICE$/ {skip=0}' "$root/lanq-makeready.sh")
-# scan(): drops quoted text and ${...}, keeps the inside of $(...) as code. Used for the command-word list and the redirect check.
+echo "bounded runner without timeout(1) (every Mac)"
+have() { case "$1" in timeout|gtimeout) return 1 ;; esac; command -v "$1" >/dev/null 2>&1; }
+t0=$(date +%s); out=$(run_t 2 sleep 8); t1=$(date +%s) # inside $( ) an orphaned tool would keep the pipe open for the full 8 s
+eq "$([ $((t1 - t0)) -lt 4 ] && echo fast)" fast "fallback: run_t 2 sleep 8 returns in under 4 s (took $((t1 - t0)) s)"
+eq "$(run_t 5 echo hi)" hi "fallback: normal command output is returned"
+unset -f have
+have() { command -v "$1" >/dev/null 2>&1; }
+
+echo "read-only guard (command allow-list; a test-time tripwire, not a sandbox)"
 scan_awk='
 function scan(l,   i, c, n, out, d, sq, dq, len) {
   gsub(/\$\{[^}]*\}/, "X", l)
@@ -175,43 +185,83 @@ function scan(l,   i, c, n, out, d, sq, dq, len) {
   sub(/(^|[ \t])#.*$/, "", out)
   return out
 }'
-words=$(printf '%s\n' "$code" | awk "$scan_awk"'
-  /^[ \t]*#/ || /^EOF$/ { next }
-  {
-    l = scan($0)
-    while (match(l, /(^[ 	]*|;;[ \t]*|[ \t]in[ \t]+)[^ \t;()]+\)/)) l = substr(l, 1, RSTART - 1) " ; " substr(l, RSTART + RLENGTH)
-    n = split(l, seg, /[;|&(){}]/)
-    for (i = 1; i <= n; i++) {
-      t = seg[i]; sub(/^[ \t]+/, "", t)
-      while (t ~ /^(if|then|elif|else|do|while|until|!)[ \t]/) sub(/^[^ \t]+[ \t]+/, "", t)
-      if (t ~ /^(for|case)[ \t]/) continue
-      split(t, w, /[ \t]/)
-      if (w[1] != "" && w[1] !~ /^[A-Za-z_][A-Za-z0-9_]*=/ && w[1] !~ /^[$<>0-9=-]/ && w[1] !~ /^\[/ && w[1] != "X" && w[2] !~ /^[-+*\/%]$/ && w[1] !~ /[*?\]:|]/) print w[1]
-    }
-  }' | sort -u)
-allowed=" printf echo awk sed tr cut head wc grep find cat command readlink uname hostname id df getconf ldd sw_vers sysctl vm_stat pmset launchctl pgrep systemctl gsettings xcode-select docker git tar gzip du date sleep kill wait timeout gtimeout sh exec cd exit return export eval read test /usr/libexec/java_home shift sort true false break continue fi done esac then else elif do in "
-extra=""; bad_cmd=""
-for w in $words; do
-  case "$allowed" in *" $w "*) continue ;; esac
-  if grep -Eq "^[[:space:]]*$w\(\)" "$root/lanq-makeready.sh"; then continue; fi
-  extra="$extra $w"
-done
-eq "$extra" "" "every command word is allow-listed or a function defined in the script"
-for w in $words; do
-  forbidden=" sudo chmod chown apk apt apt-get dnf yum rm mv cp ln mkdir touch tee curl wget nc ssh scp mount dd su install useradd passwd iex "
-  case "$forbidden" in *" $w "*) bad_cmd="$bad_cmd $w" ;; esac
-done
-eq "$bad_cmd" "" "no forbidden command word (rm, chmod, apk, apt, curl, ssh, ...)"
-eq "$(printf '%s\n' "$code" | grep -cE '(^|[^A-Za-z_])sudo([^A-Za-z_]|$)')" 0 "sudo appears nowhere outside the advice table"
-forbid=$(printf '%s\n' "$code" | grep -nE 'systemctl[[:space:]]+(mask|unmask|enable|disable|start|stop|restart|daemon-reload)|gsettings[[:space:]]+set|pmset[[:space:]]+-a|launchctl[[:space:]]+(load|unload|bootstrap|bootout|kickstart|enable|disable)|docker[[:space:]]+(run|pull|build|rm|rmi|exec|start|stop|system|volume|network|login|push)|git[[:space:]]+(config[[:space:]]+--(global|system)|clone|fetch|pull|push|checkout)|Out-File|Set-Content|Start-Process|cmd /c' || true)
-eq "$forbid" "" "no mutating systemctl/gsettings/pmset/launchctl/docker/git subcommands"
-redirs=$(printf '%s\n' "$code" | awk "$scan_awk"'
-  /^[ \t]*#/ { next }
-  { raw = $0
-    gsub(/2>\/dev\/null|>\/dev\/null|2>&1|>&2|>&1|> "\$JSON_PATH"|>"\$JSON_PATH"/, "", raw)
-    if (scan(raw) ~ />/) print $0 }')
-eq "$redirs" "" "output redirections only go to /dev/null, stderr/stdout, or the --json file"
-eq "$(printf '%s\n' "$code" | grep -E 'eval ' | grep -vcE 'F_T_|_v=')" 0 "eval is used only for the F_T_* tool variables"
+# statement-start words of the code on stdin
+cmd_words() {
+  awk "$scan_awk"'
+    /^[ \t]*#/ || /^EOF$/ { next }
+    {
+      l = scan($0)
+      while (match(l, /(^[ \t]*|;;[ \t]*|[ \t]in[ \t]+)[^ \t;()]+\)/)) l = substr(l, 1, RSTART - 1) " ; " substr(l, RSTART + RLENGTH)
+      n = split(l, seg, /[;|&(){}]/)
+      for (i = 1; i <= n; i++) {
+        t = seg[i]; sub(/^[ \t]+/, "", t)
+        while (t ~ /^(if|then|elif|else|do|while|until|!)[ \t]/) sub(/^[^ \t]+[ \t]+/, "", t)
+        if (t ~ /^(for|case)[ \t]/) continue
+        split(t, w, /[ \t]/)
+        if (w[1] != "" && w[1] !~ /^[A-Za-z_][A-Za-z0-9_]*=/ && w[1] !~ /^[$<>0-9=-]/ && w[1] !~ /^\[/ && w[1] != "X" && w[2] !~ /^[-+*\/%]$/ && w[1] !~ /[*?\]:|]/) print w[1]
+      }
+    }' | sort -u
+}
+allowed=" printf echo awk sed tr cut head wc grep find cat command readlink uname hostname id df getconf ldd sw_vers sysctl vm_stat pmset launchctl pgrep systemctl gsettings xcode-select docker git tar gzip du date sleep kill wait timeout gtimeout sh exec cd exit return export eval read test /usr/libexec/java_home type shift sort true false break continue fi done esac then else elif do in while for if case until [ ]] "
+forbidden=" sudo chmod chown apk apt apt-get dnf yum rm mv cp ln mkdir touch tee curl wget nc ssh scp mount dd su install useradd passwd iex bash "
+# guard_check FILE: prints one line per violation (nothing when clean)
+guard_check() {
+  _f=$1
+  _code=$(awk '/^# BEGIN ADVICE$/ {skip=1} !skip {print} /^# END ADVICE$/ {skip=0}' "$_f")
+  _fns=$(grep -E '^[a-z_0-9]+\(\)' "$_f" | sed 's/().*//')
+  for _w in $(printf '%s\n' "$_code" | cmd_words); do
+    case "$allowed" in *" $_w "*) continue ;; esac
+    case " $(echo $_fns) " in *" $_w "*) continue ;; esac
+    echo "unknown command word: $_w"
+  done
+  for _w in $(printf '%s\n' "$_code" | cmd_words); do case "$forbidden" in *" $_w "*) echo "forbidden command word: $_w" ;; esac; done
+  # sh -c bodies are code too
+  printf '%s\n' "$_code" | grep -o "sh -c '[^']*'" | sed -e "s/^sh -c '//" -e "s/'\$//" | cmd_words | while read -r _w; do
+    case "$allowed cd exit export exec " in *" $_w "*) ;; *) echo "unknown command word in sh -c body: $_w" ;; esac
+  done
+  printf '%s\n' "$_code" | grep -nE 'sh -c "|bash -c' | sed 's/^/double-quoted or bash -c body: /'
+  # raw text (quotes included)
+  printf '%s\n' "$_code" | grep -nE '(^|[^A-Za-z_])sudo([^A-Za-z_]|$)|sed[[:space:]]+(-[A-Za-z]*i|--in-place)|find[[:space:]].*-(delete|exec|execdir|ok)|system[[:space:]]*\(|getline|rm[[:space:]]+-[A-Za-z]|chmod[[:space:]]|chown[[:space:]]|mkfs|dd[[:space:]]+if=' | sed 's/^/raw: /'
+  printf '%s\n' "$_code" | grep -nE 'awk' | grep -E '(print|printf)[^;}]*[^-=<]>[^=]|print[^;}]*\|[[:space:]]*"' | sed 's/^/awk write or pipe: /'
+  printf '%s\n' "$_code" | grep -n '`' | sed 's/^/backtick: /'
+  printf '%s\n' "$_code" | grep -nE 'eval ' | grep -E '\$\(|`' | sed 's/^/eval with substitution: /'
+  printf '%s\n' "$_code" | grep -nE 'systemctl[^|;&]*[[:space:]](enable|disable|start|stop|mask|unmask|restart|reload|daemon-reload|set-default|edit)([[:space:]]|$)|gsettings[[:space:]]+set|pmset[[:space:]]+-a|launchctl[[:space:]]+(load|unload|bootstrap|bootout|kickstart|enable|disable)|docker[[:space:]]+(run|pull|build|rm|rmi|exec|start|stop|system|volume|network|login|push|cp|commit)|git[[:space:]]+(clone|fetch|pull|push|checkout|add|commit)|Out-File|Set-Content|Start-Process|cmd /c' | sed 's/^/mutating subcommand: /'
+  printf '%s\n' "$_code" | grep -E 'git[[:space:]]+config' | grep -vE 'git[[:space:]]+config[[:space:]]+--get[[:space:]]' | sed 's/^/git config other than --get: /'
+  printf '%s\n' "$_code" | awk "$scan_awk"'
+    /^[ \t]*#/ { next }
+    { raw = $0
+      gsub(/2>\/dev\/null|>\/dev\/null|2>&1|>&2|>&1|> "\$JSON_PATH"|>"\$JSON_PATH"|> "\$out"/, "", raw)
+      if (scan(raw) ~ />/) print "redirection: " $0 }'
+  printf '%s\n' "$_code" | grep -E 'eval ' | grep -vE 'F_T_|_v=' | sed 's/^/eval of something else: /'
+}
+begin=$(grep -c '^# BEGIN ADVICE$' "$root/lanq-makeready.sh"); eq "$begin" 1 "one advice-table start marker"
+eq "$(guard_check "$root/lanq-makeready.sh")" "" "script passes the guard (command words, raw text, redirections, eval, sh -c bodies)"
+# negative tests: each injected line must be caught
+mut_dir=${TMPDIR:-/tmp}/lanq-mut.$$
+mkdir -p "$mut_dir"
+mutant() { # name, line
+  cp "$root/lanq-makeready.sh" "$mut_dir/m.sh"; printf '%s\n' "$2" >> "$mut_dir/m.sh"
+  if [ -n "$(guard_check "$mut_dir/m.sh")" ]; then ok "guard catches: $1"; else bad "guard catches: $1" "not flagged" "flagged"; fi
+}
+mutant "sed -i" "sed -i s/a/b/ /etc/hosts"
+mutant "find -delete" "find / -name x -delete"
+mutant "find -exec" "find . -exec touch {} +"
+mutant "awk system()" "awk 'BEGIN { system(\"id\") }'"
+mutant "awk getline pipe" "awk 'BEGIN { \"id\" | getline y }'"
+mutant "awk print >" "awk 'BEGIN { print 1 > \"/tmp/x\" }'"
+mutant "sh -c body" "sh -c 'rm -rf /tmp/x'"
+mutant "sh -c double-quoted" "sh -c \"id\""
+mutant "backtick" 'x=`id`'
+mutant "eval with \$(" 'eval "y=$(id)"'
+mutant "systemctl restart" "systemctl restart ssh"
+mutant "systemctl --user mask" "systemctl --user mask foo"
+mutant "git config write" "git config user.name x"
+mutant "redirect to a file" "echo hi > /tmp/f"
+mutant "sudo in text" "echo 'sudo ls'"
+mutant "rm -rf" "rm -rf /tmp/x"
+mutant "unknown command" "nmap localhost"
+rm -rf "$mut_dir"
+eq "$(printf '%s\n' "x=1" | cmd_words)" "" "tokenizer ignores assignments"
 lines=$(wc -l < "$root/lanq-makeready.sh" | tr -d ' ')
 if [ "$lines" -le 750 ]; then ok "script is $lines lines (max 750)"; else bad "line count" "$lines" "<=750"; fi
 

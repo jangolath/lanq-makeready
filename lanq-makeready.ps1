@@ -143,11 +143,24 @@ function Select-WorkDrive($Drives, [string]$SysDrive) {
 }
 
 # Never run wsl.exe unless WSL is installed (the inbox stub can offer to install it).
-function Get-WslState([bool]$Installed, [scriptblock]$Run) {
+# $Installed is $true, $false, or $null (could not be determined): the answer is then $null as well.
+function Get-WslState($Installed, [scriptblock]$Run) {
+  if ($null -eq $Installed) { return $null }
   if (-not $Installed) { return $false }
   $r = & $Run
   return [bool]($r -and $r.Ok)
 }
+
+# Feature/service or registry says installed; otherwise the Store package decides ($null = unknown).
+function Get-WslInstalled([bool]$ServiceOrKey, $StorePackage) {
+  if ($ServiceOrKey) { return $true }
+  if ($null -eq $StorePackage) { return $null }
+  return [bool]$StorePackage
+}
+
+# A one-element result array holding $false or 0 is falsy in PowerShell: only $null means "unknown".
+function Get-ProbeBool($R) { if ($null -eq $R) { return $null }; return [bool](@($R)[0]) }
+function Get-ProbeInt($R) { if ($null -eq $R) { return $null }; return [int](@($R)[0]) }
 
 function Test-Sdk8([object[]]$Majors) { return [bool](@($Majors | Where-Object { [int]$_ -ge 8 }).Count) }
 
@@ -157,9 +170,9 @@ function Get-DockerCheck($F) {
   if ($F.DockerServerOk) { return New-Check 'docker' $t 'OK' "engine answering (server $($F.DockerServer))" }
   if ($F.DockerCli) { return New-Check 'docker' $t 'WARN' 'client installed but engine not reachable' 'docker.daemon' }
   if (-not $F.Is64) { return New-Check 'docker' $t 'FAIL' '32-bit Windows cannot run Docker' 'arch32' }
-  if ($F.Build -lt 19045) { return New-Check 'docker' $t 'FAIL' "Windows build $($F.Build) is older than 19045 (22H2)" 'docker.build' }
+  if ($F.Build -lt 19045) { return New-Check 'docker' $t 'WARN' "Windows build $($F.Build) is below Docker's listed minimum (19045 / 22H2); usually runs" 'docker.build' }
   if ($F.IsServer) { return New-Check 'docker' $t 'WARN' 'Docker Desktop is not available on Windows Server' 'docker.server' }
-  if ($F.Build -ge 22000 -and $F.Build -lt 22631) { return New-Check 'docker' $t 'FAIL' "Windows 11 build $($F.Build) is older than 22631 (23H2)" 'docker.build' }
+  if ($F.Build -ge 22000 -and $F.Build -lt 22631) { return New-Check 'docker' $t 'WARN' "Windows 11 build $($F.Build) is below Docker's listed minimum (22631 / 23H2); usually runs" 'docker.build' }
   $virt = ($F.HypervisorPresent -eq $true) -or ($F.VirtFirmware -eq $true)
   $note = ''
   if ($F.HypervisorPresent -eq $true) { $note = ' (a hypervisor is already running, so virtualization is enabled)' }
@@ -167,6 +180,7 @@ function Get-DockerCheck($F) {
   if ($F.RamGB -lt 4) { return New-Check 'docker' $t 'WARN' "only $($F.RamGB) GB RAM: containers not recommended" 'docker.ram' }
   if ($F.RamGB -lt 8) { return New-Check 'docker' $t 'WARN' "Docker Desktop wants 8 GB RAM, this PC has $($F.RamGB) GB" 'docker.ram' }
   if ($F.WslOk -eq $false) { return New-Check 'docker' $t 'WARN' 'not installed, and WSL 2 was not found' 'docker.wsl' }
+  if ($null -eq $F.WslOk) { return New-Check 'docker' $t 'SKIP' 'could not determine whether WSL is installed' }
   return New-Check 'docker' $t 'OK' "not installed; prerequisites look fine$note"
 }
 
@@ -454,13 +468,13 @@ function Get-IsAdminUser {
   } catch { return $false }
 }
 
-function Get-DockerContext {
-  $ctx = $env:DOCKER_CONTEXT
-  if (-not $ctx) {
-    try { $cfg = "$env:USERPROFILE\.docker\config.json"
-      if (Test-Path -LiteralPath $cfg) { $ctx = (Get-Content -LiteralPath $cfg -Raw | ConvertFrom-Json).currentContext } } catch { }
-  }
-  return "$ctx"
+# Context name from the environment, else `docker context show` (local; prints a name, never credentials).
+function Get-DockerContext([string]$DockerExe) {
+  if ($env:DOCKER_CONTEXT) { return "$env:DOCKER_CONTEXT" }
+  if (-not $DockerExe) { return '' }
+  $r = Invoke-Bounded $DockerExe 'context show' 5
+  if ($r -and $r.Ok) { return (Get-FirstLine $r.Out) }
+  return ''
 }
 
 function Get-Facts([string]$H) {
@@ -501,7 +515,7 @@ function Get-Facts([string]$H) {
   $F.SshdInstalled = [bool]($svc -or (Test-Path "$env:WINDIR\System32\OpenSSH\sshd.exe"))
   if ($svc) { $F.SshdRunning = ($svc.Status -eq 'Running'); $F.SshdStartType = "$($svc.StartType)" }
   $fw = Invoke-WithTimeout { param($x) (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction Stop).Enabled } $null 15
-  if ($fw) { $F.SshFirewall = ("$($fw[0])" -eq 'True') } else { $F.SshFirewall = $null }
+  if ($null -ne $fw) { $F.SshFirewall = ("$(@($fw)[0])" -eq 'True') } else { $F.SshFirewall = $null }
   try { $F.DefaultShell = (Get-ItemProperty 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -ErrorAction Stop).DefaultShell } catch { }
   $F.IsAdminUser = Get-IsAdminUser
   $ak = Join-Path $env:USERPROFILE '.ssh\authorized_keys'
@@ -526,11 +540,14 @@ function Get-Facts([string]$H) {
   $F.DotnetSdks = @($majors | Sort-Object -Unique)
   # docker (a remote endpoint is never probed), wsl (never run unless installed)
   $dk = Find-Exe 'docker'; $F.DockerCli = [bool]$dk; $F.DockerServerOk = $false
-  $F.DockerRemote = Test-DockerRemote $env:DOCKER_HOST (Get-DockerContext)
+  $F.DockerRemote = Test-DockerRemote $env:DOCKER_HOST (Get-DockerContext $dk)
   if ($dk -and -not $F.DockerRemote) { $r = Invoke-Bounded $dk "version --format {{.Server.Version}}" 10; if ($r -and $r.Ok -and (Get-FirstLine $r.Out)) { $F.DockerServerOk = $true; $F.DockerServer = Get-FirstLine $r.Out } }
   $wsl = "$env:SystemRoot\System32\wsl.exe"
   $lx = [bool]((Get-Service LxssManager -ErrorAction SilentlyContinue) -or (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss'))
-  $F.WslOk = Get-WslState ($lx -and (Test-Path -LiteralPath $wsl)) { Invoke-Bounded $wsl '--status' 8 -Utf16 }
+  $store = $null
+  if (-not $lx) { $sp = Invoke-WithTimeout { param($x) @(Get-AppxPackage -Name MicrosoftCorporationII.WindowsSubsystemForLinux -ErrorAction Stop | Select-Object -ExpandProperty Name) } $null 20
+    if ($null -ne $sp) { $store = (@($sp[0]).Count -gt 0) } }
+  $F.WslOk = Get-WslState (Get-WslInstalled $lx $store) { Invoke-Bounded $wsl '--status' 8 -Utf16 }
   # other tools
   $F.Tools = @{}
   foreach ($t in @(@('node', '--version'), @('python', '--version'), @('java', '-version'), @('go', 'version'), @('rustc', '--version'))) {
@@ -545,14 +562,14 @@ function Get-Facts([string]$H) {
   try { $ah = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings' -ErrorAction Stop
     if ($null -ne $ah.ActiveHoursStart) { $F.ActiveStart = [int]$ah.ActiveHoursStart; $F.ActiveEnd = [int]$ah.ActiveHoursEnd } } catch { }
   $wol = Invoke-WithTimeout { param($x) @(Get-NetAdapterPowerManagement -ErrorAction Stop | Where-Object { "$($_.WakeOnMagicPacket)" -eq 'Enabled' }).Count } $null 15
-  if ($wol) { $F.WolAdapters = [int]$wol[0] } else { $F.WolAdapters = $null }
+  $F.WolAdapters = Get-ProbeInt $wol
   # slowdowns
   try { $su = @(Get-CimInstance Win32_StartupCommand -OperationTimeoutSec 15); $F.StartupCount = $su.Count; $F.StartupNames = @($su | Select-Object -First 5 | ForEach-Object { $_.Name }) } catch { }
   $F.TempSizes = @()
   foreach ($p in @(@('user temp', $env:TEMP), @('Windows temp', "$env:WINDIR\Temp"), @('NuGet packages', "$env:USERPROFILE\.nuget\packages"), @('npm cache', "$env:LOCALAPPDATA\npm-cache"))) {
     $z = Get-DirSizeMB $p[1] 3; if ($z) { $F.TempSizes += @{ Name = $p[0]; MB = $z.MB; Capped = $z.Capped } } }
   $df = Invoke-WithTimeout { param($x) (Get-MpComputerStatus -ErrorAction Stop).RealTimeProtectionEnabled } $null 15
-  if ($df) { $F.DefenderRtp = [bool]$df[0] } else { $F.DefenderRtp = $null }
+  $F.DefenderRtp = Get-ProbeBool $df
   $F.DevDrive = ($F.Build -ge 22631)
   try { $F.ProblemDevices = @(Get-CimInstance Win32_PnPEntity -OperationTimeoutSec 20 | Where-Object { $_.ConfigManagerErrorCode -ne 0 } | ForEach-Object { $_.Name }) } catch { $F.ProblemDevices = $null }
   return $F
@@ -575,6 +592,7 @@ if ($Hours -and -not (Test-Hours $Hours)) {
   exit 2
 }
 $StdoutJson = ($Json -eq '-')
+if ($StdoutJson) { $WarningPreference = 'SilentlyContinue'; $ProgressPreference = 'SilentlyContinue'; $InformationPreference = 'SilentlyContinue'; $VerbosePreference = 'SilentlyContinue' }
 $rank = @{ OK = 'OK  '; WARN = 'WARN'; FAIL = 'FAIL'; SKIP = 'SKIP' }
 $color = @{ OK = 'Green'; WARN = 'Yellow'; FAIL = 'Red'; SKIP = 'DarkGray' }
 $facts = Get-Facts $Hours

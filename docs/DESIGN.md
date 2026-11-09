@@ -156,3 +156,9 @@ With `--redact`: hostname, user and any absolute user-profile paths replaced by 
 - Opt-in, per-item, confirm-each `--fix` for a short list of safe, reversible items (sleep-on-AC off, start sshd,
   enable long paths) — only after v0.1 is proven on real old machines.
 - Signed releases (GitHub artifact attestations first; Authenticode later if worth the cost).
+
+## Note on the guard tests
+
+The read-only guard tests (AST allow-list for PowerShell, command-word allow-list for sh, plus injected-mutation tests) are a
+test-time tripwire against accidental mutating code. They are not a sandbox and cannot prove the scripts are safe: the read-only
+guarantee rests on the scripts being short enough to read and on review. Docker credentials in `~/.docker/config.json` are never read.

@@ -94,7 +94,7 @@ valid_hours() { # HH:MM-HH:MM, hours 00-23, start differs from end
   [ "${_s%%:*}" -le 23 ] && [ "${_e%%:*}" -le 23 ]
 }
 
-ram_installed_mb() { echo $(( $1 + 512 )); } # MemTotal is below installed RAM (kernel/firmware reserve)
+ram_installed_mb() { echo $(( ($1 + 1023) / 1024 * 1024 )); } # MemTotal is below installed RAM (kernel/firmware reserve): round up to whole GiB
 
 safe_name() { # lowercase [a-z0-9-], no leading/trailing '-', fallback old-pc
   _n=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed -e 's/^-*//' -e 's/-*$//' | cut -c1-63)
@@ -139,12 +139,14 @@ redact_facts() { # only free-text facts; fields that drive logic are untouched
   F_OSNAME=$(rv "$F_OSNAME"); F_CPU=$(rv "$F_CPU"); F_GIT=$(rv "$F_GIT"); F_DOCKER_SERVER=$(rv "$F_DOCKER_SERVER"); F_TEMP=$(rv "$F_TEMP")
   for _n in node python java go rustc; do
     eval "_v=\${F_T_$_n:-}"
-    [ -n "$_v" ] && eval "F_T_$_n=\$(rv \"\$_v\")"
+    [ -n "$_v" ] || continue
+    _rv=$(rv "$_v")
+    eval "F_T_$_n=\$_rv"
   done
   F_HOST="<redacted>"; F_USER="<redacted>"
 }
 
-classify_tar() { # text of `tar --version 2>&1` -> gnu | bsd | busybox | none
+classify_tar() { # text of tar --version (stderr included) -> gnu | bsd | busybox | none
   case "$1" in
     *"GNU tar"*) echo gnu ;;
     *bsdtar*) echo bsd ;;
@@ -355,8 +357,8 @@ render_json() { # $1 = 1 when redacting
 $CHECKS
 EOF
   printf '\n  ],\n'
-  printf '  "capabilities": [%s],\n' "$(printf '%s' "$M_CAPS" | sed -e 's/, linux$//' -e 's/^linux$//' | awk -F', ' 'NF { for (i = 1; i <= NF; i++) printf "%s\"%s\"", (i > 1 ? ", " : ""), $i }')"
-  printf '  "suggestedMachine": {"name": "%s", "os": "%s", "ssh": "%s", "work_root": "/srv/lq", "capabilities": [%s], "max_jobs": %s, "transfer": "%s"' "$(json_esc "$M_NAME")" "$M_OS" "$(json_esc "$M_SSH")" "$(printf '%s' "$M_CAPS" | awk -F', ' 'NF { for (i = 1; i <= NF; i++) printf "%s\"%s\"", (i > 1 ? ", " : ""), $i }')" "$M_JOBS" "$M_TRANSFER"
+  printf '  "capabilities": [%s],\n' "$(printf '%s' "$M_CAPS" | sed -e 's/, linux$//' -e 's/^linux$//' | awk -F', ' 'NF { for (i = 1; i <= NF; i++) printf "%s\"%s\"", (i == 1 ? "" : ", "), $i }')"
+  printf '  "suggestedMachine": {"name": "%s", "os": "%s", "ssh": "%s", "work_root": "/srv/lq", "capabilities": [%s], "max_jobs": %s, "transfer": "%s"' "$(json_esc "$M_NAME")" "$M_OS" "$(json_esc "$M_SSH")" "$(printf '%s' "$M_CAPS" | awk -F', ' 'NF { for (i = 1; i <= NF; i++) printf "%s\"%s\"", (i == 1 ? "" : ", "), $i }')" "$M_JOBS" "$M_TRANSFER"
   [ -n "$M_HOURS" ] && printf ', "allowed_hours": "%s"' "$M_HOURS"
   printf '}\n}\n'
 }
@@ -376,13 +378,12 @@ mac_probe_ok() {
 }
 
 # Probes run from / with toolchain auto-download and prompts switched off.
-neutral() { sh -c 'cd / || exit 1; GOTOOLCHAIN=local; RUSTUP_AUTO_INSTALL=0; GIT_TERMINAL_PROMPT=0; DOCKER_CLI_HINTS=false; export GOTOOLCHAIN RUSTUP_AUTO_INSTALL GIT_TERMINAL_PROMPT DOCKER_CLI_HINTS; exec "$@"' sh "$@"; }
 
 run_t() { # run_t SECONDS cmd args... : bounded, stdin closed, never hangs the script
   _secs=$1; shift
   if have timeout; then timeout "$_secs" sh -c 'cd / || exit 1; GOTOOLCHAIN=local; RUSTUP_AUTO_INSTALL=0; GIT_TERMINAL_PROMPT=0; DOCKER_CLI_HINTS=false; export GOTOOLCHAIN RUSTUP_AUTO_INSTALL GIT_TERMINAL_PROMPT DOCKER_CLI_HINTS; exec "$@"' sh "$@" </dev/null; return $?; fi
   if have gtimeout; then gtimeout "$_secs" sh -c 'cd / || exit 1; GOTOOLCHAIN=local; RUSTUP_AUTO_INSTALL=0; GIT_TERMINAL_PROMPT=0; DOCKER_CLI_HINTS=false; export GOTOOLCHAIN RUSTUP_AUTO_INSTALL GIT_TERMINAL_PROMPT DOCKER_CLI_HINTS; exec "$@"' sh "$@" </dev/null; return $?; fi
-  neutral "$@" </dev/null &
+  sh -c 'cd / || exit 1; GOTOOLCHAIN=local; RUSTUP_AUTO_INSTALL=0; GIT_TERMINAL_PROMPT=0; DOCKER_CLI_HINTS=false; export GOTOOLCHAIN RUSTUP_AUTO_INSTALL GIT_TERMINAL_PROMPT DOCKER_CLI_HINTS; exec "$@"' sh "$@" </dev/null &
   _p=$!
   ( sleep "$_secs"; kill "$_p" ) >/dev/null 2>&1 &
   _k=$!
@@ -469,7 +470,7 @@ gather_facts() {
   done
   F_DOCKER_CLI=no; F_DOCKER_SERVER=""; F_DOCKER_REMOTE=no
   _dctx=${DOCKER_CONTEXT:-}
-  [ -z "$_dctx" ] && [ -r "$HOME/.docker/config.json" ] && _dctx=$(sed -n 's/.*"currentContext"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$HOME/.docker/config.json" | head -n 1)
+  if [ -z "$_dctx" ] && have docker; then _dctx=$(first_line "$(run_t 5 docker context show 2>/dev/null)"); fi
   if docker_remote "${DOCKER_HOST:-}" "$_dctx"; then F_DOCKER_REMOTE=yes; fi
   if have docker; then
     F_DOCKER_CLI=yes
@@ -525,13 +526,12 @@ main() {
   exit 1
 }
 
-# LANQ_MAKEREADY_LIB=1 is for tests that source this file; running the file with it set is a mistake.
+# LANQ_MAKEREADY_LIB=1 is for tests that source this file AND define __lanq_makeready_test_harness first.
 # shellcheck disable=SC2317
 if [ "${LANQ_MAKEREADY_LIB:-}" = 1 ]; then
-  case "${0##*/}" in
-    lanq-makeready*) echo "lanq-makeready: LANQ_MAKEREADY_LIB=1 is only for sourcing this file in tests; unset it." >&2; exit 2 ;;
-    *) return 0 2>/dev/null || exit 0 ;;
-  esac
+  if type __lanq_makeready_test_harness >/dev/null 2>&1; then return 0 2>/dev/null || exit 0; fi
+  echo "lanq-makeready: LANQ_MAKEREADY_LIB=1 is only for the test runner (it must source this file); unset it." >&2
+  exit 2
 fi
 # stdin is closed for everything main runs, so nothing can consume the script when it arrives via 'sh -s'
 main "$@" </dev/null

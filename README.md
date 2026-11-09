@@ -184,8 +184,10 @@ as "Windows 10 22H2, 4 GB, HDD, no sshd" or "glibc 2.26" without needing that ma
 - `wsl.exe` is never run unless WSL is installed. A remote Docker endpoint (`DOCKER_HOST`, or a non-local context) is never probed.
 - Redaction replaces values before anything is printed or serialized, so a user or host named `false` or `linux` cannot damage the JSON.
 - On timeout the whole probe process tree is stopped (Windows uses `taskkill /T` on our own child only).
-- The guard tests parse the PowerShell with its AST and allow only a fixed list of read-only commands and member calls,
-  and check the sh script word by word against a command allow-list.
+- The guard tests parse the PowerShell with its AST and allow only a fixed list of read-only commands and (receiver, method) pairs,
+  and check the sh script word by word against a command allow-list. **These guards are a test-time tripwire against accidental
+  mutating code, not a sandbox.** The read-only guarantee rests on reading the scripts (they are short on purpose) and on code review.
+- `~/.docker/config.json` (which can hold registry credentials) is never read; the Docker context comes from `DOCKER_CONTEXT` or `docker context show`.
 
 ## Known limits (v0.1)
 
