@@ -28,7 +28,7 @@ $Advice = @{
   'ssh.install'  = 'Install OpenSSH Server yourself (elevated PowerShell): Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0   then: Start-Service sshd ; Set-Service -Name sshd -StartupType Automatic'
   'ssh.start'    = 'OpenSSH Server is installed but not running. In an elevated PowerShell: Start-Service sshd ; Set-Service -Name sshd -StartupType Automatic'
   'ssh.auto'     = 'sshd will not come back after a reboot. In an elevated PowerShell: Set-Service -Name sshd -StartupType Automatic'
-  'ssh.fw'       = 'No enabled inbound firewall rule for TCP port 22 was found. In an elevated PowerShell: Enable-NetFirewallRule -Name OpenSSH-Server-In-TCP   (if that rule does not exist: New-NetFirewallRule -Name OpenSSH-Server-In-TCP -DisplayName "OpenSSH Server (sshd)" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -Profile Private)'
+  'ssh.fw'       = 'Port 22 is not open in the firewall. First check the network is Private: Get-NetConnectionProfile (if it says Public, in an elevated PowerShell: Set-NetConnectionProfile -InterfaceAlias <name> -NetworkCategory Private). Then, elevated: Enable-NetFirewallRule -Name OpenSSH-Server-In-TCP ; Set-NetFirewallRule -Name OpenSSH-Server-In-TCP -Profile Private -RemoteAddress LocalSubnet   (if that rule does not exist: New-NetFirewallRule -Name OpenSSH-Server-In-TCP -DisplayName "OpenSSH Server (sshd)" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -Profile Private -RemoteAddress LocalSubnet)'
   'ssh.shell'    = 'LanQueue starts powershell from the default SSH shell, which must be cmd.exe (the default) or PowerShell. In an elevated PowerShell, return to the default: Remove-ItemProperty -Path HKLM:\SOFTWARE\OpenSSH -Name DefaultShell'
   'ssh.nokeys'   = 'Put the orchestrator public key in the build user authorized_keys (for an Administrators member: C:\ProgramData\ssh\administrators_authorized_keys). A dedicated non-admin build user is simpler and safer. To make one (elevated): New-LocalUser build ; Add-LocalGroupMember -SID S-1-5-32-545 -Member build ; then log on once as build (so C:\Users\build exists) BEFORE creating C:\Users\build\.ssh\authorized_keys, or sshd reads keys from the wrong profile folder.'
   'ssh.aclkeys'  = 'administrators_authorized_keys must be writable only by Administrators and SYSTEM, or sshd ignores it: icacls.exe C:\ProgramData\ssh\administrators_authorized_keys /inheritance:r /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F"   (SIDs, so it works on any Windows language)'
@@ -37,7 +37,7 @@ $Advice = @{
   'git.longpaths'= 'Optional: git config --system core.longpaths true (elevated), and keep work_root short, for example C:/lq.'
   'tar.missing'  = 'transfer: archive needs the Windows built-in bsdtar (Windows 10 1803+ / Server 2019+) or GNU tar / bsdtar on Linux. busybox tar is refused by LanQueue.'
   'longpaths.on' = 'Optional: enable long paths (Settings registry LongPathsEnabled=1, reboot) and keep work_root short, for example C:/lq.'
-  'win10.eol'    = 'Windows 10 reached end of support on 2025-10-14. It still works as a worker while it gets security updates (Extended Security Updates, ESU; consumer ESU runs to 2027-10-12). 22H2 (build 19045) is the last version: update to it in Settings > Update & Security > Windows Update. Long term: Windows 11 or Linux.'
+  'win10.eol'    = 'Windows 10 reached end of support on 2025-10-14. It still works as a worker while it gets security updates (Extended Security Updates, ESU; consumer ESU runs to 2027-10-12; enroll in Settings > Windows Update > Enroll now). 22H2 (build 19045) is the last version: update to it in Settings > Update & Security > Windows Update. Long term: Windows 11 or Linux.'
   'os.old'       = 'This Windows version is too old for .NET 10 and Docker. Use a newer Windows or Linux.'
   'arch32'       = '32-bit systems cannot run Docker (and 32-bit x86 Linux is not supported by .NET 10). Install a 64-bit OS (the CPU may support it).'
   'arch32.win'   = '.NET 10 supports 32-bit (x86) Windows, but a 64-bit OS is strongly recommended: more RAM, Docker, and current toolchains need it.'
@@ -218,7 +218,7 @@ function Get-DotnetCheck($F) {
   return New-Check 'dotnet' $t $st "$why ($have)" $adv
 }
 
-# Pool sizing: LanQueue's lanq health uses the same thresholds. RAM in GB, logical CPUs.
+# Pool sizing, the thresholds LanQueue 0.5.1+ lanq health uses. RAM in GB, logical CPUs (24-31 GB counts as the top band).
 function Get-SuggestedJobs([double]$RamGB, [int]$Cpu) {
   if ($RamGB -lt 6) { $j = 1 } elseif ($RamGB -lt 12) { $j = 2 }
   elseif ($RamGB -lt 24) { $j = 3; if ($Cpu -ge 8) { $j = 4 } }
@@ -255,6 +255,24 @@ function Test-WakeArmed([string]$Text, [string]$Desc) {
 }
 
 function Test-SshShellOk([string]$Shell) { return ((-not $Shell) -or $Shell -match '(?i)(^|\\)(cmd|powershell|pwsh)(\.exe)?$') }
+
+# Fast Startup only matters when hibernation is on: HiberbootEnabled=1 (Session Manager\Power) AND HibernateEnabled=1 (Control\Power).
+function Test-FastStartup($Hiberboot, $HibernateEnabled) { return (($Hiberboot -eq 1) -and ($HibernateEnabled -eq 1)) }
+
+# Port 22: the named rule (Get-NetFirewallRule works without admin) decides; only when it is missing is the port-filter scan used.
+function Get-FirewallCheck($F) {
+  $t = 'Firewall port 22'
+  switch ("$($F.SshFwRule)") {
+    'enabled' { return New-Check 'ssh.firewall' $t 'OK' 'rule OpenSSH-Server-In-TCP is enabled' }
+    'disabled' { return New-Check 'ssh.firewall' $t 'WARN' 'rule OpenSSH-Server-In-TCP exists but is disabled' 'ssh.fw' }
+    'missing' {
+      if ($F.SshFwPort -isnot [bool]) { return New-Check 'ssh.firewall' $t 'SKIP' 'rule OpenSSH-Server-In-TCP is missing; other rules for port 22 need admin to read' '' $true }
+      if ($F.SshFwPort) { return New-Check 'ssh.firewall' $t 'OK' 'another enabled inbound rule allows TCP 22' }
+      return New-Check 'ssh.firewall' $t 'WARN' 'no enabled inbound rule for TCP port 22 (OpenSSH-Server-In-TCP is missing)' 'ssh.fw'
+    }
+  }
+  return New-Check 'ssh.firewall' $t 'SKIP' 'could not read the firewall rules'
+}
 
 function Get-WolCheck($F) {
   $t = 'Wake-on-LAN'
@@ -308,9 +326,7 @@ function Get-Checks($F) {
   elseif ($F.SshdStartType -and $F.SshdStartType -ne 'Automatic') { [void]$c.Add((New-Check 'ssh.server' 'OpenSSH Server' 'WARN' "running, start type $($F.SshdStartType); default shell: $shell" 'ssh.auto')) }
   else { [void]$c.Add((New-Check 'ssh.server' 'OpenSSH Server' 'OK' "running, automatic start; default shell: $shell")) }
   if ($F.SshdInstalled) {
-    if ($null -eq $F.SshFirewall) { [void]$c.Add((New-Check 'ssh.firewall' 'Firewall port 22' 'SKIP' 'could not read the firewall rules')) }
-    elseif ($F.SshFirewall) { [void]$c.Add((New-Check 'ssh.firewall' 'Firewall port 22' 'OK' 'an enabled inbound rule allows TCP 22')) }
-    else { [void]$c.Add((New-Check 'ssh.firewall' 'Firewall port 22' 'WARN' 'no enabled inbound rule for TCP port 22 (OpenSSH-Server-In-TCP is missing or disabled)' 'ssh.fw')) }
+    [void]$c.Add((Get-FirewallCheck $F))
     if (Test-SshShellOk $F.DefaultShell) { [void]$c.Add((New-Check 'ssh.shell' 'SSH default shell' 'OK' $shell)) }
     else { [void]$c.Add((New-Check 'ssh.shell' 'SSH default shell' 'WARN' "$($F.DefaultShell): not cmd.exe or PowerShell, so lanq's commands may fail" 'ssh.shell')) }
   }
@@ -458,7 +474,10 @@ function Format-Snippet($M, $V, $F) {
   if ($M.Contains('allowed_hours')) { $o += "    allowed_hours: `"$($M.allowed_hours)`"   # the PC's own clock" }
   else { $o += '    # allowed_hours: "22:00-07:00"   # optional: run jobs only overnight (the PC''s own clock)' }
   if (-not $F.WolMac) { $o += '    # wake: not suggested: no wired Ethernet adapter found' }
-  elseif ($M.Contains('wake')) {
+  elseif ($M.Contains('wake') -and $M.wake.mac -eq '<mac>') {
+    $o += '    # wake:   # Wake-on-LAN looks ready; <mac> is a placeholder (redacted): put this PC''s wired MAC here and uncomment'
+    $o += '    #   mac: "<mac>"'
+  } elseif ($M.Contains('wake')) {
     $o += "    wake:   # Wake-on-LAN (LanQueue 0.5+); test it: lanq wake $($M.name) --wait"
     $o += "      mac: `"$($M.wake.mac)`""
     $o += '      # broadcast: 10.20.30.255   # optional: your subnet''s directed broadcast on a PC with several networks or a VPN'
@@ -654,12 +673,17 @@ function Get-Facts([string]$H) {
   $F.SshdInstalled = [bool]($svc -or (Test-Path "$env:WINDIR\System32\OpenSSH\sshd.exe"))
   if ($svc) { $F.SshdRunning = ($svc.Status -eq 'Running'); $F.SshdStartType = "$($svc.StartType)" }
   $fw = Invoke-WithTimeout { param($x)
-    $r = @(Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue | Where-Object { "$($_.Enabled)" -eq 'True' })
-    if ($r.Count -gt 0) { return 'True' }
-    $r = @(Get-NetFirewallPortFilter -Protocol TCP -ErrorAction Stop | Where-Object { @($_.LocalPort) -contains '22' } | Get-NetFirewallRule -ErrorAction Stop |
-      Where-Object { "$($_.Enabled)" -eq 'True' -and "$($_.Direction)" -eq 'Inbound' -and "$($_.Action)" -eq 'Allow' })
-    "$($r.Count -gt 0)" } $null 20
-  if ($null -ne $fw) { $F.SshFirewall = ("$(@($fw)[0])" -eq 'True') } else { $F.SshFirewall = $null }
+    $r = @(Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue)
+    if ($r.Count -eq 0) { 'missing' } elseif (@($r | Where-Object { "$($_.Enabled)" -eq 'True' }).Count -gt 0) { 'enabled' } else { 'disabled' } } $null 15
+  $F.SshFwRule = $null; if ($null -ne $fw -and @($fw).Count -gt 0) { $F.SshFwRule = "$(@($fw)[0])" }
+  if ($F.SshFwRule -eq 'missing') {
+    $fp = Invoke-WithTimeout { param($x)
+      try { $r = @(Get-NetFirewallPortFilter -Protocol TCP -ErrorAction Stop | Where-Object { @($_.LocalPort) -contains '22' } | Get-NetFirewallRule -ErrorAction Stop |
+          Where-Object { "$($_.Enabled)" -eq 'True' -and "$($_.Direction)" -eq 'Inbound' -and "$($_.Action)" -eq 'Allow' })
+        "$($r.Count -gt 0)" } catch { 'denied' } } $null 20
+    $F.SshFwPort = $null
+    if ($null -ne $fp -and @($fp).Count -gt 0) { $v = "$(@($fp)[0])"; if ($v -eq 'denied') { $F.SshFwPort = 'denied' } else { $F.SshFwPort = ($v -eq 'True') } }
+  }
   try { $F.DefaultShell = (Get-ItemProperty 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -ErrorAction Stop).DefaultShell } catch { }
   $F.IsAdminUser = Get-IsAdminUser
   $ak = Join-Path $env:USERPROFILE '.ssh\authorized_keys'
@@ -714,8 +738,10 @@ function Get-Facts([string]$H) {
     if ($null -ne $pm -and @($pm).Count -gt 0) { $F.WolMagic = "$(@($pm)[0])" }
     if ($pc) { $r = Invoke-Bounded $pc '/devicequery wake_armed' 8; if ($r -and $r.Ok) { $F.WolArmed = Test-WakeArmed $r.Out $sel.Nic.Desc } }
   }
-  try { $pw = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -ErrorAction Stop
-    $F.FastStartup = ($pw.HiberbootEnabled -eq 1) -and ($pw.HibernateEnabled -ne 0) } catch { }
+  $hb = $null; $he = $null
+  try { $hb = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -ErrorAction Stop).HiberbootEnabled } catch { }
+  try { $he = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' -ErrorAction Stop).HibernateEnabled } catch { }
+  $F.FastStartup = Test-FastStartup $hb $he
   try { $F.SwapMB = [int](@(Get-CimInstance Win32_PageFileUsage -OperationTimeoutSec 15) | Measure-Object AllocatedBaseSize -Sum).Sum } catch { $F.SwapMB = $null }
   # slowdowns
   try { $su = @(Get-CimInstance Win32_StartupCommand -OperationTimeoutSec 15); $F.StartupCount = $su.Count; $F.StartupNames = @($su | Select-Object -First 5 | ForEach-Object { $_.Name }) } catch { }

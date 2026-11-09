@@ -18,7 +18,7 @@ function New-Facts([hashtable]$Over = @{}) {
   $f = @{ Hostname = 'box'; User = 'builder'; Profile = 'C:\Users\builder'; Caption = 'Windows 11 Pro'; Build = 26100; IsServer = $false
     EditionId = 'Professional'; Is64 = $true; IsArm = $false; Arch = 'x64'; CpuName = 'Test CPU'; Cores = 2; Logical = 4; Avx2 = 'True'
     RamGB = 16; FreeRamGB = 8; SysFreeGB = 200; WorkFreeGB = 200; DiskMedia = 'SSD'; WorkDrive = 'C:'
-    SshdInstalled = $true; SshdRunning = $true; SshdStartType = 'Automatic'; SshFirewall = $true; IsAdminUser = $false; AuthKeysNonEmpty = $true
+    SshdInstalled = $true; SshdRunning = $true; SshdStartType = 'Automatic'; SshFwRule = 'enabled'; SshFwPort = $null; IsAdminUser = $false; AuthKeysNonEmpty = $true
     GitVer = 'git version 2.45.0'; GitLongPaths = $true; TarBsd = $true; LongPaths = $true; DotnetSdks = @(10)
     DockerCli = $true; DockerServerOk = $true; DockerServer = '27.0'; WslOk = $true; Tools = @{ node = 'v22.1.0' }
     StandbyAcSec = 0; HibernateAcSec = 0; RebootPending = $false; StartupCount = 5; StartupNames = @()
@@ -110,12 +110,21 @@ Write-Host 'Windows 10 specifics'
 $r = Run (New-Facts @{ Caption = 'Windows 10 Pro'; Build = 19045 })
 Assert-True ((Ck $r 'os.version').detail -match 'past end of support \(2025-10-14\)') 'Win10 22H2: end-of-support note'
 Assert-True ((Ck $r 'os.version').advice -match '22H2 \(build 19045\) is the last version' -and (Ck $r 'os.version').advice -match 'ESU') 'Win10 advice: 22H2 last, ESU'
+Assert-True ((Ck $r 'os.version').advice -match 'Settings > Windows Update > Enroll now') 'Win10 advice: how to enroll in ESU'
 Assert-True ((Ck (Run (New-Facts @{ Caption = 'Windows 10 Pro'; Build = 19044 })) 'os.version').detail -match 'not on 22H2') 'Win10 21H2: says not on 22H2'
 Assert-Equal (St (Run (New-Facts @{ SshdStartType = 'Manual' })) 'ssh.server') 'WARN' 'sshd Manual start: WARN'
-Assert-Equal (St (Run (New-Facts @{ SshFirewall = $false })) 'ssh.firewall') 'WARN' 'no port-22 rule: ssh.firewall WARN'
-Assert-Equal (Run (New-Facts @{ SshFirewall = $false })).V.worker_git 'WARN' 'no port-22 rule: worker verdict WARN'
-Assert-Equal (St (Run (New-Facts @{ SshFirewall = $null })) 'ssh.firewall') 'SKIP' 'firewall unreadable: SKIP'
-Assert-Equal (St (Run (New-Facts @{ SshdStartType = 'Manual'; SshFirewall = $false })) 'ssh.firewall') 'WARN' 'manual start AND firewall both reported'
+Assert-Equal (St (Run (New-Facts @{ SshFwRule = 'enabled' })) 'ssh.firewall') 'OK' 'firewall: named rule enabled -> OK'
+$r = Run (New-Facts @{ SshFwRule = 'disabled' })
+Assert-True ((St $r 'ssh.firewall') -eq 'WARN' -and -not (Ck $r 'ssh.firewall').needsAdmin) 'firewall: named rule disabled -> WARN from Get-NetFirewallRule alone (no admin needed)'
+Assert-Equal $r.V.worker_git 'WARN' 'firewall: disabled rule -> worker verdict WARN'
+Assert-Equal (St (Run (New-Facts @{ SshFwRule = 'missing'; SshFwPort = $true })) 'ssh.firewall') 'OK' 'firewall: rule missing, another rule allows 22 -> OK'
+Assert-Equal (St (Run (New-Facts @{ SshFwRule = 'missing'; SshFwPort = $false })) 'ssh.firewall') 'WARN' 'firewall: rule missing, nothing allows 22 -> WARN'
+$r = Run (New-Facts @{ SshFwRule = 'missing'; SshFwPort = 'denied' })
+Assert-True ((St $r 'ssh.firewall') -eq 'SKIP' -and (Ck $r 'ssh.firewall').needsAdmin) 'firewall: rule missing, port scan denied -> SKIP needs admin'
+Assert-Equal (St (Run (New-Facts @{ SshFwRule = $null })) 'ssh.firewall') 'SKIP' 'firewall: rules unreadable -> SKIP'
+Assert-Equal (St (Run (New-Facts @{ SshdStartType = 'Manual'; SshFwRule = 'disabled' })) 'ssh.firewall') 'WARN' 'manual start AND firewall both reported'
+$fa = $Advice['ssh.fw']
+Assert-True ($fa -match 'Get-NetConnectionProfile' -and $fa -match 'Set-NetConnectionProfile' -and $fa -match '-NetworkCategory Private' -and $fa -match 'Set-NetFirewallRule -Name OpenSSH-Server-In-TCP -Profile Private -RemoteAddress LocalSubnet') 'ssh.fw hint: Private network, LocalSubnet, like the LanQueue quickstart'
 Assert-Equal (St (Run (New-Facts @{ DefaultShell = $null })) 'ssh.shell') 'OK' 'default shell unset (cmd.exe): OK'
 Assert-Equal (St (Run (New-Facts @{ DefaultShell = 'C:\Windows\System32\WindowsPowerShell1.0\powershell.exe' })) 'ssh.shell') 'OK' 'powershell.exe default shell: OK'
 Assert-Equal (St (Run (New-Facts @{ DefaultShell = 'C:\Program Files\PowerShell\pwsh.exe' })) 'ssh.shell') 'OK' 'pwsh.exe default shell: OK'
@@ -149,6 +158,15 @@ $r = Run (New-Facts @{ WolMagic = $null })
 Assert-True ((St $r 'wol') -eq 'SKIP' -and (Ck $r 'wol').needsAdmin -and (Ck $r 'wol').detail -match '10:20:30:aa:bb:cc') 'unreadable without admin: SKIP, MAC still shown'
 $r = Run (New-Facts @{ WolMac = $null; WolNic = $null; WolWifi = $true })
 Assert-True ((St $r 'wol') -eq 'WARN' -and (Ck $r 'wol').detail -match 'Wi-Fi only') 'Wi-Fi only: WARN'
+Assert-True (Test-FastStartup 1 1) 'Fast Startup: HiberbootEnabled=1 and hibernation on -> on'
+Assert-True (-not (Test-FastStartup 1 0)) 'Fast Startup: hibernation off -> not effective'
+Assert-True (-not (Test-FastStartup 1 $null)) 'Fast Startup: hibernation unknown -> no WARN'
+Assert-True (-not (Test-FastStartup 0 1)) 'Fast Startup: HiberbootEnabled=0 -> off'
+$ps1txt = Get-Content -LiteralPath (Join-Path $root 'lanq-makeready.ps1') -Raw
+Assert-True ($ps1txt -match [regex]::Escape("'HKLM:\SYSTEM\CurrentControlSet\Control\Power'") -and $ps1txt -match 'HibernateEnabled') 'Fast Startup: HibernateEnabled is read from Control\Power'
+$fr = Protect-Facts (New-Facts); $rr = Run $fr
+$sn = (Format-Snippet $rr.M $rr.V $fr) -join "`n"
+Assert-True ($sn -match '(?m)^    #   mac: "<mac>"' -and $sn -notmatch '(?m)^    wake:' -and $sn -match 'placeholder') 'redacted snippet: <mac> commented out, said to be a placeholder'
 $p = Protect-Facts (New-Facts)
 Assert-Equal $p.WolMac '<mac>' 'redaction hides the MAC'
 
@@ -168,7 +186,8 @@ Assert-True ($Advice['ssh.nokeys'] -match 'Add-LocalGroupMember -SID S-1-5-32-54
 $r = Run (New-Facts @{ SysFreeGB = 15; WorkFreeGB = 15 })
 Assert-True ((Ck $r 'disk').detail -match '15 GB free' -and (Ck $r 'disk').detail -match 'recommended: at least 20 GB free') 'low disk: free space and recommended minimum'
 
-Write-Host 'pool sizing tiers (same thresholds as lanq health)'
+Write-Host 'pool sizing tiers (the thresholds LanQueue 0.5.1+ lanq health uses)'
+Assert-Equal (Get-SuggestedJobs 24 8) 6 '24-31 GB counts as the top band'
 foreach ($t in @(@(4, 4, 1), @(8, 8, 2), @(8, 1, 1), @(16, 4, 3), @(16, 8, 4), @(16, 2, 2), @(32, 12, 6), @(64, 32, 8), @(32, 4, 4))) {
   Assert-Equal (Get-SuggestedJobs $t[0] $t[1]) $t[2] "$($t[0]) GB, $($t[1]) CPUs: max_jobs $($t[2])"
 }
