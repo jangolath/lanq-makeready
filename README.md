@@ -8,12 +8,15 @@ Run it on the old PC. It tells you, in plain words:
 
 1. Can this machine be a LanQueue worker (`transfer: git` and/or `transfer: archive`)? What is missing?
 2. Can it run .NET 10, Docker, Node, Python, Java, Go, Rust? (`OK`, `WARN` = works but unsupported or degraded, `FAIL` = will not work)
-3. Will it survive an overnight job (sleep, hibernate, pending reboot, Windows Update restarts, disk type and space, RAM)?
+3. Will it survive an overnight job (sleep, hibernate, pending reboot, Windows Update restarts, disk type and space, RAM, swap)?
+   Can LanQueue wake it (Wake-on-LAN on the wired adapter, Fast Startup)?
 4. What is slowing it down (startup items, big caches, HDD, Defender scanning, driver problems)? Report only.
 
-Then it prints a ready-to-paste `machines.yml` entry and can write a JSON report.
+It starts and ends with one verdict line (`READY`, `READY WITH WARNINGS (n)` or `NOT READY (n blockers)`), lists the
+numbered next steps with the exact command or settings path for that OS, and prints a ready-to-paste `machines.yml`
+entry sized for the machine. It can also write a JSON report.
 
-Status: v0.1 prototype. Files: `lanq-makeready.ps1` (Windows PowerShell 5.1 and PowerShell 7), `lanq-makeready.sh`
+Status: v0.2 (unreleased). Files: `lanq-makeready.ps1` (Windows PowerShell 5.1 and PowerShell 7), `lanq-makeready.sh`
 (POSIX `sh`, Linux and macOS), `schema/report.v1.json`, `tests/`.
 
 ## The read-only promise
@@ -22,15 +25,33 @@ Status: v0.1 prototype. Files: `lanq-makeready.ps1` (Windows PowerShell 5.1 and 
   driver actions, no firewall changes, no file deletion. Every fix is **printed as advice** for you to run
   yourself, all advice text lives in one table at the top of each script, and a test (`tests/`) fails if any
   mutating command appears outside that table.
-- The only file it ever writes is the JSON report, and only when you pass `-Json` / `--json` with a path.
+- The only files it ever writes are the ones you name: the JSON report (`-Json` / `--json` with a path) and the
+  human report (`-Out` / `--out`, a NEW file only: an existing file is never overwritten, the run stops with exit 2).
 - No admin/root needed. Checks that need it print `SKIP` with the reason. Running elevated just fills those rows in.
 - **No network calls at all**: no telemetry, no update check, no downloads, no DNS lookups, no pings.
 - It does not read SSH private keys. It only checks that `authorized_keys` exists and is non-empty (and, for a
   Windows administrator, the permissions on `administrators_authorized_keys`). Defender exclusions are not read.
 - Every external command it runs has a timeout. It never walks a whole disk: folder sizes are measured for a
   short fixed list of cache folders, each capped at a few seconds.
-- `-Redact` / `--redact` replaces hostname, user name and user-profile paths with `<redacted>` in both the
-  screen output and the JSON, so the output is safe to paste into an issue.
+- `-Redact` / `--redact` replaces hostname, user name and user-profile paths with `<redacted>`, and the wired
+  adapter's MAC address with `<mac>`, in the screen output, the `-Out` file and the JSON, so the output is safe to
+  paste into an issue.
+
+## Quick start for a small pool
+
+For a few PCs (say four small 4 GB boxes and two big dev machines), on each PC:
+
+1. **Run it** on the PC itself (see "Download and verify" first); add `-Out report.txt` / `--out report.txt` to keep a
+   copy of the human report. Over SSH, `ssh <user>@<pc>.lan "sh -s -- --redact" < lanq-makeready.sh` works too (Windows:
+   see "Run it"). Note: `lanq makeready` in LanQueue 0.5 runs its own built-in copy of v0.1.0, without the 0.2 checks.
+2. **Read the verdict** on the first (and last) line: `READY`, `READY WITH WARNINGS (n)` or `NOT READY (n blockers)`.
+   The `Suited for:` line says what kind of jobs fit the PC (light, medium or heavy).
+3. **Follow the next steps** in order. `MUST FIX` steps come first; each step prints the exact command or settings
+   path and says whether it needs admin (elevated PowerShell) or root (`sudo`). Nothing is run for you. Re-run the
+   check afterwards.
+4. **Paste the snippet** into your `machines.yml`, then confirm the placeholders (`ssh`, the `wake.mac` under
+   `-Redact`). `max_jobs` and `min_free_mem_gb` are sized from RAM and CPUs; a `wake:` block is active only when
+   Wake-on-LAN looks ready; `allowed_hours` is a commented example. Run `lanq doctor --remote` and `lanq health` to finish.
 
 ## Download and verify
 
@@ -53,7 +74,7 @@ Do not pipe a download into a shell. Download, read, verify, then run.
    ```sh
    gh attestation verify lanq-makeready.ps1 -R jangolath/lanq-makeready
    ```
-4. Open the script in a text editor and read it. It is about 600 lines and has no dependencies.
+4. Open the script in a text editor and read it. It is about 800 lines and has no dependencies.
 
 **Never** run it as `irm <url> | iex` (or `curl <url> | sh`). That runs unreviewed code with your rights and
 skips every check above.
@@ -67,6 +88,7 @@ use a per-process execution-policy bypass (nothing is changed permanently):
 Unblock-File .\lanq-makeready.ps1
 powershell -ExecutionPolicy Bypass -File .\lanq-makeready.ps1
 powershell -ExecutionPolicy Bypass -File .\lanq-makeready.ps1 -Hours "00:00-07:00" -Redact -Json .\report.json
+powershell -ExecutionPolicy Bypass -File .\lanq-makeready.ps1 -Out .\makeready.txt
 ```
 
 Linux / macOS:
@@ -74,6 +96,7 @@ Linux / macOS:
 ```sh
 sh ./lanq-makeready.sh
 sh ./lanq-makeready.sh --hours 00:00-07:00 --redact --json ./report.json
+sh ./lanq-makeready.sh --out ./makeready.txt
 ```
 
 Running it over SSH (what a future `lanq makeready` will do): the script is piped in, only JSON comes back on stdout,
@@ -87,14 +110,15 @@ ssh user@worker "sh -s -- --json - --redact" < lanq-makeready.sh
 ```
 
 `-Json -` only works in the stdin form above; with `powershell -File` use a file path. Windows PowerShell flags are
-`-Json/-Redact/-Hours/-Quiet`; unknown arguments exit 2 with a usage line.
+`-Json/-Out/-Redact/-Hours/-Quiet`; unknown arguments exit 2 with a usage line.
 
 | Option (ps1 / sh) | Meaning |
 |---|---|
 | `-Json PATH` / `--json PATH` | also write a JSON report ([schema](schema/report.v1.json)); `-` writes only the JSON to stdout |
-| `-Redact` / `--redact` | hide hostname, user and profile paths |
+| `-Out FILE` / `--out FILE` | also save the human report to FILE; refuses to overwrite an existing file (exit 2) |
+| `-Redact` / `--redact` | hide hostname, user, profile paths and the MAC address |
 | `-Hours HH:mm-HH:mm` / `--hours` | only feeds `allowed_hours` in the snippet (start must differ from end) |
-| `-Quiet` / `--quiet` | verdict lines only |
+| `-Quiet` / `--quiet` | verdict lines only (the one-line verdict, the verdict table and the suited-for line) |
 
 Exit code: `0` = at least one transfer mode is ready, `1` = not ready (blockers are listed), `2` = bad arguments.
 A full run takes under a minute on a slow PC (the longest steps are the hardware queries and the capped
@@ -102,24 +126,20 @@ cache-folder sizes).
 
 ## Example (Windows 11 desktop, `-Redact`, shortened)
 
-A machine with no SSH server yet, so it correctly says "not ready". Advice lines are cut for width.
+A machine with no SSH server yet, so it correctly says "not ready". Step text is cut for width.
 
 ```text
-lanq-makeready 0.1.0 (read-only: nothing is installed, changed or sent anywhere)
+lanq-makeready 0.2.0 (read-only: nothing is installed, changed or sent anywhere)
+VERDICT: NOT READY (1 blocker)
 
 [OK  ] OS: Windows 11 Pro build 26200, Professional
 [OK  ] Memory: 32.4 GB installed, 10.5 GB free
-[OK  ] Disk: system drive 524 GB free, work drive C: 524 GB free, work drive type: SSD
 [FAIL] OpenSSH Server: not installed
-       advice: Install OpenSSH Server yourself (elevated PowerShell): Add-WindowsCapability -Online ...
-[WARN] SSH keys: user is an administrator; administrators_authorized_keys not found
 [WARN] git: git version 2.48.1.windows.1, core.longpaths not enabled
-[OK  ] tar: built-in bsdtar found
-[OK  ] .NET 10 SDK: supported OS (Windows 11 24H2 or newer) (SDK majors found: 5, 9, 10)
-[OK  ] Docker: engine answering (server 29.9.2)
-[OK  ] Sleep/hibernate (AC): never sleeps or hibernates on AC
 [WARN] Pending reboot: a restart is pending
-[WARN] Update restarts vs job window: job window 00:00-07:00 is outside Windows Update active hours 08:00-02:00
+[WARN] Wake-on-LAN: wired Ethernet (<mac>): Fast Startup is on (a shut-down PC often will not wake)
+[OK  ] Page file: 44 GB page file
+...
 
 Verdicts
   worker_git      FAIL
@@ -127,22 +147,38 @@ Verdicts
   dotnet10        OK
   docker          OK
   overnight       WARN
+Suited for: heavy: full suites and large builds + container builds
+
+Next steps (blockers first; nothing here is run for you):
+ 1. [MUST FIX] OpenSSH Server: not installed
+    do (needs admin: elevated PowerShell): Install OpenSSH Server yourself (elevated PowerShell): Add-WindowsCapability ...
+ 2. [should fix] git: git version 2.48.1.windows.1, core.longpaths not enabled
+    do (needs admin: elevated PowerShell): Optional: git config --system core.longpaths true (elevated), ...
+ 3. [should fix] Pending reboot: a restart is pending
+    do (no admin needed): ... Restart at a time you choose: Start > Power > Update and restart (or Restart).
+ 4. [should fix] Wake-on-LAN: wired Ethernet (<mac>): Fast Startup is on (a shut-down PC often will not wake)
+    do (needs admin: elevated PowerShell): ... Control Panel > Power Options > Choose what the power buttons do > ...
 
 # Paste into machines.yml (confirm the placeholders):
-# NOT READY yet: fix the FAIL items above first, then re-run.
+# NOT READY yet: fix the MUST FIX steps first, then re-run.
 machines:
   - name: "old-pc"
     os: windows
     ssh: "<user>@<hostname>.lan"   # placeholder: confirm user and host name
     work_root: "C:/lq"   # short path
-    capabilities: [dotnet, node, java, docker, windows]
-    max_jobs: 2
+    capabilities: [dotnet, node, java, docker, git, windows]
+    max_jobs: 8   # 32.4 GB RAM, 16 CPUs
+    min_free_mem_gb: 2   # LanQueue starts no new job while less memory than this is free
     transfer: git
-    allowed_hours: "00:00-07:00"   # evaluated in the ORCHESTRATOR's local time
+    # allowed_hours: "22:00-07:00"   # optional: run jobs only overnight (the PC's own clock)
+    # wake:   # not ready yet (see the Wake-on-LAN step); uncomment once it is fixed
+    #   mac: "<mac>"
 
-Blockers:
-  - OpenSSH Server: not installed
+VERDICT: NOT READY (1 blocker)
 ```
+
+A 4 GB micro PC gets `max_jobs: 1`, `min_free_mem_gb: 1.5`, a "Low-RAM PC" note and commented `env:` caps for
+.NET and Node plus a comment to add `-m:1` to `dotnet build`/`dotnet test` commands; with Wake-on-LAN ready it gets an active `wake:` block with the wired adapter's MAC.
 
 ## How the output maps to `machines.yml`
 
@@ -154,14 +190,42 @@ The snippet follows LanQueue's registry schema (`machines.example.yml`, [docs/WO
 | `os` | `windows` or `linux`. LanQueue workers are only these two, so on macOS the script prints a note instead of an entry |
 | `ssh` | `user@host.lan` **placeholder**: you confirm the real user and host name |
 | `work_root` | a short absolute path with forward slashes: `C:/lq` (or the fixed drive with the most free space) / `/srv/lq` |
-| `capabilities` | only tools that were **detected and working** (`dotnet` only when an SDK of major 8 or newer is installed; `node`, `python`, `java`, `go`, `rust`, `docker`) plus `windows` / `linux` |
-| `max_jobs` | `1`; `2` only with 8 or more logical cores and 16 GB RAM |
+| `capabilities` | only tools that were **detected and working** (`dotnet` only when an SDK of major 8 or newer is installed; `node`, `python`, `java`, `go`, `rust`, `docker`, `git`) plus `windows` / `linux` |
+| `max_jobs` | from RAM: under 6 GB `1`, 8 GB `2`, 16 GB `3` (`4` with 8+ logical CPUs), 32 GB+ `6` (`8` with 16+), never more than the logical CPUs |
+| `min_free_mem_gb` | `1.5` under 6 GB, else `2`: headroom for one more job; LanQueue starts no new job while less is free |
+| `wake` | the wired adapter's MAC; active only when the `wol` check is OK, otherwise commented out (`<mac>` under `-Redact`) |
 | `transfer` | `git` when git is present; `archive` when git is missing but a usable tar is (Windows bsdtar, GNU tar or bsdtar plus gzip; busybox tar is refused, as LanQueue does) |
-| `allowed_hours` | only when you pass `-Hours`; `"HH:mm-HH:mm"`, evaluated in the orchestrator's local time |
+| `allowed_hours` | from `-Hours` (`"HH:mm-HH:mm"`, the worker's own clock); otherwise a commented overnight example |
+
+`Suited for:` (JSON `suitedFor`) is a sizing hint with the same thresholds `lanq health` uses: **light** under 6 GB
+(lint and unit-test shards), **medium** 6-16 GB (test shards and builds), **heavy** 16 GB+ with 4+ logical CPUs (full
+suites and large builds), plus "+ container builds" when a local Docker engine answers.
+
+Every key the snippet prints uncommented is a LanQueue 0.5 `machines.yml` key (LanQueue refuses unknown keys).
 
 Verdicts: `worker_git` / `worker_archive` say whether each transfer mode can work today (SSH server, disk,
 OS, plus git or tar). `dotnet10`, `docker` and `overnight` are separate. `SKIP` means "could not check" or
 "optional tool not present"; the reason is in the detail.
+
+The overall verdict: `NOT READY` when neither transfer mode works (the exit code is then 1); its blockers are the
+FAIL checks among OS, SSH and disk, plus git and tar when neither is usable. Otherwise `READY WITH WARNINGS (n)` counts
+every other WARN or FAIL (a .NET or Docker FAIL does not stop a worker), and `READY` means there is nothing to do. The
+JSON report carries the same in `summary` (`verdict`, `text`, `blockers`, `warnings`, `nextSteps`).
+
+What else is checked, per OS:
+
+- **Windows 10**: end of support (WARN; it still works while it gets updates or ESU, 22H2 is the last version), the
+  OpenSSH Server and its Automatic start, an enabled inbound firewall rule for TCP 22, and the OpenSSH default shell
+  (cmd.exe or PowerShell; another shell such as bash breaks lanq's commands).
+- **Linux**: distribution end of life (from `/etc/os-release` and a small table: Ubuntu, Debian, Alpine, Fedora,
+  CentOS, Mint), sshd `PasswordAuthentication` (a security note; `sshd -T` as root, otherwise `sshd_config` and its
+  `Include` files), and unmasked systemd sleep targets (the `systemctl mask` command is printed).
+- **Wake-on-LAN**: the wired adapter and its MAC; on Windows the "Wake on Magic Packet" setting, whether the adapter
+  may wake the PC (`powercfg /devicequery wake_armed`) and Fast Startup (`HiberbootEnabled`); on Linux `ethtool`'s
+  `Wake-on` when readable without root, otherwise the exact `sudo ethtool` command to check it. The BIOS/UEFI setting
+  cannot be read; enable it there too.
+- **Low RAM and disk**: swap / page file size (WARN under 8 GB RAM with less than 1 GB), and low disk says the free
+  space and the recommended minimum (20 GB; under 10 GB is refused).
 
 ## Tests
 
@@ -189,11 +253,16 @@ as "Windows 10 22H2, 4 GB, HDD, no sshd" or "glibc 2.26" without needing that ma
   mutating code, not a sandbox.** The read-only guarantee rests on reading the scripts (they are short on purpose) and on code review.
 - `~/.docker/config.json` (which can hold registry credentials) is never read; the Docker context comes from `DOCKER_CONTEXT` or `docker context show`.
 
-## Known limits (v0.1)
+## Known limits
 
 - AVX2 is only reported on PowerShell 7 (Windows PowerShell 5.1 would need a compiled helper, which writes temp files).
 - SSD/HDD detection inside VMs and containers is a heuristic and can be wrong.
 - Defender exclusions and Windows Update contents are deliberately not read.
 - There is no `--fix`; that may come later, per item and with confirmation.
+- Wake-on-LAN readiness cannot see the BIOS/UEFI setting, and on Windows the adapter's power settings may need admin
+  to read (the row is then `SKIP`). Test with `lanq wake <machine> --wait`.
+- The distribution end-of-life table is embedded and dated; a release it does not know is not judged.
+- `lanq makeready` in LanQueue 0.5 runs its own built-in copy of v0.1.0; the new report fields are optional and
+  ignored by readers that do not know them.
 
 MIT licensed.
