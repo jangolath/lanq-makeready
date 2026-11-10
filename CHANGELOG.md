@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-11-10)
 
 - Windows: works for a build account that is denied WMI/CIM (a non-admin user on a PC tuned as a server), where
   0.2.0 showed 0 GB RAM, 0 CPUs and "Windows (unreadable)". Memory then comes from .NET's `Microsoft.VisualBasic`
