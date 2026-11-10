@@ -28,6 +28,15 @@ function New-Facts([hashtable]$Over = @{}) {
   return $f
 }
 function Run($F) { $c = Get-Checks $F; $v = Get-Verdicts $c $F; return @{ C = $c; V = $v; M = (Get-Machine $F $v $F.Hours $false); S = (Get-Summary $c $v $F) } }
+function New-RedFacts($H, $U) {
+  New-Facts @{ Hostname = $H; User = $U; Profile = "C:\Users\$U"; Caption = "Windows $H ($U)"; CpuName = "cpu of $H"; GitVer = "git version 2.45 C:\Users\$U\git"
+    DefaultShell = "C:\Users\$U\sh.exe"; StartupNames = @("$H-agent", 'OneDrive'); ProblemDevices = @("dev $U"); Tools = @{ node = "v22 $U" } }
+}
+function Get-JsonFor($F, $Redact) {
+  if ($Redact) { $F = Protect-Facts $F }
+  $c = Get-Checks $F; $v = Get-Verdicts $c $F; $m = Get-Machine $F $v $null ([bool]$Redact)
+  ConvertTo-AsciiJson (New-Report $F $c $v $m '0.1.0')
+}
 function StepIds($R) { (@($R.S.nextSteps) | ForEach-Object { $_.id }) -join ' ' }
 function St($R, [string]$Id) { ($R.C | Where-Object { $_.id -eq $Id }).status }
 function Ck($R, [string]$Id) { $R.C | Where-Object { $_.id -eq $Id } }
@@ -113,6 +122,9 @@ Assert-True ((Ck $r 'os.version').advice -match '22H2 \(build 19045\) is the las
 Assert-True ((Ck $r 'os.version').advice -match 'Settings > Windows Update > Enroll now') 'Win10 advice: how to enroll in ESU'
 Assert-True ((Ck (Run (New-Facts @{ Caption = 'Windows 10 Pro'; Build = 19044 })) 'os.version').detail -match 'not on 22H2') 'Win10 21H2: says not on 22H2'
 Assert-Equal (St (Run (New-Facts @{ SshdStartType = 'Manual' })) 'ssh.server') 'WARN' 'sshd Manual start: WARN'
+$r = Run (New-Facts @{ SshdRunning = $null })
+Assert-True ((St $r 'ssh.server') -eq 'SKIP' -and (Ck $r 'ssh.server').detail -match 'cannot read the service status' -and $r.V.worker_git -eq 'OK') 'sshd status unreadable (not over ssh): SKIP, not FAIL; the worker verdict is unchanged'
+Assert-Equal (St (Run (New-Facts @{ SshdRunning = $false })) 'ssh.server') 'FAIL' 'sshd readable and stopped: still FAIL'
 Assert-Equal (St (Run (New-Facts @{ SshFwRule = 'enabled' })) 'ssh.firewall') 'OK' 'firewall: named rule enabled -> OK'
 $r = Run (New-Facts @{ SshFwRule = 'disabled' })
 Assert-True ((St $r 'ssh.firewall') -eq 'WARN' -and -not (Ck $r 'ssh.firewall').needsAdmin) 'firewall: named rule disabled -> WARN from Get-NetFirewallRule alone (no admin needed)'
@@ -278,6 +290,104 @@ Assert-True (-not (Test-DockerRemote '' '')) 'docker: no host, no context is loc
 Assert-True (Test-Sdk8 @(6, 10)) 'dotnet capability: SDK 10 present'
 Assert-True (-not (Test-Sdk8 @(5, 6, 7))) 'dotnet capability: SDKs below 8 only -> no capability'
 Assert-True (-not ((Run (New-Facts @{ DotnetSdks = @(6) })).M.capabilities -contains 'dotnet')) 'machine: SDK 6 only -> no dotnet capability'
+
+Write-Host '.NET SDK outside PATH'
+$r = Run (New-Facts)
+Assert-True ((St $r 'dotnet') -eq 'OK' -and -not $r.M.Contains('path_prepend') -and -not $r.M.Contains('env')) 'SDK on PATH: OK, no path_prepend or env'
+$fo = New-Facts @{ DotnetSdks = @(6, 10); DotnetDir = 'D:/build/dotnet'; DotnetOffPath = $true }; $r = Run $fo
+Assert-True ((St $r 'dotnet') -eq 'WARN' -and (Ck $r 'dotnet').advice -match 'path_prepend' -and (Ck $r 'dotnet').detail -match 'newest is in D:/build/dotnet, not the dotnet on PATH') 'SDK off PATH: WARN naming the folder, advice names path_prepend'
+Assert-True (-not (Ck $r 'dotnet').adminToFix -and $r.V.worker_git -eq 'OK') 'SDK off PATH: no admin needed, the worker verdict is unchanged'
+Assert-True (@($r.M.path_prepend)[0] -eq 'D:/build/dotnet' -and $r.M.env.DOTNET_ROOT -eq 'D:/build/dotnet' -and $r.M.capabilities -contains 'dotnet') 'SDK off PATH: machine gets path_prepend, DOTNET_ROOT and the dotnet capability'
+$sn = (Format-Snippet $r.M $r.V $fo) -join "`n"
+Assert-True ($sn -match '(?m)^    path_prepend: \["D:/build/dotnet"\]' -and $sn -match '(?m)^    env:\n      DOTNET_ROOT: "D:/build/dotnet"$') 'SDK off PATH: snippet has path_prepend and env DOTNET_ROOT'
+$fo3 = New-Facts @{ RamGB = 3; DotnetDir = 'D:/build/dotnet'; DotnetOffPath = $true }; $r3 = Run $fo3; $sn = (Format-Snippet $r3.M $r3.V $fo3) -join "`n"
+Assert-True (([regex]::Matches($sn, '(?m)^\s*#?\s*env:')).Count -eq 1 -and $sn -match 'DOTNET_GCHeapHardLimitPercent') 'low RAM and SDK off PATH: one env: key, the caps stay as comments under it'
+Assert-Equal ((Run (New-Facts @{ RamGB = 3; DotnetDir = 'D:/build/dotnet'; DotnetOffPath = $true })).C | Where-Object { $_.id -eq 'dotnet' }).advice $Advice['ram.low'] 'low RAM outranks the PATH hint on the dotnet check'
+$j = Get-JsonFor (New-Facts @{ DotnetDir = 'C:/Users/o''brien/.dotnet'; DotnetOffPath = $true; User = "o'brien"; Profile = "C:\Users\o'brien" }) $true | ConvertFrom-Json
+Assert-True ($j.suggestedMachine.path_prepend[0] -eq '<redacted>/.dotnet' -and $j.suggestedMachine.env.DOTNET_ROOT -eq '<redacted>/.dotnet') 'redacted JSON: the SDK folder hides the user name'
+$j = Get-JsonFor $fo $false | ConvertFrom-Json
+Assert-True ($j.suggestedMachine.path_prepend[0] -eq 'D:/build/dotnet' -and $j.suggestedMachine.env.DOTNET_ROOT -eq 'D:/build/dotnet') 'JSON: suggestedMachine carries path_prepend and env'
+$raw = Get-JsonFor (New-Facts @{ DotnetDir = 'C:/Users/jsmith.CONTOSO/.dotnet'; DotnetOffPath = $true; User = 'jsmith'; Profile = 'C:\Users\jsmith.CONTOSO' }) $true
+Assert-True (($raw | ConvertFrom-Json).suggestedMachine.path_prepend[0] -eq '<redacted>/.dotnet' -and $raw -notmatch 'CONTOSO' -and $raw -notmatch 'jsmith') 'redacted JSON: a profile folder not named after the user is hidden whole'
+$fp = New-Facts @{ DotnetSdks = @(10); DotnetDir = 'C:/tools/dotnet'; DotnetOffPath = $true; DotnetOpen = $true }; $r = Run $fp
+Assert-True ((St $r 'dotnet') -eq 'WARN' -and (Ck $r 'dotnet').detail -match 'other local users can write there, so it is not suggested') 'SDK in a folder others can write: WARN says why'
+Assert-True (-not $r.M.Contains('path_prepend') -and -not $r.M.Contains('env')) 'SDK in a folder others can write: no path_prepend or env suggested'
+Assert-True (((Format-Snippet $r.M $r.V $fp) -join "`n") -match '# path_prepend: not suggested: other local users can write to C:/tools/dotnet') 'SDK in a folder others can write: the snippet says so in a comment'
+
+Write-Host 'Test-Sddl (who may change what a job runs)'
+$me = 'S-1-5-21-1-2-3-1001'; $ti = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+Assert-True (Test-Sddl "O:${ti}G:${ti}D:PAI(A;OICIIO;GA;;;CO)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;OICI;0x1200a9;;;AC)" 0 $me) 'Program Files layout (TrustedInstaller owner, Users read/execute): safe'
+Assert-True (Test-Sddl "O:${me}G:${me}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;$me)" 0 $me) 'a folder only this account, SYSTEM and Administrators may write: safe'
+Assert-True (-not (Test-Sddl "O:${me}G:${me}" 0 $me)) 'no DACL part at all: not safe'
+Assert-True (-not (Test-Sddl "O:${me}G:${me}D:NO_ACCESS_CONTROL" 0 $me)) 'NULL DACL: not safe'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(A;;LCDT;;;AU)" 0 $me)) 'Authenticated Users may add subfolders and delete children (LC DT): not safe'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;OICI;FA;;;BA)(A;OICI;FA;;;S-1-5-32-555)" 0 $me)) 'Remote Desktop Users full control (any group not trusted): not safe'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;S-1-5-21-9-9-9-1002)" 0 $me)) 'another local user may modify: not safe'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;OICIIO;GW;;;AU)" 0 $me)) 'an inherit-only write entry on the folder itself counts (its new children would get it)'
+Assert-True (-not (Test-Sddl "O:BUG:BUD:(A;;FA;;;BA)" 0 $me)) 'owned by Users: not safe (the owner may rewrite the ACL)'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(XA;;FA;;;WD;(x))" 0 $me)) 'a conditional (callback) Allow entry for Everyone: not safe'
+Assert-True (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(D;;FA;;;WD)" 0 $me) 'a Deny entry never makes a folder unsafe'
+Assert-True (Test-Sddl "O:SYG:SYD:(A;;0x1301bf;;;AU)(A;OICIIO;SDGXGWGR;;;AU)(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)" 2 $me) 'a drive root where Authenticated Users may create folders: a safe parent'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(A;;0x1301ff;;;AU)" 1 $me)) 'a parent where Authenticated Users may delete children (0x40): not safe'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(A;;SDRCWDWO;;;AU)" 1 $me)) 'a parent others may delete, re-permission or take: not safe'
+Assert-True (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(A;OICIIO;FA;;;AU)" 1 $me) 'on a parent, an entry that only passes down is judged on the children'
+$adm = 'S-1-5-21-1-2-3-1002'
+Assert-True (Test-Sddl "O:${me}G:${me}D:AI(A;OICIID;FA;;;BA)(A;OICIID;FA;;;SY)(A;OICIID;FA;;;$me)(A;OICIID;FA;;;$adm)" 0 @($me, $adm)) 'a member of the local Administrators group may write: safe'
+Assert-True (-not (Test-Sddl "O:${me}G:${me}D:AI(A;OICIID;FA;;;BA)(A;OICIID;FA;;;$adm)" 0 @($me))) 'the same account when it is not an administrator: not safe'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(A;;KA;;;BU)" 1 $me)) 'a parent where Users have KA (delete, re-permission, take): not safe'
+Assert-True (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(A;;LO;;;BU)" 0 $me) 'read attributes (LO) only: safe'
+Assert-True (-not (Test-Sddl ('O:BAG:BAD:(A;;FA;;;BA)(XA;;FR;;;WD;(@User.x == "S:"))(A;;FA;;;BU)') 0 $me)) 'an S: inside a condition does not hide the entries after it'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(A;;0xZZ;;;BU)" 0 $me)) 'unparsable rights: not safe'
+
+Write-Host 'Test-SafeFolder (real ACLs)'
+$sf = Join-Path ([System.IO.Path]::GetTempPath()) "lanq-safe-$PID"; [void](New-Item -ItemType Directory -Path $sf -Force); Set-Content -LiteralPath "$sf\dotnet.exe" -Value 'x'
+& icacls.exe $sf /grant '*S-1-5-11:(OI)(CI)(M)' | Out-Null
+Assert-True (-not (Test-SafeFolder $sf)) 'Authenticated Users with Modify: not safe'
+Assert-True (-not (Test-SafeFolder "$sf\missing")) 'a folder that cannot be read: not safe'
+Remove-Item -LiteralPath $sf -Recurse -Force
+$pf = "$env:ProgramFiles\dotnet"
+if (Test-Path -LiteralPath "$pf\dotnet.exe") {
+  $lo = Join-Path $env:LOCALAPPDATA "lanq-open-$PID"
+  foreach ($d in 'sdk\10.0.102', 'shared\Microsoft.AspNetCore.App\10.0.2', 'packs', 'sdk-manifests') { [void](New-Item -ItemType Directory -Force -Path (Join-Path $lo $d)) }
+  Set-Content -LiteralPath "$lo\dotnet.exe" -Value 'x'
+  & icacls.exe "$lo\shared\Microsoft.AspNetCore.App\10.0.2" /grant '*S-1-5-11:(OI)(CI)(M)' | Out-Null
+  Assert-True (-not (Test-SafeFolder $lo '10.0.102')) 'a shared framework version folder others may modify: not safe'
+  & icacls.exe "$lo\shared\Microsoft.AspNetCore.App\10.0.2" /remove:g '*S-1-5-11' | Out-Null; & icacls.exe "$lo\packs" /grant '*S-1-5-11:(OI)(CI)(M)' | Out-Null
+  Assert-True (-not (Test-SafeFolder $lo '10.0.102')) 'packs others may modify: not safe'
+  # a junction to a scratch folder (never to a real install): the link alone is removed with rmdir, never Remove-Item (which would
+  # ask, or with -Recurse empty the target)
+  $lk = Join-Path $env:LOCALAPPDATA "lanq-junction-$PID"
+  [void](New-Item -ItemType Junction -Path $lk -Target $lo)
+  Assert-True (-not (Test-SafeFolder $lk '10.0.102')) 'a junction is refused (its target''s parents are never judged)'
+  & cmd.exe /c rmdir "$lk"
+  Remove-Item -LiteralPath $lo -Recurse -Force
+}
+$pf = "$env:ProgramFiles\dotnet"
+if (Test-Path -LiteralPath "$pf\dotnet.exe") { Assert-True (Test-SafeFolder $pf) 'Program Files\dotnet (installer default): safe' }
+
+Write-Host 'AuthorizedKeysFile from sshd_config'
+$cfgB = @('AuthorizedKeysFile .ssh/authorized_keys', 'Match User build*,!buildx', '       AuthorizedKeysFile __PROGRAMDATA__/ssh/%u_authorized_keys', 'Match all', 'AuthorizedKeysFile .ssh/keys_all', 'Match Group administrators', '       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys')
+$k = Get-KeyFiles $cfgB 'builder' $false 'C:\Users\builder.PC' 'C:\ProgramData'
+Assert-True ($k.Via -eq 'match' -and @($k.Files) -join '|' -eq 'C:\ProgramData\ssh\builder_authorized_keys') 'Match User block: its file, %u and __PROGRAMDATA__ expanded'
+$k = Get-KeyFiles $cfgB 'buildx' $false 'C:\Users\buildx' 'C:\ProgramData'
+Assert-True ($k.Via -eq 'match' -and @($k.Files) -join '|' -eq 'C:\Users\buildx\.ssh\keys_all') 'a negated user skips that block; Match all applies; a relative file is under home'
+$k = Get-KeyFiles $cfgB 'alice' $true 'C:\Users\alice' 'C:\ProgramData'
+Assert-Equal (@($k.Files) -join '|') 'C:\Users\alice\.ssh\keys_all' 'the first matching block wins (Match all before Match Group administrators)'
+$k = Get-KeyFiles @('AuthorizedKeysFile .ssh/authorized_keys', 'Match Group administrators', '  AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys') 'alice' $true 'C:\Users\alice' 'C:\ProgramData'
+Assert-True ($k.Via -eq 'match' -and @($k.Files) -join '|' -eq 'C:\ProgramData\ssh\administrators_authorized_keys') 'Windows default config: an administrator gets administrators_authorized_keys'
+$k = Get-KeyFiles @('AuthorizedKeysFile .ssh/authorized_keys', 'Match Group administrators', '  AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys') 'bob' $false 'C:\Users\bob' 'C:\ProgramData'
+Assert-True ($k.Via -eq 'global' -and @($k.Files) -join '|' -eq 'C:\Users\bob\.ssh\authorized_keys') 'Windows default config: a standard user gets the global file'
+$k = Get-KeyFiles @('Match Address 10.0.0.0/8', '  AuthorizedKeysFile /etc/x', 'Match all', '  AuthorizedKeysFile "%h/k1" none %%h') 'bob' $false 'C:\Users\bob' 'C:\ProgramData'
+Assert-Equal (@($k.Files) -join '|') 'C:\Users\bob\k1|C:\Users\bob\%h' 'a criterion that cannot be judged is skipped; quotes, none and %% handled'
+$k = Get-KeyFiles @('AuthorizedKeysFile=__PROGRAMDATA__/ssh/%u_keys \\fileserver\keys\%u //fileserver/k2') 'bob' $false 'C:\Users\bob' 'C:\ProgramData'
+Assert-True ($k.Via -eq 'global' -and @($k.Files) -join '|' -eq 'C:\ProgramData\ssh\bob_keys') 'Key=value form read; files on a network share are never touched'
+$k = Get-KeyFiles @('MATCH ALL', '  AuthorizedKeysFile x') 'bob' $false 'C:\Users\bob' 'C:\ProgramData'
+Assert-Equal (@($k.Files) -join '|') 'C:\Users\bob\x' 'Match keywords are case-insensitive'
+$k = Get-KeyFiles $null 'bob' $false 'C:\Users\bob' 'C:\ProgramData'
+Assert-True ($k.Via -eq 'default' -and @($k.Files) -join '|' -eq 'C:\Users\bob\.ssh\authorized_keys|C:\Users\bob\.ssh\authorized_keys2') 'no config: the sshd default files'
+Assert-True ((Ck (Run (New-Facts @{ AuthKeysVia = 'match' })) 'ssh.keys').detail -match 'Match block') 'keys found through a Match block: OK says so'
+$r = Run (New-Facts @{ AuthKeysNonEmpty = $false; AuthKeysVia = 'unreadable' })
+Assert-True ((St $r 'ssh.keys') -eq 'WARN' -and (Ck $r 'ssh.keys').detail -match 'sshd_config is not readable') 'sshd_config unreadable: WARN says keys may be elsewhere'
 $wd = @(@{ Letter = 'C:'; FreeGB = 100; Media = 'SSD' }, @{ Letter = 'D:'; FreeGB = 500; Media = 'HDD' })
 Assert-Equal (Select-WorkDrive $wd 'C:').Letter 'C:' 'work drive: SSD with >= 20 GB beats a bigger HDD'
 Assert-Equal (Select-WorkDrive @(@{ Letter = 'C:'; FreeGB = 100; Media = 'HDD' }, @{ Letter = 'D:'; FreeGB = 500; Media = 'HDD' }) 'C:').Letter 'D:' 'work drive: most free space among HDDs'
@@ -338,15 +448,6 @@ Assert-Equal (Invoke-WithTimeout { param($x) 41 + $x } 1 10)[0] 42 'Invoke-WithT
 $script:Hung = $false
 
 Write-Host 'redaction on values, JSON structure intact'
-function New-RedFacts($H, $U) {
-  New-Facts @{ Hostname = $H; User = $U; Profile = "C:\Users\$U"; Caption = "Windows $H ($U)"; CpuName = "cpu of $H"; GitVer = "git version 2.45 C:\Users\$U\git"
-    DefaultShell = "C:\Users\$U\sh.exe"; StartupNames = @("$H-agent", 'OneDrive'); ProblemDevices = @("dev $U"); Tools = @{ node = "v22 $U" } }
-}
-function Get-JsonFor($F, $Redact) {
-  if ($Redact) { $F = Protect-Facts $F }
-  $c = Get-Checks $F; $v = Get-Verdicts $c $F; $m = Get-Machine $F $v $null ([bool]$Redact)
-  ConvertTo-AsciiJson (New-Report $F $c $v $m '0.1.0')
-}
 function Get-Keys($Obj, $Prefix = '') { foreach ($p in $Obj.PSObject.Properties) { "$Prefix$($p.Name)"; if ($p.Value -is [pscustomobject]) { Get-Keys $p.Value "$Prefix$($p.Name)." } } }
 $base = (Get-JsonFor (New-RedFacts 'box' 'builder') $false) | ConvertFrom-Json
 foreach ($pair in @(@('worker', "o'brien"), @('windows', 'OK'), @('false', 'linux'))) {
@@ -369,7 +470,7 @@ $AstNs = 'System.Management.Automation.Language'
 foreach ($f in @('lanq-makeready.ps1', 'lanq-makeready.sh')) {
   $text = Get-Content -LiteralPath (Join-Path $root $f) -Raw
   Assert-True (-not ($text -match '[^\x00-\x7F]')) "$f is pure ASCII"
-  Assert-True (@(Get-Content -LiteralPath (Join-Path $root $f)).Count -le 900) "$f is at most 900 lines"
+  Assert-True (@(Get-Content -LiteralPath (Join-Path $root $f)).Count -le 980) "$f is at most 980 lines"
 }
 $psPath = Join-Path $root 'lanq-makeready.ps1'
 $tokens = $null; $perr = $null
@@ -378,7 +479,7 @@ Assert-Equal @($perr).Count 0 'ps1 parses without errors'
 $funcs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true))
 $funcNames = @($funcs | ForEach-Object { $_.Name })
 function Get-Fn($Node) { $p = $Node.Parent; while ($p) { if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $p.Name }; $p = $p.Parent }; return '' }
-$okCmds = @('ConvertFrom-Json', 'ConvertTo-Json', 'ForEach-Object', 'Get-Acl', 'Get-ChildItem', 'Get-CimInstance', 'Get-Command', 'Get-Content', 'Get-Item', 'Get-ItemProperty',
+$okCmds = @('Add-Type', 'ConvertFrom-Json', 'Get-LocalGroupMember', 'ConvertTo-Json', 'ForEach-Object', 'Get-Acl', 'Get-ChildItem', 'Get-CimInstance', 'Get-Command', 'Get-Content', 'Get-Item', 'Get-ItemProperty',
   'Get-Location', 'Get-MpComputerStatus', 'Get-NetAdapter', 'Get-NetAdapterPowerManagement', 'Get-NetFirewallPortFilter', 'Get-NetFirewallRule', 'Get-Partition', 'Get-PhysicalDisk', 'Get-Service', 'Join-Path',
   'Measure-Object', 'Get-AppxPackage', 'New-Object', 'Select-Object', 'Sort-Object', 'Test-Path', 'Where-Object', 'Write-Host')
 $bad = @()
@@ -387,9 +488,10 @@ foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Lan
   if ($n) { if (($okCmds -notcontains $n) -and ($funcNames -notcontains $n)) { $bad += "command $n" } }
   elseif (-not (($c.Extent.Text -match '^& \$Run\b' -and $fn -eq 'Get-WslState') -or ($c.Extent.Text -match '^& \$fix\b' -and $fn -eq 'Protect-Facts'))) { $bad += "dynamic command: $($c.Extent.Text)" }
   if ($n -eq 'Write-Host' -and $fn -ne 'Write-Out') { $bad += 'Write-Host outside Write-Out' }
+  if ($n -eq 'Add-Type' -and ($c.Extent.Text -ne 'Add-Type -AssemblyName Microsoft.VisualBasic' -or $fn -ne 'Get-Facts')) { $bad += "Add-Type other than loading Microsoft.VisualBasic in Get-Facts: $($c.Extent.Text)" }
   if ($n -eq 'New-Object') {
     $t = $c.CommandElements[1].Extent.Text.Trim("'`"")
-    if (@('System.Diagnostics.ProcessStartInfo', "System.Collections.Generic.Stack[string]", 'System.IO.FileInfo', 'System.IO.DirectoryInfo', 'System.Text.UTF8Encoding', 'System.Collections.ArrayList', 'Security.Principal.WindowsPrincipal') -notcontains $t -and $t -notmatch '^System\.Collections\.Generic\.Stack') { $bad += "New-Object $t" }
+    if (@('System.Diagnostics.ProcessStartInfo', "System.Collections.Generic.Stack[string]", 'System.IO.FileInfo', 'System.IO.DirectoryInfo', 'System.Text.UTF8Encoding', 'System.Collections.ArrayList', 'Security.Principal.WindowsPrincipal', 'Microsoft.VisualBasic.Devices.ComputerInfo') -notcontains $t -and $t -notmatch '^System\.Collections\.Generic\.Stack') { $bad += "New-Object $t" }
   }
   if ($n -eq 'Invoke-Bounded') {
     $exe = $c.CommandElements[1].Extent.Text; $arg = ''; if ($c.CommandElements.Count -gt 2) { $arg = $c.CommandElements[2].Extent.Text }
@@ -409,7 +511,7 @@ $okPairs = @(
   '$Matches[1]|ToUpper', '$media|ContainsKey', '$n.Substring(0, 63)|Trim', '$n|Substring', '$o|Wait', '$p.StandardError|ReadToEndAsync',
   '$p.StandardInput|Close', '$p.StandardOutput|ReadToEndAsync', '$p|Kill', '$p|WaitForExit', '$ps.AddScript($Block.ToString())|AddArgument',
   '$ps|AddScript', '$ps|BeginInvoke', '$ps|BeginStop', '$ps|Dispose', '$ps|EndInvoke', '$rank|ContainsKey', '$stack|Pop', '$stack|Push',
-  '$w[0]|Substring', '$w[1]|Substring', '("$S".ToLowerInvariant() -replace ''[^a-z0-9-]'', ''-'')|Trim', '($cpu[0].Name -replace ''\s+'', '' '')|Trim',
+  '$w[0]|Substring', '$w[1]|Substring', '("$S".ToLowerInvariant() -replace ''[^a-z0-9-]'', ''-'')|Trim', '($cpu[0].Name -replace ''\s+'', '' '')|Trim', '($cn -replace ''\s+'', '' '')|Trim', '[System.IO.DriveInfo]|GetDrives', '[System.GC]|GetGCMemoryInfo',
   '[Console]::Error|WriteLine', '[Console]::Out|Flush', '[Console]::Out|Write', '[Convert]|ToInt64', '[DateTime]::UtcNow|ToString', '[Environment]|Exit',
   '[math]|Min', '[math]|Round', '"$l"|Split', '$p[2].ToLowerInvariant()|Replace', '$p[2]|ToLowerInvariant', '$r|Remove', '$PSBoundParameters|ContainsKey', '$Lines|Add',
   '[System.IO.File]|Open', '(New-Object System.Text.UTF8Encoding($false))|GetBytes', '$fs|Write', '$fs|Dispose', '[regex]|Escape', '[regex]|Matches', '[regex]|Replace', '[Security.Principal.WindowsIdentity]|GetCurrent',
@@ -446,6 +548,8 @@ $nonLit = @($ht.KeyValuePairs | Where-Object { -not ($_.Item2.PipelineElements[0
 Assert-Equal $nonLit.Count 0 'advice table: every value is a single-quoted string literal (never executed)'
 Assert-Equal @($ht.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)).Count 0 'advice table: contains no commands'
 Assert-Equal ($bad -join '; ') '' 'ps1: every command, member call and probe invocation is on the read-only allow-list'
+$cim = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Get-CimInstance' }, $true))
+Assert-True ($cim.Count -ge 8 -and @($cim | Where-Object { $_.Extent.Text -notmatch '-ErrorAction Stop' }).Count -eq 0) 'ps1: every Get-CimInstance has -ErrorAction Stop (access denied is non-terminating, so try/catch would not see it)'
 $ps1 = Get-Content -LiteralPath $psPath -Raw
 Assert-Equal ([regex]::Matches($ps1, "@\('(?:node|python|java|go|rustc)', '(?:-{1,2}version|version)'\)")).Count 5 'ps1: exactly five toolchain probes, each only --version / -version / version'
 Assert-True ($ps1 -match "\[System\.IO\.File\]::WriteAllText\(\`$full" -and ([regex]::Matches($ps1, 'WriteAllText')).Count -eq 1) 'ps1: WriteAllText only for the --json report'

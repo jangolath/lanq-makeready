@@ -133,7 +133,7 @@ cache-folder sizes).
 A machine with no SSH server yet, so it correctly says "not ready". Step text is cut for width.
 
 ```text
-lanq-makeready 0.2.0 (read-only: nothing is installed, changed or sent anywhere)
+lanq-makeready 0.3.0 (read-only: nothing is installed, changed or sent anywhere)
 VERDICT: NOT READY (1 blocker)
 
 [OK  ] OS: Windows 11 Pro build 26200, Professional
@@ -198,6 +198,7 @@ The snippet follows LanQueue's registry schema (`machines.example.yml`, [docs/WO
 | `max_jobs` | from RAM: under 6 GB `1`, 6-11 GB `2`, 12-23 GB `3` (`4` with 8+ logical CPUs), 24 GB and more `6` (`8` with 16+; 24-31 GB counts as this top band), never more than the logical CPUs |
 | `min_free_mem_gb` | `1.5` under 6 GB, else `2`: headroom for one more job; LanQueue starts no new job while less is free |
 | `wake` | the wired adapter's MAC; active only when the `wol` check is OK, otherwise commented out (`<mac>` under `-Redact`) |
+| `path_prepend`, `env: DOTNET_ROOT` | only when the newest .NET SDK is in a folder that is not the `dotnet` on PATH (for example a private `D:/build/dotnet`): that folder, so jobs use that SDK (LanQueue 0.8+). The search covers the usual install folders, the registry or `install_location` files, and on Windows `DRIVE:\dotnet` and `DRIVE:\DIR\dotnet` on every fixed drive |
 | `transfer` | `git` when git is present; `archive` when git is missing but a usable tar is (Windows bsdtar, GNU tar or bsdtar plus gzip; busybox tar is refused, as LanQueue does) |
 | `allowed_hours` | from `-Hours` (`"HH:mm-HH:mm"`, the worker's own clock); otherwise a commented overnight example |
 

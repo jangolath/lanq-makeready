@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.3.0 (2026-11-10)
+
+- Windows: works for a build account that is denied WMI/CIM (a non-admin user on a PC tuned as a server), where
+  0.2.0 showed 0 GB RAM, 0 CPUs and "Windows (unreadable)". Memory then comes from .NET's `Microsoft.VisualBasic`
+  `ComputerInfo`, the Windows version and CPU name from the registry, logical CPUs from the environment and free disk
+  space from `DriveInfo`. Everything stays read-only.
+- Windows: every WMI/CIM query now uses `-ErrorAction Stop`. "Access denied" is a non-terminating error in PowerShell,
+  so in 0.2.0 the fallbacks never ran and the errors were printed on stderr.
+- Windows: OpenSSH Server no longer FAILs as "installed but not running" when the account may not read the service status
+  (`OpenService` access denied for a non-admin build user). Run over ssh, it is reported running (the session came in
+  through it), with the start type from the registry; run locally, the check is SKIP with that reason.
+  `sshd.exe` without a registered service is still a FAIL.
+- Windows: without WMI, Windows Server Core counts as a server (it was taken for a client OS).
+- Windows: without WMI, Windows 11 is no longer shown as "Windows 10" (the registry `ProductName` still says Windows 10 on 11).
+- Wider .NET SDK search, the same folders LanQueue 0.8 searches. Windows: `DOTNET_ROOT` (and `_X64`, `_ARM64`),
+  Program Files, `%LOCALAPPDATA%\Microsoft\dotnet`, `%USERPROFILE%\.dotnet`, the `InstalledVersions` registry keys, and
+  `DRIVE:\dotnet` and `DRIVE:\DIR\dotnet` on every fixed drive. Linux and macOS: `DOTNET_ROOT` (and `_X64`, `_ARM64`),
+  `~/.dotnet`, `/etc/dotnet/install_location*`, `/usr/share`, `/usr/lib`, `/usr/lib64`, `/opt/dotnet`, the snap,
+  `/usr/local/share/dotnet` and the Homebrew folders. An SDK counts only when its folder has `dotnet.dll` next to a
+  `dotnet` executable, so a runtime-only install is not reported as an SDK. The search starts no process and stops after 5 seconds.
+- New `dotnet.path` WARN: when the newest SDK is not the `dotnet` on PATH, the check names that folder and the
+  `machines.yml` snippet and `--json` `suggestedMachine` add `path_prepend: [FOLDER]` and `env: DOTNET_ROOT`
+  (LanQueue 0.8+ keys). The `dotnet` on PATH is searched first and wins a tie; preview SDKs never count as the newest; a
+  snap install keeps its stable `/snap/dotnet-sdk/current` folder. The folder is redacted like other free text under
+  `--redact` (the whole profile folder, also when it is not named after the account).
+- `path_prepend` is suggested only for a folder other local users cannot plant code in. Trusted: Administrators, SYSTEM,
+  TrustedInstaller (root on Linux and macOS), the members of the local Administrators group, and the account itself. On
+  Windows the folder, its `dotnet.exe`, `sdk` and the newest SDK folder, `host`, `host\fxr`, `shared`,
+  `shared\Microsoft.NETCore.App` and their version folders must have a trusted owner, a DACL (not NULL), and give nobody
+  else more than read/execute; every parent folder must have a trusted owner and let nobody else delete or rename what is
+  in it; a junction or link on the path is refused. On Linux and macOS the same items must be owned by root or the account
+  and writable by nobody else (a group only when it is root's or the account's own private group), and each parent
+  folder of the path as given and as resolved must not be writable by others or another group unless sticky; POSIX and
+  macOS ACLs are not read. Only absolute folders are searched. Otherwise the check says so and the snippet carries a
+  comment instead (on a shared PC, a world-writable folder could otherwise make jobs run a planted `dotnet`).
+- SSH keys: the check reads `AuthorizedKeysFile` from `sshd_config` the way sshd does (a matching `Match all`, `User` or
+  `Group` block before the global value, `%h`, `%u`, `%%` and `__PROGRAMDATA__`), so keys in a central file such as
+  `C:\ProgramData\ssh\<user>_authorized_keys` no longer give a false "no authorized_keys" WARN. When `sshd_config`
+  cannot be read, the WARN says keys may be set up elsewhere. Also `AuthorizedKeysFile=value`, `%U`, `Match` keywords in
+  any case, `Match Group` patterns, and (Linux) a `Match` in an `Include`d file ending with that file. A key file on a
+  network share is never read.
+
 ## 0.2.0 (2026-11-09)
 
 - One-line verdict at the top and bottom of the report: `READY`, `READY WITH WARNINGS (n)` or `NOT READY (n blockers)`,

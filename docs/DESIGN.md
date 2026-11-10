@@ -83,8 +83,12 @@ LanQueue worker
 - `longpaths` (Windows) — `LongPathsEnabled`; advise a short work root like `C:\lq`.
 
 Toolchains (informational capabilities; feed the `capabilities:` list)
-- `dotnet` — find without relying on PATH: `dotnet --list-sdks` if on PATH, else `%ProgramFiles%\dotnet\dotnet.exe`,
-  `/usr/share/dotnet`, `/usr/lib/dotnet`, `~/.dotnet`, `/usr/local/share/dotnet`. Report SDK majors.
+- `dotnet` — find without relying on PATH and without starting a process: list `sdk/X.Y.Z` folders (with `dotnet.dll`,
+  next to a `dotnet` executable) in the folders LanQueue 0.8 searches (0.3.0+): `DOTNET_ROOT` (`_X64`, `_ARM64`), the
+  default install folders, `~/.dotnet`, the `InstalledVersions` registry keys / `/etc/dotnet/install_location*`,
+  `/opt/dotnet`, the snap and Homebrew folders, and on Windows `DRIVE:\dotnet` and `DRIVE:\DIR\dotnet` on every fixed
+  drive (64 folders per drive, 5 s in all). Report SDK majors; when the newest SDK's folder is not the `dotnet` on PATH,
+  WARN `dotnet.path` and suggest `path_prepend` + `env: DOTNET_ROOT`.
   Verdict for "can install .NET 10" from the OS table (see docs/research-summary in README): Win11 OK, Win Server
   2012+ OK, Win10 Enterprise/IoT LTSC listed builds OK, consumer Win10 → WARN "not on .NET 10's supported list; usually
   runs; consider Windows 11 or Linux". Linux: glibc ≥ 2.27 (`ldd --version` / `getconf GNU_LIBC_VERSION`) else FAIL;
