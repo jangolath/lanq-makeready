@@ -8,7 +8,7 @@
 #        --out FILE also saves the human report to FILE (a new file only: an existing file is never overwritten)
 # Exit:  0 = worker-ready, 1 = not ready, 2 = bad arguments.
 
-TOOL_VERSION=0.2.0
+TOOL_VERSION=0.3.0
 SEP=$(printf '\037')
 CHECKS=""
 
@@ -34,6 +34,7 @@ advice() {
     disk.low) echo "Free disk space is low. Each job needs room for a worktree plus build output; keep at least 20 GB free, below 10 GB the worker is refused. Find space: sudo apt clean ; du -xh -d1 ~ | sort -h ; or use a bigger disk." ;;
     dotnet.glibc) echo "The .NET 10 SDK needs glibc 2.27 or newer (musl 1.2.3 or newer on Alpine). Use a newer distribution release (Ubuntu 22.04/24.04, Debian 13, Alpine 3.21+)." ;;
     dotnet.mac) echo ".NET 10 supports macOS 15 and newer." ;;
+    dotnet.path) echo "The newest .NET SDK is in a folder that is not on PATH for this account, so a job running dotnet gets another one (or none). In machines.yml add path_prepend: [that folder] and env: DOTNET_ROOT: that folder (the snippet below has both; LanQueue 0.8+). Nothing on this machine is changed." ;;
     docker.daemon) echo "The docker client is installed but the engine is not answering (or you lack permission). Start the service or check group membership yourself." ;;
     docker.ram) echo "Under 4 GB RAM: containers are not recommended on this machine." ;;
     power.desktop) echo "A desktop is installed; its power settings cannot be read from this session (no desktop session bus, e.g. over SSH). GNOME and GDM suspend on AC after about 15-20 minutes by default. Check Settings > Power > Automatic Suspend on the PC, or as the desktop user: gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing' ; for the GDM login screen: sudo -u gdm dbus-run-session gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing' ; or block all suspend: sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target" ;;
@@ -151,7 +152,7 @@ rv() {
 
 redact_facts() { # only free-text facts; fields that drive logic are untouched
   R_HOME=$HOME; R_USER=$F_USER; R_HOST=$F_HOST
-  F_OSNAME=$(rv "$F_OSNAME"); F_CPU=$(rv "$F_CPU"); F_GIT=$(rv "$F_GIT"); F_DOCKER_SERVER=$(rv "$F_DOCKER_SERVER"); F_TEMP=$(rv "$F_TEMP")
+  F_OSNAME=$(rv "$F_OSNAME"); F_CPU=$(rv "$F_CPU"); F_GIT=$(rv "$F_GIT"); F_DOCKER_SERVER=$(rv "$F_DOCKER_SERVER"); F_TEMP=$(rv "$F_TEMP"); F_DOTNET_DIR=$(rv "$F_DOTNET_DIR")
   for _n in node python java go rustc; do
     eval "_v=\${F_T_$_n:-}"
     [ -n "$_v" ] || continue
@@ -347,6 +348,7 @@ eval_wol() {
 eval_dotnet() {
   _t=".NET 10 SDK"
   _have="no SDK found"; [ -n "$F_DOTNET" ] && _have="SDK majors found: $F_DOTNET"
+  [ "$F_DOTNET_OFFPATH" = yes ] && _have="$_have; the newest is in $F_DOTNET_DIR, not the dotnet on PATH"
   if [ "$F_OS" = Darwin ]; then
     if [ "${F_OSVER:-0}" -ge 15 ]; then add_check dotnet "$_t" OK "macOS $F_OSVER ($_have)"
     else add_check dotnet "$_t" WARN "macOS ${F_OSVER:-unknown} is older than 15 ($_have)" dotnet.mac; fi
@@ -367,6 +369,7 @@ eval_dotnet() {
     *) add_check dotnet "$_t" WARN "C library not recognised ($_have)" dotnet.glibc; return ;;
   esac
   if [ "${F_RAMMB:-0}" -lt 4096 ]; then add_check dotnet "$_t" WARN "$_lib ok but low RAM ($_have)" ram.low
+  elif [ "$F_DOTNET_OFFPATH" = yes ]; then add_check dotnet "$_t" WARN "$_lib ($_have)" dotnet.path
   else add_check dotnet "$_t" OK "$_lib ($_have)"; fi
 }
 
@@ -484,9 +487,14 @@ render_snippet() {
     echo "    # wake:   # not ready yet (see the Wake-on-LAN step); uncomment once it is fixed"
     echo "    #   mac: \"$F_WOL_MAC\""
   fi
+  if [ "$F_DOTNET_OFFPATH" = yes ]; then
+    echo "    path_prepend: [\"$F_DOTNET_DIR\"]   # the newest .NET SDK is here, not on PATH (LanQueue 0.8+)"
+    echo "    env:"
+    echo "      DOTNET_ROOT: \"$F_DOTNET_DIR\""
+  fi
   if [ "$M_RAMGB" -lt 6 ]; then
     echo "    # Low-RAM PC: keep max_jobs: 1. Optional caps for build tools (job environment only):"
-    echo "    # env:"
+    [ "$F_DOTNET_OFFPATH" = yes ] || echo "    # env:"
     echo "    #   DOTNET_GCHeapHardLimitPercent: \"0x32\"     # .NET GC heap at most 50% of RAM (hexadecimal)"
     echo "    #   NODE_OPTIONS: \"--max-old-space-size=1024\"  # Node heap at most 1 GB"
     echo "    # For .NET jobs on a small box, add -m:1 to dotnet build / dotnet test commands (one MSBuild process)."
@@ -575,6 +583,7 @@ EOF
   printf '  "suggestedMachine": {"name": "%s", "os": "%s", "ssh": "%s", "work_root": "/srv/lq", "capabilities": [%s], "max_jobs": %s, "min_free_mem_gb": %s, "transfer": "%s"' "$(json_esc "$M_NAME")" "$M_OS" "$(json_esc "$M_SSH")" "$(json_list "$M_CAPS")" "$M_JOBS" "$M_MINMEM" "$M_TRANSFER"
   [ -n "$M_HOURS" ] && printf ', "allowed_hours": "%s"' "$M_HOURS"
   [ "$M_WAKE" = yes ] && printf ', "wake": {"mac": "%s"}' "$(json_esc "$F_WOL_MAC")"
+  [ "$F_DOTNET_OFFPATH" = yes ] && printf ', "path_prepend": ["%s"], "env": {"DOTNET_ROOT": "%s"}' "$(json_esc "$F_DOTNET_DIR")" "$(json_esc "$F_DOTNET_DIR")"
   printf '}\n}\n'
 }
 
@@ -650,6 +659,22 @@ gather_wol() { # physical wired NIC, its MAC, and ethtool Wake-on when readable 
   _eo=$(run_t 5 "$_et" "$F_WOL_IF" 2>/dev/null)
   F_WOL_SUP=$(printf '%s\n' "$_eo" | sed -n 's/^[[:space:]]*Supports Wake-on:[[:space:]]*//p' | head -n 1)
   F_WOL_ON=$(printf '%s\n' "$_eo" | sed -n 's/^[[:space:]]*Wake-on:[[:space:]]*//p' | head -n 1)
+}
+
+sdk_root() { # $1 = a folder that may hold dotnet: adds its SDK majors to F_DOTNET; F_DOTNET_DIR = the folder of the newest SDK
+  [ -n "$1" ] && [ "$(date +%s)" -le "$_end" ] && [ -x "$1/dotnet" ] && [ -d "$1/sdk" ] || return 0
+  _r=$(readlink -f "$1" 2>/dev/null) || _r=${1%/}
+  case "$_seen" in *" $_r "*|*'"'*|*'\'*) return 0 ;; esac # a quote or backslash would break the YAML snippet
+  _seen="$_seen$_r "
+  for _s in "$_r"/sdk/[0-9]*.[0-9]*.[0-9]*; do
+    [ -f "$_s/dotnet.dll" ] || continue
+    _v=${_s##*/}; _m=${_v%%.*}; _n=${_v#*.}; _mi=${_n%%.*}; _p=${_n#*.}; _p=${_p%%[!0-9]*}
+    case "$_m.$_mi.$_p" in *[!0-9.]*|*..*|.*|*.|0[0-9]*|*.0[0-9]*|*[0-9][0-9][0-9][0-9][0-9][0-9]*) continue ;; esac # leading 0 = octal, long = overflow
+    case " $F_DOTNET " in *" $_m "*) ;; *) F_DOTNET="${F_DOTNET:+$F_DOTNET }$_m" ;; esac
+    _k=$(( $_m * 1000000 + $_mi * 1000 + $_p ))
+    if [ "$_k" -gt "$_bk" ]; then _bk=$_k; F_DOTNET_DIR=$_r; fi
+  done
+  return 0
 }
 
 gather_facts() {
@@ -731,16 +756,13 @@ gather_facts() {
   F_GIT=""; if have git && mac_probe_ok git; then F_GIT=$(first_line "$(run_t 8 git --version 2>/dev/null)"); fi
   F_TARKIND=none; if have tar; then F_TARKIND=$(classify_tar "$(run_t 8 tar --version 2>&1)"); fi
   if have gzip; then F_GZIP=yes; else F_GZIP=no; fi
-  F_DOTNET=""; _dn=/nonexistent
+  # dotnet SDKs (no process is started): the folders lanq 0.8 searches, at most 5 s
+  F_DOTNET=""; F_DOTNET_DIR=""; F_DOTNET_OFFPATH=no; _dn=/nonexistent; _seen=" "; _bk=0; _end=$(( $(date +%s) + 5 ))
   if have dotnet; then _dp=$(command -v dotnet); _dp=$(readlink -f "$_dp" 2>/dev/null || echo "$_dp"); _dn=${_dp%/*}; fi
-  for _d in "${DOTNET_ROOT:-/nonexistent}" /usr/share/dotnet /usr/lib/dotnet /usr/lib64/dotnet /usr/local/share/dotnet "$HOME/.dotnet" "$_dn"; do
-    [ -d "$_d/sdk" ] || continue
-    for _s in "$_d"/sdk/[0-9]*; do
-      [ -d "$_s" ] || continue
-      _m=${_s##*/}; _m=${_m%%.*}
-      case " $F_DOTNET " in *" $_m "*) ;; *) F_DOTNET="${F_DOTNET:+$F_DOTNET }$_m" ;; esac
-    done
-  done
+  for _d in "${DOTNET_ROOT:-}" "${DOTNET_ROOT_X64:-}" "${DOTNET_ROOT_ARM64:-}" "$HOME/.dotnet"; do sdk_root "$_d"; done
+  for _f in /etc/dotnet/install_location /etc/dotnet/install_location_*; do [ -r "$_f" ] && sdk_root "$(sed -n 1p "$_f" | tr -d '\r')"; done
+  for _d in /usr/share/dotnet /usr/lib/dotnet /usr/lib64/dotnet /opt/dotnet /snap/dotnet-sdk/current /usr/local/share/dotnet /opt/homebrew/opt/dotnet/libexec /usr/local/opt/dotnet/libexec "$_dn"; do sdk_root "$_d"; done
+  if [ -n "$F_DOTNET_DIR" ] && [ "$F_DOTNET_DIR" != "$(readlink -f "$_dn" 2>/dev/null || echo "$_dn")" ]; then F_DOTNET_OFFPATH=yes; fi
   F_DOCKER_CLI=no; F_DOCKER_SERVER=""; F_DOCKER_REMOTE=no
   _dctx=${DOCKER_CONTEXT:-}
   if [ -z "$_dctx" ] && have docker; then _dctx=$(first_line "$(run_t 5 docker context show 2>/dev/null)"); fi

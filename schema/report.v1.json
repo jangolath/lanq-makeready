@@ -100,6 +100,8 @@
         "capabilities": { "type": "array", "items": { "type": "string" } },
         "max_jobs": { "type": "integer", "minimum": 1, "description": "From RAM (under 6 GB 1, 8 GB 2, 16 GB 3-4, 32 GB+ 6-8), capped by logical CPUs." },
         "min_free_mem_gb": { "type": "number", "minimum": 0, "description": "Optional (0.2.0+): 1.5 under 6 GB, else 2." },
+        "path_prepend": { "type": "array", "items": { "type": "string" }, "description": "Optional (0.3.0+), only when the newest .NET SDK is in a folder that is not the dotnet on PATH: that folder, forward slashes (LanQueue 0.8+ key)." },
+        "env": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Optional (0.3.0+), with path_prepend: DOTNET_ROOT set to the same folder." },
         "transfer": { "enum": ["git", "archive", "none"] },
         "allowed_hours": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$" },
         "wake": {

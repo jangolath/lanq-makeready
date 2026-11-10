@@ -113,6 +113,9 @@ Assert-True ((Ck $r 'os.version').advice -match '22H2 \(build 19045\) is the las
 Assert-True ((Ck $r 'os.version').advice -match 'Settings > Windows Update > Enroll now') 'Win10 advice: how to enroll in ESU'
 Assert-True ((Ck (Run (New-Facts @{ Caption = 'Windows 10 Pro'; Build = 19044 })) 'os.version').detail -match 'not on 22H2') 'Win10 21H2: says not on 22H2'
 Assert-Equal (St (Run (New-Facts @{ SshdStartType = 'Manual' })) 'ssh.server') 'WARN' 'sshd Manual start: WARN'
+$r = Run (New-Facts @{ SshdRunning = $null })
+Assert-True ((St $r 'ssh.server') -eq 'SKIP' -and (Ck $r 'ssh.server').detail -match 'cannot read the service status' -and $r.V.worker_git -eq 'OK') 'sshd status unreadable (not over ssh): SKIP, not FAIL; the worker verdict is unchanged'
+Assert-Equal (St (Run (New-Facts @{ SshdRunning = $false })) 'ssh.server') 'FAIL' 'sshd readable and stopped: still FAIL'
 Assert-Equal (St (Run (New-Facts @{ SshFwRule = 'enabled' })) 'ssh.firewall') 'OK' 'firewall: named rule enabled -> OK'
 $r = Run (New-Facts @{ SshFwRule = 'disabled' })
 Assert-True ((St $r 'ssh.firewall') -eq 'WARN' -and -not (Ck $r 'ssh.firewall').needsAdmin) 'firewall: named rule disabled -> WARN from Get-NetFirewallRule alone (no admin needed)'
@@ -278,6 +281,23 @@ Assert-True (-not (Test-DockerRemote '' '')) 'docker: no host, no context is loc
 Assert-True (Test-Sdk8 @(6, 10)) 'dotnet capability: SDK 10 present'
 Assert-True (-not (Test-Sdk8 @(5, 6, 7))) 'dotnet capability: SDKs below 8 only -> no capability'
 Assert-True (-not ((Run (New-Facts @{ DotnetSdks = @(6) })).M.capabilities -contains 'dotnet')) 'machine: SDK 6 only -> no dotnet capability'
+
+Write-Host '.NET SDK outside PATH'
+$r = Run (New-Facts)
+Assert-True ((St $r 'dotnet') -eq 'OK' -and -not $r.M.Contains('path_prepend') -and -not $r.M.Contains('env')) 'SDK on PATH: OK, no path_prepend or env'
+$fo = New-Facts @{ DotnetSdks = @(6, 10); DotnetDir = 'D:/build/dotnet'; DotnetOffPath = $true }; $r = Run $fo
+Assert-True ((St $r 'dotnet') -eq 'WARN' -and (Ck $r 'dotnet').advice -match 'path_prepend' -and (Ck $r 'dotnet').detail -match 'newest is in D:/build/dotnet, not the dotnet on PATH') 'SDK off PATH: WARN naming the folder, advice names path_prepend'
+Assert-True (-not (Ck $r 'dotnet').adminToFix -and $r.V.worker_git -eq 'OK') 'SDK off PATH: no admin needed, the worker verdict is unchanged'
+Assert-True (@($r.M.path_prepend)[0] -eq 'D:/build/dotnet' -and $r.M.env.DOTNET_ROOT -eq 'D:/build/dotnet' -and $r.M.capabilities -contains 'dotnet') 'SDK off PATH: machine gets path_prepend, DOTNET_ROOT and the dotnet capability'
+$sn = (Format-Snippet $r.M $r.V $fo) -join "`n"
+Assert-True ($sn -match '(?m)^    path_prepend: \["D:/build/dotnet"\]' -and $sn -match '(?m)^    env:\n      DOTNET_ROOT: "D:/build/dotnet"$') 'SDK off PATH: snippet has path_prepend and env DOTNET_ROOT'
+$fo3 = New-Facts @{ RamGB = 3; DotnetDir = 'D:/build/dotnet'; DotnetOffPath = $true }; $r3 = Run $fo3; $sn = (Format-Snippet $r3.M $r3.V $fo3) -join "`n"
+Assert-True (([regex]::Matches($sn, '(?m)^\s*#?\s*env:')).Count -eq 1 -and $sn -match 'DOTNET_GCHeapHardLimitPercent') 'low RAM and SDK off PATH: one env: key, the caps stay as comments under it'
+Assert-Equal ((Run (New-Facts @{ RamGB = 3; DotnetDir = 'D:/build/dotnet'; DotnetOffPath = $true })).C | Where-Object { $_.id -eq 'dotnet' }).advice $Advice['ram.low'] 'low RAM outranks the PATH hint on the dotnet check'
+$j = Get-JsonFor (New-Facts @{ DotnetDir = 'C:/Users/o''brien/.dotnet'; DotnetOffPath = $true; User = "o'brien"; Profile = "C:\Users\o'brien" }) $true | ConvertFrom-Json
+Assert-True ($j.suggestedMachine.path_prepend[0] -eq 'C:/Users/<redacted>/.dotnet' -and $j.suggestedMachine.env.DOTNET_ROOT -eq 'C:/Users/<redacted>/.dotnet') 'redacted JSON: the SDK folder hides the user name'
+$j = Get-JsonFor $fo $false | ConvertFrom-Json
+Assert-True ($j.suggestedMachine.path_prepend[0] -eq 'D:/build/dotnet' -and $j.suggestedMachine.env.DOTNET_ROOT -eq 'D:/build/dotnet') 'JSON: suggestedMachine carries path_prepend and env'
 $wd = @(@{ Letter = 'C:'; FreeGB = 100; Media = 'SSD' }, @{ Letter = 'D:'; FreeGB = 500; Media = 'HDD' })
 Assert-Equal (Select-WorkDrive $wd 'C:').Letter 'C:' 'work drive: SSD with >= 20 GB beats a bigger HDD'
 Assert-Equal (Select-WorkDrive @(@{ Letter = 'C:'; FreeGB = 100; Media = 'HDD' }, @{ Letter = 'D:'; FreeGB = 500; Media = 'HDD' }) 'C:').Letter 'D:' 'work drive: most free space among HDDs'
@@ -378,7 +398,7 @@ Assert-Equal @($perr).Count 0 'ps1 parses without errors'
 $funcs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true))
 $funcNames = @($funcs | ForEach-Object { $_.Name })
 function Get-Fn($Node) { $p = $Node.Parent; while ($p) { if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $p.Name }; $p = $p.Parent }; return '' }
-$okCmds = @('ConvertFrom-Json', 'ConvertTo-Json', 'ForEach-Object', 'Get-Acl', 'Get-ChildItem', 'Get-CimInstance', 'Get-Command', 'Get-Content', 'Get-Item', 'Get-ItemProperty',
+$okCmds = @('Add-Type', 'ConvertFrom-Json', 'ConvertTo-Json', 'ForEach-Object', 'Get-Acl', 'Get-ChildItem', 'Get-CimInstance', 'Get-Command', 'Get-Content', 'Get-Item', 'Get-ItemProperty',
   'Get-Location', 'Get-MpComputerStatus', 'Get-NetAdapter', 'Get-NetAdapterPowerManagement', 'Get-NetFirewallPortFilter', 'Get-NetFirewallRule', 'Get-Partition', 'Get-PhysicalDisk', 'Get-Service', 'Join-Path',
   'Measure-Object', 'Get-AppxPackage', 'New-Object', 'Select-Object', 'Sort-Object', 'Test-Path', 'Where-Object', 'Write-Host')
 $bad = @()
@@ -387,9 +407,10 @@ foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Lan
   if ($n) { if (($okCmds -notcontains $n) -and ($funcNames -notcontains $n)) { $bad += "command $n" } }
   elseif (-not (($c.Extent.Text -match '^& \$Run\b' -and $fn -eq 'Get-WslState') -or ($c.Extent.Text -match '^& \$fix\b' -and $fn -eq 'Protect-Facts'))) { $bad += "dynamic command: $($c.Extent.Text)" }
   if ($n -eq 'Write-Host' -and $fn -ne 'Write-Out') { $bad += 'Write-Host outside Write-Out' }
+  if ($n -eq 'Add-Type' -and ($c.Extent.Text -ne 'Add-Type -AssemblyName Microsoft.VisualBasic' -or $fn -ne 'Get-Facts')) { $bad += "Add-Type other than loading Microsoft.VisualBasic in Get-Facts: $($c.Extent.Text)" }
   if ($n -eq 'New-Object') {
     $t = $c.CommandElements[1].Extent.Text.Trim("'`"")
-    if (@('System.Diagnostics.ProcessStartInfo', "System.Collections.Generic.Stack[string]", 'System.IO.FileInfo', 'System.IO.DirectoryInfo', 'System.Text.UTF8Encoding', 'System.Collections.ArrayList', 'Security.Principal.WindowsPrincipal') -notcontains $t -and $t -notmatch '^System\.Collections\.Generic\.Stack') { $bad += "New-Object $t" }
+    if (@('System.Diagnostics.ProcessStartInfo', "System.Collections.Generic.Stack[string]", 'System.IO.FileInfo', 'System.IO.DirectoryInfo', 'System.Text.UTF8Encoding', 'System.Collections.ArrayList', 'Security.Principal.WindowsPrincipal', 'Microsoft.VisualBasic.Devices.ComputerInfo') -notcontains $t -and $t -notmatch '^System\.Collections\.Generic\.Stack') { $bad += "New-Object $t" }
   }
   if ($n -eq 'Invoke-Bounded') {
     $exe = $c.CommandElements[1].Extent.Text; $arg = ''; if ($c.CommandElements.Count -gt 2) { $arg = $c.CommandElements[2].Extent.Text }
@@ -409,7 +430,7 @@ $okPairs = @(
   '$Matches[1]|ToUpper', '$media|ContainsKey', '$n.Substring(0, 63)|Trim', '$n|Substring', '$o|Wait', '$p.StandardError|ReadToEndAsync',
   '$p.StandardInput|Close', '$p.StandardOutput|ReadToEndAsync', '$p|Kill', '$p|WaitForExit', '$ps.AddScript($Block.ToString())|AddArgument',
   '$ps|AddScript', '$ps|BeginInvoke', '$ps|BeginStop', '$ps|Dispose', '$ps|EndInvoke', '$rank|ContainsKey', '$stack|Pop', '$stack|Push',
-  '$w[0]|Substring', '$w[1]|Substring', '("$S".ToLowerInvariant() -replace ''[^a-z0-9-]'', ''-'')|Trim', '($cpu[0].Name -replace ''\s+'', '' '')|Trim',
+  '$w[0]|Substring', '$w[1]|Substring', '("$S".ToLowerInvariant() -replace ''[^a-z0-9-]'', ''-'')|Trim', '($cpu[0].Name -replace ''\s+'', '' '')|Trim', '($cn -replace ''\s+'', '' '')|Trim', '[System.IO.DriveInfo]|GetDrives',
   '[Console]::Error|WriteLine', '[Console]::Out|Flush', '[Console]::Out|Write', '[Convert]|ToInt64', '[DateTime]::UtcNow|ToString', '[Environment]|Exit',
   '[math]|Min', '[math]|Round', '"$l"|Split', '$p[2].ToLowerInvariant()|Replace', '$p[2]|ToLowerInvariant', '$r|Remove', '$PSBoundParameters|ContainsKey', '$Lines|Add',
   '[System.IO.File]|Open', '(New-Object System.Text.UTF8Encoding($false))|GetBytes', '$fs|Write', '$fs|Dispose', '[regex]|Escape', '[regex]|Matches', '[regex]|Replace', '[Security.Principal.WindowsIdentity]|GetCurrent',
@@ -446,6 +467,8 @@ $nonLit = @($ht.KeyValuePairs | Where-Object { -not ($_.Item2.PipelineElements[0
 Assert-Equal $nonLit.Count 0 'advice table: every value is a single-quoted string literal (never executed)'
 Assert-Equal @($ht.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)).Count 0 'advice table: contains no commands'
 Assert-Equal ($bad -join '; ') '' 'ps1: every command, member call and probe invocation is on the read-only allow-list'
+$cim = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Get-CimInstance' }, $true))
+Assert-True ($cim.Count -ge 8 -and @($cim | Where-Object { $_.Extent.Text -notmatch '-ErrorAction Stop' }).Count -eq 0) 'ps1: every Get-CimInstance has -ErrorAction Stop (access denied is non-terminating, so try/catch would not see it)'
 $ps1 = Get-Content -LiteralPath $psPath -Raw
 Assert-Equal ([regex]::Matches($ps1, "@\('(?:node|python|java|go|rustc)', '(?:-{1,2}version|version)'\)")).Count 5 'ps1: exactly five toolchain probes, each only --version / -version / version'
 Assert-True ($ps1 -match "\[System\.IO\.File\]::WriteAllText\(\`$full" -and ([regex]::Matches($ps1, 'WriteAllText')).Count -eq 1) 'ps1: WriteAllText only for the --json report'

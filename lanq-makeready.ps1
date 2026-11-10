@@ -20,7 +20,7 @@
 [CmdletBinding(PositionalBinding = $false)]
 param([string]$Json, [string]$Out, [switch]$Redact, [string]$Hours, [switch]$Quiet, [Parameter(ValueFromRemainingArguments = $true)][string[]]$Extra)
 
-$ToolVersion = '0.2.0'
+$ToolVersion = '0.3.0'
 
 #region ADVICE
 # The ONE table of advice text. Nothing here is ever executed by this script.
@@ -49,6 +49,7 @@ $Advice = @{
   'dotnet.os'    = 'This OS is not on the .NET 10 supported list. It may still run; Windows 11, Windows Server, or a listed Linux distribution is the safe choice.'
   'dotnet.glibc' = 'glibc 2.27 or newer is required (musl 1.2.3 on Alpine). Use a newer distribution release.'
   'dotnet.mac'   = '.NET 10 supports macOS 15 and newer. Note LanQueue workers are windows|linux only.'
+  'dotnet.path'  = 'The newest .NET SDK is in a folder that is not on PATH for this account, so a job running dotnet gets another one (or none). In machines.yml add path_prepend: [that folder] and env: DOTNET_ROOT: that folder (the snippet below has both; LanQueue 0.8+). Nothing on this PC is changed.'
   'docker.virt'  = 'Hardware virtualization is off. Turn on Intel VT-x / AMD-V (SVM) in the BIOS/UEFI setup yourself.'
   'docker.ram'   = 'Docker Desktop wants 8 GB RAM. With less, use Linux with Docker Engine, or Docker Engine inside WSL 2 with a memory cap in .wslconfig (memory=2GB). Below 4 GB, containers are not recommended.'
   'docker.wsl'   = 'WSL 2 was not found. Docker Desktop (WSL 2 backend) needs it; see learn.microsoft.com/windows/wsl/install.'
@@ -200,6 +201,7 @@ function Get-DotnetCheck($F) {
   $t = '.NET 10 SDK'
   $have = 'no SDK found'
   if ($F.DotnetSdks -and @($F.DotnetSdks).Count -gt 0) { $have = 'SDK majors found: ' + (@($F.DotnetSdks) -join ', ') }
+  if ($F.DotnetOffPath) { $have += "; the newest is in $($F.DotnetDir), not the dotnet on PATH" }
   if ($F.RamGB -lt 2) { return New-Check 'dotnet' $t 'FAIL' "under 2 GB RAM ($have)" 'ram.low' }
   $ed = "$($F.EditionId)"; $b = [int]$F.Build
   $st = 'OK'; $adv = ''; $why = 'supported OS'
@@ -215,6 +217,7 @@ function Get-DotnetCheck($F) {
   } else { return New-Check 'dotnet' $t 'FAIL' "Windows build $b is too old ($have)" 'os.old' }
   if (-not $F.Is64 -and -not $F.IsArm) { if ($st -eq 'OK') { $st = 'WARN'; $adv = 'arch32.win' }; $why += '; 32-bit (x86) Windows' }
   if ($st -eq 'OK' -and $F.RamGB -lt 4) { $st = 'WARN'; $adv = 'ram.low'; $why += ' but low RAM' }
+  if ($st -eq 'OK' -and $F.DotnetOffPath) { $st = 'WARN'; $adv = 'dotnet.path' }
   return New-Check 'dotnet' $t $st "$why ($have)" $adv
 }
 
@@ -327,6 +330,7 @@ function Get-Checks($F) {
   $shell = 'cmd.exe (LanQueue invokes powershell explicitly)'
   if ($F.DefaultShell) { $shell = "$($F.DefaultShell)" }
   if (-not $F.SshdInstalled) { [void]$c.Add((New-Check 'ssh.server' 'OpenSSH Server' 'FAIL' 'not installed' 'ssh.install')) }
+  elseif ($null -eq $F.SshdRunning) { [void]$c.Add((New-Check 'ssh.server' 'OpenSSH Server' 'SKIP' "installed; this account cannot read the service status (run as an administrator, or over ssh); start type $($F.SshdStartType)" '')) }
   elseif (-not $F.SshdRunning) { [void]$c.Add((New-Check 'ssh.server' 'OpenSSH Server' 'FAIL' 'installed but not running' 'ssh.start')) }
   elseif ($F.SshdStartType -and $F.SshdStartType -ne 'Automatic') { [void]$c.Add((New-Check 'ssh.server' 'OpenSSH Server' 'WARN' "running, start type $($F.SshdStartType); default shell: $shell" 'ssh.auto')) }
   else { [void]$c.Add((New-Check 'ssh.server' 'OpenSSH Server' 'OK' "running, automatic start; default shell: $shell")) }
@@ -459,6 +463,7 @@ function Get-Machine($F, $V, [string]$H, [bool]$Redact) {
   $m = [ordered]@{ name = $name; os = 'windows'; ssh = $ssh; work_root = $root; capabilities = $caps; max_jobs = $jobs; min_free_mem_gb = (Get-SuggestedMinMem $rg); transfer = $tr }
   if ($H) { $m['allowed_hours'] = $H }
   if ($F.WolMac -and (Get-WolCheck $F).status -eq 'OK') { $m['wake'] = [ordered]@{ mac = $F.WolMac } }
+  if ($F.DotnetOffPath -and $F.DotnetDir) { $m['path_prepend'] = @($F.DotnetDir); $m['env'] = [ordered]@{ DOTNET_ROOT = $F.DotnetDir } }
   return $m
 }
 
@@ -490,9 +495,13 @@ function Format-Snippet($M, $V, $F) {
     $o += '    # wake:   # not ready yet (see the Wake-on-LAN step); uncomment once it is fixed'
     $o += "    #   mac: `"$($F.WolMac)`""
   }
+  if ($M.Contains('path_prepend')) {
+    $o += "    path_prepend: [`"$(@($M.path_prepend)[0])`"]   # the newest .NET SDK is here, not on PATH (LanQueue 0.8+)"
+    $o += '    env:'; $o += "      DOTNET_ROOT: `"$($M.env.DOTNET_ROOT)`""
+  }
   if ([double]$F.RamGB -lt 6) {
     $o += '    # Low-RAM PC: keep max_jobs: 1. Optional caps for build tools (job environment only):'
-    $o += '    # env:'
+    if (-not $M.Contains('env')) { $o += '    # env:' }
     $o += '    #   DOTNET_GCHeapHardLimitPercent: "0x32"     # .NET GC heap at most 50% of RAM (hexadecimal)'
     $o += '    #   NODE_OPTIONS: "--max-old-space-size=1024"  # Node heap at most 1 GB'
     $o += '    # For .NET jobs on a small box, add -m:1 to dotnet build / dotnet test commands (one MSBuild process).'
@@ -507,7 +516,7 @@ function Protect-Facts($F) {
   foreach ($v in @($F.Profile, $F.User, $F.Hostname)) { if ($v -and "$v".Length -ge 2) { $toks += "$v" } }
   $fix = { param($s) foreach ($t in $toks) { $s = [regex]::Replace("$s", '(?<![A-Za-z0-9_])' + [regex]::Escape($t) + '(?![A-Za-z0-9_])', '<redacted>', 'IgnoreCase') }; $s }
   $o = @{}; foreach ($k in $F.Keys) { $o[$k] = $F[$k] }
-  foreach ($k in @('Caption', 'CpuName', 'GitVer', 'DockerServer', 'DefaultShell', 'WolNic')) { if ($o[$k]) { $o[$k] = & $fix $o[$k] } }
+  foreach ($k in @('Caption', 'CpuName', 'GitVer', 'DockerServer', 'DefaultShell', 'WolNic', 'DotnetDir')) { if ($o[$k]) { $o[$k] = & $fix $o[$k] } }
   foreach ($k in @('StartupNames', 'ProblemDevices')) { if ($o[$k]) { $o[$k] = @($o[$k] | ForEach-Object { & $fix $_ }) } }
   if ($o.Tools) { $t2 = @{}; foreach ($k in $o.Tools.Keys) { $t2[$k] = & $fix $o.Tools[$k] }; $o.Tools = $t2 }
   $o.Hostname = '<redacted>'; $o.User = '<redacted>'; $o.Profile = '<redacted>'
@@ -642,23 +651,30 @@ function Get-DockerContext([string]$DockerExe) {
 
 function Get-Facts([string]$H) {
   $F = @{ Hours = $H; Hostname = $env:COMPUTERNAME; User = $env:USERNAME; Profile = $env:USERPROFILE }
-  try { $os = Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 15
+  # WMI/CIM may be denied to a non-admin build account (a PC tuned as a server): then the registry and .NET answer instead
+  $noWmi = $false; $F.Caption = 'Windows (unreadable)'; $F.Build = 0; $F.RamGB = 0; $F.FreeRamGB = 0; $F.IsServer = $false
+  try { $os = Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 15 -ErrorAction Stop
     $F.Caption = ($os.Caption -replace '^Microsoft\s+', ''); $F.Build = [int]$os.BuildNumber; $F.IsServer = ($os.ProductType -ne 1)
     $F.RamGB = [math]::Round($os.TotalVisibleMemorySize / 1MB + 0.5, 1); $F.FreeRamGB = [math]::Round($os.FreePhysicalMemory / 1MB, 1)
-  } catch { $F.Caption = 'Windows (unreadable)'; $F.Build = 0; $F.RamGB = 0; $F.FreeRamGB = 0; $F.IsServer = $false }
+  } catch { $noWmi = $true
+    try { Add-Type -AssemblyName Microsoft.VisualBasic; $vb = New-Object Microsoft.VisualBasic.Devices.ComputerInfo
+      $F.RamGB = [math]::Round($vb.TotalPhysicalMemory / 1GB + 0.05, 1); $F.FreeRamGB = [math]::Round($vb.AvailablePhysicalMemory / 1GB, 1) } catch { } }
   # installed RAM, not the usable amount (usable is a little lower on every PC)
-  try { $cap = (@(Get-CimInstance Win32_PhysicalMemory -OperationTimeoutSec 15) | Measure-Object Capacity -Sum).Sum
+  try { $cap = (@(Get-CimInstance Win32_PhysicalMemory -OperationTimeoutSec 15 -ErrorAction Stop) | Measure-Object Capacity -Sum).Sum
     if ($cap -gt 0 -and [math]::Round($cap / 1GB, 1) -gt $F.RamGB) { $F.RamGB = [math]::Round($cap / 1GB, 1) } } catch { }
-  try { $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop; $F.EditionId = $cv.EditionID } catch { $F.EditionId = '' }
+  try { $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop; $F.EditionId = $cv.EditionID
+    if ($noWmi) { $F.Build = [int]$cv.CurrentBuildNumber; $F.IsServer = ("$($cv.InstallationType)" -eq 'Server')   # ProductName still says Windows 10 on 11
+      $F.Caption = ("$($cv.ProductName)" -replace '^Microsoft\s+', ''); if (-not $F.IsServer -and $F.Build -ge 22000) { $F.Caption = $F.Caption -replace '^Windows 10', 'Windows 11' } } } catch { $F.EditionId = '' }
   $F.Is64 = [Environment]::Is64BitOperatingSystem
   $F.IsArm = ("$env:PROCESSOR_ARCHITECTURE $env:PROCESSOR_ARCHITEW6432" -match 'ARM64')
   if ($F.IsArm) { $F.Arch = 'arm64' } elseif ($F.Is64) { $F.Arch = 'x64' } else { $F.Arch = 'x86' }
-  try { $cpu = @(Get-CimInstance Win32_Processor -OperationTimeoutSec 15)
+  try { $cpu = @(Get-CimInstance Win32_Processor -OperationTimeoutSec 15 -ErrorAction Stop)
     $F.CpuName = ($cpu[0].Name -replace '\s+', ' ').Trim(); $F.Cores = ($cpu | Measure-Object NumberOfCores -Sum).Sum; $F.Logical = ($cpu | Measure-Object NumberOfLogicalProcessors -Sum).Sum
     $F.VirtFirmware = $cpu[0].VirtualizationFirmwareEnabled
-  } catch { $F.CpuName = 'unknown'; $F.Cores = 0; $F.Logical = 0 }
+  } catch { $F.CpuName = 'unknown'; $F.Logical = [Environment]::ProcessorCount; $F.Cores = $F.Logical   # no WMI: logical CPUs only (as lanq health)
+    try { $cn = "$((Get-ItemProperty 'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0' -ErrorAction Stop).ProcessorNameString)"; if ($cn) { $F.CpuName = ($cn -replace '\s+', ' ').Trim() } } catch { } }
   try { $F.Avx2 = [string][System.Runtime.Intrinsics.X86.Avx2]::IsSupported } catch { $F.Avx2 = 'not queried on Windows PowerShell 5.1' }
-  try { $F.HypervisorPresent = [bool](Get-CimInstance Win32_ComputerSystem -OperationTimeoutSec 15).HypervisorPresent } catch { }
+  try { $F.HypervisorPresent = [bool](Get-CimInstance Win32_ComputerSystem -OperationTimeoutSec 15 -ErrorAction Stop).HypervisorPresent } catch { }
   # disks: media type (SSD/HDD) per drive letter, then pick the work drive
   $media = @{}
   $mm = Invoke-WithTimeout { param($x)
@@ -667,9 +683,11 @@ function Get-Facts([string]$H) {
       "$($_.DriveLetter)=$($d.MediaType)" } } $null 20
   foreach ($line in @($mm)) { if ("$line" -match '^([A-Za-z])=(SSD|HDD)$') { $media[$Matches[1].ToUpper()] = $Matches[2] } }
   $drives = @()
-  try { foreach ($d in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -OperationTimeoutSec 15)) {
+  try { foreach ($d in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -OperationTimeoutSec 15 -ErrorAction Stop)) {
       $m = 'Unknown'; $l = $d.DeviceID.Substring(0, 1).ToUpper(); if ($media.ContainsKey($l)) { $m = $media[$l] }
       $drives += @{ Letter = $d.DeviceID; FreeGB = [math]::Round($d.FreeSpace / 1GB, 1); Media = $m } } } catch { }
+  if ($drives.Count -eq 0) { try { foreach ($d in @([System.IO.DriveInfo]::GetDrives() | Where-Object { "$($_.DriveType)" -eq 'Fixed' -and $_.IsReady })) {
+      $l = "$($d.Name)" -replace '^(.).*$', '$1'; $m = 'Unknown'; if ($media.ContainsKey($l)) { $m = $media[$l] }; $drives += @{ Letter = "${l}:"; FreeGB = [math]::Round($d.AvailableFreeSpace / 1GB, 1); Media = $m } } } catch { } }
   $sel = Select-WorkDrive $drives $env:SystemDrive
   $F.WorkDrive = $sel.Letter; $F.WorkFreeGB = $sel.FreeGB; $F.DiskMedia = $sel.Media
   $sys = @($drives | Where-Object { $_.Letter -eq $env:SystemDrive }); $F.SysFreeGB = 0; if ($sys.Count -gt 0) { $F.SysFreeGB = $sys[0].FreeGB }
@@ -677,6 +695,9 @@ function Get-Facts([string]$H) {
   $svc = Get-Service sshd -ErrorAction SilentlyContinue
   $F.SshdInstalled = [bool]($svc -or (Test-Path "$env:WINDIR\System32\OpenSSH\sshd.exe"))
   if ($svc) { $F.SshdRunning = ($svc.Status -eq 'Running'); $F.SshdStartType = "$($svc.StartType)" }
+  else { try { $st = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\sshd' -Name Start -ErrorAction Stop).Start   # service registered, status unreadable
+      $F.SshdInstalled = $true; $F.SshdStartType = @{ 2 = 'Automatic'; 3 = 'Manual'; 4 = 'Disabled' }[[int]$st]
+      if ($env:SSH_CONNECTION) { $F.SshdRunning = $true } else { $F.SshdRunning = $null } } catch { } }   # this script came in over ssh: sshd runs
   $fw = Invoke-WithTimeout { param($x)
     $r = @(Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue)
     if ($r.Count -eq 0) { 'missing' } elseif (@($r | Where-Object { "$($_.Enabled)" -eq 'True' }).Count -gt 0) { 'enabled' } else { 'disabled' } } $null 15
@@ -706,11 +727,20 @@ function Get-Facts([string]$H) {
   $tar = "$env:SystemRoot\System32\tar.exe"
   if (Test-Path -LiteralPath $tar) { $r = Invoke-Bounded $tar '--version' 8; $F.TarBsd = [bool]($r -and $r.Out -match 'bsdtar') } else { $F.TarBsd = $false }
   try { $F.LongPaths = ((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -ErrorAction Stop).LongPathsEnabled -eq 1) } catch { $F.LongPaths = $false }
-  # dotnet SDK folders (no process is started)
-  $roots = @("$env:ProgramFiles\dotnet", "${env:ProgramFiles(x86)}\dotnet", $env:DOTNET_ROOT, "$env:USERPROFILE\.dotnet")
-  $majors = @()
-  foreach ($rt in $roots) { if ($rt -and (Test-Path -LiteralPath "$rt\sdk")) { foreach ($dir in (Get-ChildItem -LiteralPath "$rt\sdk" -Directory -ErrorAction SilentlyContinue)) { if ($dir.Name -match '^(\d+)\.') { $majors += [int]$Matches[1] } } } }
-  $F.DotnetSdks = @($majors | Sort-Object -Unique)
+  # dotnet SDKs (no process is started): the folders lanq 0.8 searches, at most 5 s. DotnetDir = the folder of the newest SDK;
+  # DotnetOffPath = the dotnet on PATH is not that folder (a job then needs path_prepend)
+  $sw = [System.Diagnostics.Stopwatch]::StartNew(); $roots = @($env:DOTNET_ROOT, $env:DOTNET_ROOT_X64, $env:DOTNET_ROOT_ARM64, "$env:ProgramFiles\dotnet", "${env:ProgramFiles(x86)}\dotnet", "$env:LOCALAPPDATA\Microsoft\dotnet", "$env:USERPROFILE\.dotnet")
+  foreach ($a in 'x64', 'arm64', 'x86') { try { $roots += (Get-ItemProperty "HKLM:\SOFTWARE\dotnet\Setup\InstalledVersions\$a" -ErrorAction Stop).InstallLocation } catch { } }
+  foreach ($dr in $drives) { $roots += "$($dr.Letter)\dotnet"; $n = 0
+    try { foreach ($x in [System.IO.Directory]::EnumerateDirectories("$($dr.Letter)\")) { if (++$n -gt 64) { break }; $roots += "$x\dotnet" } } catch { } }
+  $majors = @(); $seen = @(); $best = $null; $bestV = [version]'0.0'
+  foreach ($rt in $roots) { $rt = "$rt" -replace '[\\/]+$', ''
+    if (-not $rt -or $seen -contains $rt -or $sw.Elapsed.TotalSeconds -gt 5 -or -not (Test-Path -LiteralPath "$rt\dotnet.exe" -PathType Leaf)) { continue }; $seen += $rt
+    foreach ($dir in @(Get-ChildItem -LiteralPath "$rt\sdk" -Directory -ErrorAction SilentlyContinue)) {
+      if ($dir.Name -match '^(\d+)\.(\d+)\.(\d+)' -and (Test-Path -LiteralPath "$($dir.FullName)\dotnet.dll")) { $majors += [int]$Matches[1]
+        $v = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])"; if ($v -gt $bestV) { $bestV = $v; $best = $rt } } } }
+  $F.DotnetSdks = @($majors | Sort-Object -Unique); $F.DotnetDir = $null; $F.DotnetOffPath = $false
+  if ($best) { $F.DotnetDir = $best -replace '\\', '/'; $F.DotnetOffPath = (("$(Find-Exe 'dotnet')" -replace '\\[^\\]*$', '') -ne $best) }
   # docker (a remote endpoint is never probed), wsl (never run unless installed)
   $dk = Find-Exe 'docker'; $F.DockerCli = [bool]$dk; $F.DockerServerOk = $false
   $F.DockerRemote = Test-DockerRemote $env:DOCKER_HOST (Get-DockerContext $dk)
@@ -747,16 +777,16 @@ function Get-Facts([string]$H) {
   try { $hb = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -ErrorAction Stop).HiberbootEnabled } catch { }
   try { $cp = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' -ErrorAction Stop; $he = $cp.HibernateEnabled; $hd = $cp.HibernateEnabledDefault } catch { }
   $F.FastStartup = Test-FastStartup $hb $he $hd
-  try { $F.SwapMB = [int](@(Get-CimInstance Win32_PageFileUsage -OperationTimeoutSec 15) | Measure-Object AllocatedBaseSize -Sum).Sum } catch { $F.SwapMB = $null }
+  try { $F.SwapMB = [int](@(Get-CimInstance Win32_PageFileUsage -OperationTimeoutSec 15 -ErrorAction Stop) | Measure-Object AllocatedBaseSize -Sum).Sum } catch { $F.SwapMB = $null }
   # slowdowns
-  try { $su = @(Get-CimInstance Win32_StartupCommand -OperationTimeoutSec 15); $F.StartupCount = $su.Count; $F.StartupNames = @($su | Select-Object -First 5 | ForEach-Object { $_.Name }) } catch { }
+  try { $su = @(Get-CimInstance Win32_StartupCommand -OperationTimeoutSec 15 -ErrorAction Stop); $F.StartupCount = $su.Count; $F.StartupNames = @($su | Select-Object -First 5 | ForEach-Object { $_.Name }) } catch { }
   $F.TempSizes = @()
   foreach ($p in @(@('user temp', $env:TEMP), @('Windows temp', "$env:WINDIR\Temp"), @('NuGet packages', "$env:USERPROFILE\.nuget\packages"), @('npm cache', "$env:LOCALAPPDATA\npm-cache"))) {
     $z = Get-DirSizeMB $p[1] 3; if ($z) { $F.TempSizes += @{ Name = $p[0]; MB = $z.MB; Capped = $z.Capped } } }
   $df = Invoke-WithTimeout { param($x) (Get-MpComputerStatus -ErrorAction Stop).RealTimeProtectionEnabled } $null 15
   $F.DefenderRtp = Get-ProbeBool $df
   $F.DevDrive = ($F.Build -ge 22631)
-  try { $F.ProblemDevices = @(Get-CimInstance Win32_PnPEntity -OperationTimeoutSec 20 | Where-Object { $_.ConfigManagerErrorCode -ne 0 } | ForEach-Object { $_.Name }) } catch { $F.ProblemDevices = $null }
+  try { $F.ProblemDevices = @(Get-CimInstance Win32_PnPEntity -OperationTimeoutSec 20 -ErrorAction Stop | Where-Object { $_.ConfigManagerErrorCode -ne 0 } | ForEach-Object { $_.Name }) } catch { $F.ProblemDevices = $null }
   return $F
 }
 

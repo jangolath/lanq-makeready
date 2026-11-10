@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+- Windows: works for a build account that is denied WMI/CIM (a non-admin user on a PC tuned as a server), where
+  0.2.0 showed 0 GB RAM, 0 CPUs and "Windows (unreadable)". Memory then comes from .NET's `Microsoft.VisualBasic`
+  `ComputerInfo`, the Windows version and CPU name from the registry, logical CPUs from the environment and free disk
+  space from `DriveInfo`. Everything stays read-only.
+- Windows: every WMI/CIM query now uses `-ErrorAction Stop`. "Access denied" is a non-terminating error in PowerShell,
+  so in 0.2.0 the fallbacks never ran and the errors were printed on stderr.
+- Windows: OpenSSH Server no longer FAILs as "installed but not running" when the account may not read the service status
+  (`OpenService` access denied for a non-admin build user). Run over ssh, it is reported running (the session came in
+  through it), with the start type from the registry; run locally, the check is SKIP with that reason.
+- Windows: without WMI, Windows 11 is no longer shown as "Windows 10" (the registry `ProductName` still says Windows 10 on 11).
+- Wider .NET SDK search, the same folders LanQueue 0.8 searches. Windows: `DOTNET_ROOT` (and `_X64`, `_ARM64`),
+  Program Files, `%LOCALAPPDATA%\Microsoft\dotnet`, `%USERPROFILE%\.dotnet`, the `InstalledVersions` registry keys, and
+  `DRIVE:\dotnet` and `DRIVE:\DIR\dotnet` on every fixed drive. Linux and macOS: `DOTNET_ROOT` (and `_X64`, `_ARM64`),
+  `~/.dotnet`, `/etc/dotnet/install_location*`, `/usr/share`, `/usr/lib`, `/usr/lib64`, `/opt/dotnet`, the snap,
+  `/usr/local/share/dotnet` and the Homebrew folders. An SDK counts only when its folder has `dotnet.dll` next to a
+  `dotnet` executable, so a runtime-only install is not reported as an SDK. The search starts no process and stops after 5 seconds.
+- New `dotnet.path` WARN: when the newest SDK is not the `dotnet` on PATH, the check names that folder and the
+  `machines.yml` snippet and `--json` `suggestedMachine` add `path_prepend: [FOLDER]` and `env: DOTNET_ROOT`
+  (LanQueue 0.8+ keys). The folder is redacted like other free text under `--redact`.
+
 ## 0.2.0 (2026-11-09)
 
 - One-line verdict at the top and bottom of the report: `READY`, `READY WITH WARNINGS (n)` or `NOT READY (n blockers)`,

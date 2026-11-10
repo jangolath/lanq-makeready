@@ -26,6 +26,7 @@ fixture_ubuntu() { # Ubuntu 24.04, 16 GB, SSD, everything good
   F_T_node=v22.1.0; F_T_python=""; F_T_java=""; F_T_go=""; F_T_rustc=""
   F_OSID=ubuntu; F_OSVERID=24.04; F_NOW_YM=202611; F_SSHD_PW=no; F_SWAPMB=2048
   F_WOL_IF=enp1s0; F_WOL_MAC=10:20:30:aa:bb:cc; F_WOL_WIFI=no; F_WOL_SUP=pumbg; F_WOL_ON=g
+  F_DOTNET_DIR=""; F_DOTNET_OFFPATH=no
 }
 run() { eval_checks; eval_verdicts; eval_machine "${1:-}" 0; eval_summary; }
 step_ids() { printf '%s' "$S_STEPS" | while IFS="$SEP" read -r _i _; do printf '%s ' "$_i"; done; }
@@ -316,6 +317,40 @@ if sdk_ge8 "6 7"; then bad "sdk_ge8 old" yes no; else ok "dotnet capability need
 if sdk_ge8 "6 10"; then ok "dotnet capability: 6,10 -> yes"; else bad "sdk_ge8 10" no yes; fi
 fixture_ubuntu; F_DOTNET="6"; run
 eq "$M_CAPS" "node, docker, git, linux" "SDK 6 only: no dotnet capability"
+
+echo ".NET SDK outside PATH"
+fixture_ubuntu; run
+if render_snippet | grep -q 'path_prepend\|DOTNET_ROOT'; then bad "SDK on PATH: no path_prepend" present absent; else ok "SDK on PATH: no path_prepend or DOTNET_ROOT"; fi
+fixture_ubuntu; F_DOTNET_DIR=/opt/build/dotnet; F_DOTNET_OFFPATH=yes; F_DOTNET="6 10"; run
+eq "$V_DOTNET" WARN "SDK off PATH: dotnet10 WARN"
+contains "$CHECKS" "the newest is in /opt/build/dotnet, not the dotnet on PATH" "SDK off PATH: detail names the folder"
+contains "$(advice dotnet.path)" "path_prepend" "SDK off PATH: advice names path_prepend"
+eq "$(advice_admin dotnet.path)" false "SDK off PATH: no root needed"
+eq "$V_GIT" OK "SDK off PATH: worker verdict unchanged"
+contains "$(render_snippet)" '    path_prepend: ["/opt/build/dotnet"]' "SDK off PATH: snippet path_prepend"
+contains "$(render_snippet)" '    env:
+      DOTNET_ROOT: "/opt/build/dotnet"' "SDK off PATH: snippet env DOTNET_ROOT"
+contains "$(render_json 0)" '"path_prepend": ["/opt/build/dotnet"], "env": {"DOTNET_ROOT": "/opt/build/dotnet"}}' "SDK off PATH: JSON suggestedMachine"
+fixture_ubuntu; F_DOTNET_DIR=/opt/build/dotnet; F_DOTNET_OFFPATH=yes; F_RAMMB=3000; run
+eq "$(render_snippet | grep -c 'env:')" 1 "low RAM and SDK off PATH: one env: key"
+contains "$(render_snippet)" '#   DOTNET_GCHeapHardLimitPercent' "low RAM and SDK off PATH: caps stay as comments"
+red=$( fixture_ubuntu; F_DOTNET_DIR=/home/builder/.dotnet; F_DOTNET_OFFPATH=yes; R_HOME=/home/builder; HOME=/home/builder; redact_facts; run; render_json 1 )
+contains "$red" '"path_prepend": ["<redacted>/.dotnet"], "env": {"DOTNET_ROOT": "<redacted>/.dotnet"}' "redacted JSON: the SDK folder hides the home folder"
+case "$red" in *builder*) bad "redacted JSON: no user name" leaked hidden ;; *) ok "redacted JSON: no user name" ;; esac
+echo "sdk_root: real folders"
+sd=${TMPDIR:-/tmp}/lanq-sdk.$$
+mkdir -p "$sd/a/sdk/9.0.100" "$sd/b/sdk/10.0.102" "$sd/b/sdk/10.0.99" "$sd/c/sdk/11.0.100" "$sd/d/sdk/08.0.1" "$sd/e/sdk/10.0.200-rc.1"
+for x in a b c d e; do printf '#!/bin/sh\n' > "$sd/$x/dotnet"; chmod +x "$sd/$x/dotnet"; done
+for v in a/sdk/9.0.100 b/sdk/10.0.102 b/sdk/10.0.99 d/sdk/08.0.1 e/sdk/10.0.200-rc.1; do : > "$sd/$v/dotnet.dll"; done
+F_DOTNET=""; F_DOTNET_DIR=""; _seen=" "; _bk=0; _end=$(( $(date +%s) + 5 ))
+for x in a b c d b/ ""; do sdk_root "${x:+$sd/$x}"; done
+eq "$F_DOTNET" "9 10" "sdk_root: majors from SDK folders with dotnet.dll (11 has none, 08 is refused)"
+eq "${F_DOTNET_DIR##*/}" b "sdk_root: the newest SDK's folder wins"
+sdk_root "$sd/e"
+eq "${F_DOTNET_DIR##*/}" e "sdk_root: 10.0.200-rc.1 counts as 10.0.200"
+F_DOTNET_DIR=""; _bk=0; _end=$(( $(date +%s) - 1 )); _seen=" "; sdk_root "$sd/b"
+eq "$F_DOTNET_DIR" "" "sdk_root: nothing is read after the 5 s deadline"
+rm -rf "$sd"
 eq "$(safe_name 'My_PC.Local')" "my-pc-local" "safe_name: lowercase, [a-z0-9-]"
 eq "$(safe_name '--x--')" "x" "safe_name: no leading/trailing hyphen"
 eq "$(safe_name '___')" "old-pc" "safe_name: fallback"
