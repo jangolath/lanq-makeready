@@ -314,15 +314,32 @@ Assert-True ((St $r 'dotnet') -eq 'WARN' -and (Ck $r 'dotnet').detail -match 'ot
 Assert-True (-not $r.M.Contains('path_prepend') -and -not $r.M.Contains('env')) 'SDK in a folder others can write: no path_prepend or env suggested'
 Assert-True (((Format-Snippet $r.M $r.V $fp) -join "`n") -match '# path_prepend: not suggested: other local users can write to C:/tools/dotnet') 'SDK in a folder others can write: the snippet says so in a comment'
 
+Write-Host 'Test-Sddl (who may change what a job runs)'
+$me = 'S-1-5-21-1-2-3-1001'; $ti = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+Assert-True (Test-Sddl "O:${ti}G:${ti}D:PAI(A;OICIIO;GA;;;CO)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;OICI;0x1200a9;;;AC)" 0 $me) 'Program Files layout (TrustedInstaller owner, Users read/execute): safe'
+Assert-True (Test-Sddl "O:${me}G:${me}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;$me)" 0 $me) 'a folder only this account, SYSTEM and Administrators may write: safe'
+Assert-True (-not (Test-Sddl "O:${me}G:${me}" 0 $me)) 'no DACL part at all: not safe'
+Assert-True (-not (Test-Sddl "O:${me}G:${me}D:NO_ACCESS_CONTROL" 0 $me)) 'NULL DACL: not safe'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(A;;LCDT;;;AU)" 0 $me)) 'Authenticated Users may add subfolders and delete children (LC DT): not safe'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;OICI;FA;;;BA)(A;OICI;FA;;;S-1-5-32-555)" 0 $me)) 'Remote Desktop Users full control (any group not trusted): not safe'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;S-1-5-21-9-9-9-1002)" 0 $me)) 'another local user may modify: not safe'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;OICIIO;GW;;;AU)" 0 $me)) 'an inherit-only write entry on the folder itself counts (its new children would get it)'
+Assert-True (-not (Test-Sddl "O:BUG:BUD:(A;;FA;;;BA)" 0 $me)) 'owned by Users: not safe (the owner may rewrite the ACL)'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(XA;;FA;;;WD;(x))" 0 $me)) 'a conditional (callback) Allow entry for Everyone: not safe'
+Assert-True (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(D;;FA;;;WD)" 0 $me) 'a Deny entry never makes a folder unsafe'
+Assert-True (Test-Sddl "O:SYG:SYD:(A;;0x1301bf;;;AU)(A;OICIIO;SDGXGWGR;;;AU)(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)" 2 $me) 'a drive root where Authenticated Users may create folders: a safe parent'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(A;;0x1301ff;;;AU)" 1 $me)) 'a parent where Authenticated Users may delete children (0x40): not safe'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(A;;SDRCWDWO;;;AU)" 1 $me)) 'a parent others may delete, re-permission or take: not safe'
+Assert-True (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(A;OICIIO;FA;;;AU)" 1 $me) 'on a parent, an entry that only passes down is judged on the children'
+
 Write-Host 'Test-SafeFolder (real ACLs)'
 $sf = Join-Path ([System.IO.Path]::GetTempPath()) "lanq-safe-$PID"; [void](New-Item -ItemType Directory -Path $sf -Force); Set-Content -LiteralPath "$sf\dotnet.exe" -Value 'x'
-Assert-True (Test-SafeFolder $sf) 'a folder of this account (temp, default ACL) is safe'
 & icacls.exe $sf /grant '*S-1-5-11:(OI)(CI)(M)' | Out-Null
 Assert-True (-not (Test-SafeFolder $sf)) 'Authenticated Users with Modify: not safe'
-& icacls.exe $sf /remove:g '*S-1-5-11' | Out-Null; & icacls.exe "$sf\dotnet.exe" /grant '*S-1-1-0:(W)' | Out-Null
-Assert-True (-not (Test-SafeFolder $sf)) 'Everyone may write dotnet.exe itself: not safe'
 Assert-True (-not (Test-SafeFolder "$sf\missing")) 'a folder that cannot be read: not safe'
 Remove-Item -LiteralPath $sf -Recurse -Force
+$pf = "$env:ProgramFiles\dotnet"
+if (Test-Path -LiteralPath "$pf\dotnet.exe") { Assert-True (Test-SafeFolder $pf) 'Program Files\dotnet (installer default): safe' }
 
 Write-Host 'AuthorizedKeysFile from sshd_config'
 $cfgB = @('AuthorizedKeysFile .ssh/authorized_keys', 'Match User build*,!buildx', '       AuthorizedKeysFile __PROGRAMDATA__/ssh/%u_authorized_keys', 'Match all', 'AuthorizedKeysFile .ssh/keys_all', 'Match Group administrators', '       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys')
@@ -338,6 +355,10 @@ $k = Get-KeyFiles @('AuthorizedKeysFile .ssh/authorized_keys', 'Match Group admi
 Assert-True ($k.Via -eq 'global' -and @($k.Files) -join '|' -eq 'C:\Users\bob\.ssh\authorized_keys') 'Windows default config: a standard user gets the global file'
 $k = Get-KeyFiles @('Match Address 10.0.0.0/8', '  AuthorizedKeysFile /etc/x', 'Match all', '  AuthorizedKeysFile "%h/k1" none %%h') 'bob' $false 'C:\Users\bob' 'C:\ProgramData'
 Assert-Equal (@($k.Files) -join '|') 'C:\Users\bob\k1|C:\Users\bob\%h' 'a criterion that cannot be judged is skipped; quotes, none and %% handled'
+$k = Get-KeyFiles @('AuthorizedKeysFile=__PROGRAMDATA__/ssh/%u_keys \\fileserver\keys\%u //fileserver/k2') 'bob' $false 'C:\Users\bob' 'C:\ProgramData'
+Assert-True ($k.Via -eq 'global' -and @($k.Files) -join '|' -eq 'C:\ProgramData\ssh\bob_keys') 'Key=value form read; files on a network share are never touched'
+$k = Get-KeyFiles @('MATCH ALL', '  AuthorizedKeysFile x') 'bob' $false 'C:\Users\bob' 'C:\ProgramData'
+Assert-Equal (@($k.Files) -join '|') 'C:\Users\bob\x' 'Match keywords are case-insensitive'
 $k = Get-KeyFiles $null 'bob' $false 'C:\Users\bob' 'C:\ProgramData'
 Assert-True ($k.Via -eq 'default' -and @($k.Files) -join '|' -eq 'C:\Users\bob\.ssh\authorized_keys|C:\Users\bob\.ssh\authorized_keys2') 'no config: the sshd default files'
 Assert-True ((Ck (Run (New-Facts @{ AuthKeysVia = 'match' })) 'ssh.keys').detail -match 'Match block') 'keys found through a Match block: OK says so'

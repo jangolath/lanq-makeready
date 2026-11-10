@@ -370,6 +370,24 @@ if safe_dir "$sd/s"; then bad "safe_dir world-writable folder" safe unsafe; else
 chmod 755 "$sd/s"; chmod 777 "$sd/s/dotnet"
 if safe_dir "$sd/s"; then bad "safe_dir world-writable dotnet" safe unsafe; else ok "safe_dir: a world-writable dotnet is not safe"; fi
 if safe_dir "$sd/missing"; then bad "safe_dir missing" safe unsafe; else ok "safe_dir: a missing folder is not safe"; fi
+chmod 777 "$sd/s/dotnet"; chmod 755 "$sd/s/dotnet"; mkdir -p "$sd/s/host/fxr/10.0.2" "$sd/s/sdk/10.0.102"; chmod 755 "$sd/s/host" "$sd/s/host/fxr" "$sd/s/host/fxr/10.0.2" "$sd/s/sdk/10.0.102"
+if safe_dir "$sd/s" 10.0.102; then ok "safe_dir: host, host/fxr and the SDK folder of this user"; else bad "safe_dir tree" unsafe safe; fi
+chmod 777 "$sd/s/host/fxr/10.0.2"
+if safe_dir "$sd/s" 10.0.102; then bad "safe_dir open fxr" safe unsafe; else ok "safe_dir: a world-writable host/fxr version folder is not safe"; fi
+chmod 755 "$sd/s/host/fxr/10.0.2"; chmod 777 "$sd/s/sdk/10.0.102"
+if safe_dir "$sd/s" 10.0.102; then bad "safe_dir open sdk" safe unsafe; else ok "safe_dir: a world-writable SDK folder is not safe"; fi
+chmod 755 "$sd/s/sdk/10.0.102"; mkdir -p "$sd/open/inner"; chmod 777 "$sd/open"; cp -R "$sd/s" "$sd/open/inner/d" 2>/dev/null || :
+chmod -R go-w "$sd/open/inner"
+if safe_dir "$sd/open/inner/d" 10.0.102; then bad "safe_dir open parent" safe unsafe; else ok "safe_dir: a parent folder others may write (not sticky) is not safe"; fi
+chmod 1777 "$sd/open"
+if safe_dir "$sd/open/inner/d" 10.0.102; then ok "safe_dir: a sticky world-writable parent (like /tmp) is fine"; else bad "safe_dir sticky parent" unsafe safe; fi
+if [ "$(id -u)" = 0 ]; then
+  chown 65534 "$sd/s/host"
+  if safe_dir "$sd/s" 10.0.102; then bad "safe_dir foreign owner" safe unsafe; else ok "safe_dir: a folder owned by another user is not safe"; fi
+  chown 0 "$sd/s/host"
+  chgrp 65534 "$sd/s"; chmod 775 "$sd/s"
+  if safe_dir "$sd/s" 10.0.102; then bad "safe_dir group-writable" safe unsafe; else ok "safe_dir: writable by another group is not safe"; fi
+fi
 F_DOTNET_DIR=""; _bk=0; _end=$(( $(date +%s) - 1 )); _seen=" "; sdk_root "$sd/b"
 eq "$F_DOTNET_DIR" "" "sdk_root: nothing is read after the 5 s deadline"
 rm -rf "$sd"
@@ -388,6 +406,11 @@ eq "$(printf 'AuthorizedKeysFile .ssh/authorized_keys\nMatch Group wheel\n  Auth
 eq "$(printf 'AuthorizedKeysFile .ssh/authorized_keys\nMatch Group wheel\n  AuthorizedKeysFile /etc/ssh/wheel_keys\n' | keys_files bob /home/bob "bob" | tr '\n' '|')" "global|/home/bob/.ssh/authorized_keys|" "Match Group: not in it, the global file"
 eq "$(printf 'Match Address 10.0.0.0/8\n  AuthorizedKeysFile /etc/x\nMatch all\n  AuthorizedKeysFile "%%h/k1" none %%%%h\n' | keys_files bob /home/bob "" | tr '\n' '|')" "match|/home/bob/k1|/home/bob/%h|" "a criterion that cannot be judged is skipped; quotes, none and %% handled"
 eq "$(printf '' | keys_files bob /home/bob "" | tr '\n' '|')" "default|/home/bob/.ssh/authorized_keys|/home/bob/.ssh/authorized_keys2|" "no config: the sshd default files"
+eq "$(printf 'AuthorizedKeysFile=/etc/ssh/k/%%u\n' | keys_files bob /home/bob "" | tr '\n' '|')" "global|/etc/ssh/k/bob|" "Key=value form"
+eq "$(printf 'MATCH ALL\n  AuthorizedKeysFile /k\n' | keys_files bob /home/bob "" | tr '\n' '|')" "match|/k|" "Match keywords are case-insensitive"
+eq "$(printf 'Match Group build*\n  AuthorizedKeysFile /k\n' | keys_files bob /home/bob "bob builders" | tr '\n' '|')" "match|/k|" "Match Group takes glob patterns"
+eq "$(printf "Match all\n  AuthorizedKeysFile /k/%%U\n" | keys_files bob /home/bob "" | tr '\n' '|')" "match|/k/$(id -u)|" "%U is the numeric uid"
+eq "$(printf '%s\n' "${SEP}include-start" 'Match User nobody' "${SEP}include-end" 'AuthorizedKeysFile /global' | keys_files bob /home/bob "" | tr '\n' '|')" "global|/global|" "a Match block in an included file ends with that file"
 fixture_ubuntu; F_AUTHVIA=match; run
 contains "$CHECKS" "the file a Match block in sshd_config names" "keys found through a Match block: OK says so"
 fixture_ubuntu; F_AUTHKEYS=no; F_AUTHVIA=unreadable; run
@@ -554,6 +577,7 @@ eq "$(printf '%s\n' "x=1" | cmd_words)" "" "tokenizer ignores assignments"
 eq "$(grep -c '^  ln -- "$_otmp" "$OUT_PATH"' "$root/lanq-makeready.sh"):$(grep -c 'rm -f -- "$_otmp"' "$root/lanq-makeready.sh"):$(grep -c 'mktemp' "$root/lanq-makeready.sh")" "1:3:1" "the only ln, rm and mktemp are the --out temp-file lines (rm: the cleanup and its two traps)"
 eq "$(grep -cE '(^|[^A-Za-z_])rm[[:space:]]' "$root/lanq-makeready.sh" | tr -d ' ')" "$(grep -c 'rm -f -- "$_otmp"' "$root/lanq-makeready.sh")" "every rm in the script removes only the --out temp file"
 eq "$([ -e "$root/SHA256SUMS" ] && echo committed || echo none)" none "SHA256SUMS is produced by the release workflow, never committed (a stale copy would mislead)"
+eq "$(grep -cE -- '-(fprint|fprintf|fprint0|fls|delete|exec|execdir|ok|okdir)([[:space:]]|$)' "$root/lanq-makeready.sh" | tr -d ' ')" 0 "no find action that writes, deletes or runs anything (-fprint, -fls, -delete, -exec, -ok)"
 lines=$(wc -l < "$root/lanq-makeready.sh" | tr -d ' ')
 if [ "$lines" -le 960 ]; then ok "script is $lines lines (max 960)"; else bad "line count" "$lines" "<=960"; fi
 

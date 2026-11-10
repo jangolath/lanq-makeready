@@ -25,15 +25,20 @@
   (LanQueue 0.8+ keys). The `dotnet` on PATH is searched first and wins a tie; preview SDKs never count as the newest; a
   snap install keeps its stable `/snap/dotnet-sdk/current` folder. The folder is redacted like other free text under
   `--redact` (the whole profile folder, also when it is not named after the account).
-- `path_prepend` is suggested only for a folder other local users cannot plant a `dotnet` in: the folder and its
-  `dotnet` owned by Administrators, SYSTEM or TrustedInstaller (root on Linux and macOS) or the account itself, and not
-  writable by Users, Authenticated Users, Interactive or Everyone (others, or a group other than root's). Otherwise the
-  check says so and the snippet carries a comment instead (a world-writable drive-root folder on a shared PC could
-  otherwise make jobs run a planted `dotnet`).
+- `path_prepend` is suggested only for a folder other local users cannot plant code in. On Windows the folder, its
+  `dotnet.exe`, `host`, `host\fxr` and its version folders and the newest SDK folder must be owned by Administrators,
+  SYSTEM, TrustedInstaller or the account itself, have a DACL (not NULL), and give nobody else more than read/execute;
+  every parent folder must have such an owner and let nobody else delete or rename what is in it. On Linux and macOS the
+  same items must be owned by root or the account and writable by nobody else (a group only when it is root's or the
+  account's own private group), and each parent folder of the path as given and as resolved must not be writable by
+  others or another group unless sticky. Otherwise the check says so and the snippet carries a comment instead (on a
+  shared PC, a world-writable folder could otherwise make jobs run a planted `dotnet`).
 - SSH keys: the check reads `AuthorizedKeysFile` from `sshd_config` the way sshd does (a matching `Match all`, `User` or
   `Group` block before the global value, `%h`, `%u`, `%%` and `__PROGRAMDATA__`), so keys in a central file such as
   `C:\ProgramData\ssh\<user>_authorized_keys` no longer give a false "no authorized_keys" WARN. When `sshd_config`
-  cannot be read, the WARN says keys may be set up elsewhere.
+  cannot be read, the WARN says keys may be set up elsewhere. Also `AuthorizedKeysFile=value`, `%U`, `Match` keywords in
+  any case, `Match Group` patterns, and (Linux) a `Match` in an `Include`d file ending with that file. A key file on a
+  network share is never read.
 
 ## 0.2.0 (2026-11-09)
 

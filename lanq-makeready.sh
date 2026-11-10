@@ -642,7 +642,7 @@ sshd_conf_lines() { # $1 = file, $2 = depth: prints its lines in order with Incl
         [ "$2" -lt 3 ] || continue
         for _g in ${_l#*[[:space:]]}; do
           case "$_g" in /*) ;; *) _g=/etc/ssh/$_g ;; esac
-          for _f in $_g; do sshd_conf_lines "$_f" $(($2 + 1)); done
+          for _f in $_g; do printf '%s\n' "${SEP}include-start"; sshd_conf_lines "$_f" $(($2 + 1)); printf '%s\n' "${SEP}include-end"; done
         done ;;
       *) printf '%s\n' "$_l" ;;
     esac
@@ -686,17 +686,26 @@ sdk_root() { # $1 = a folder that may hold dotnet: adds its SDK majors to F_DOTN
     case " $F_DOTNET " in *" $_m "*) ;; *) F_DOTNET="${F_DOTNET:+$F_DOTNET }$_m" ;; esac
     case "$_v" in *-*) continue ;; esac # a preview counts for the capability, never as the newest
     _k=$(( $_m * 1000000 + $_mi * 1000 + $_p ))
-    if [ "$_k" -gt "$_bk" ]; then _bk=$_k; F_DOTNET_DIR=$_d; _bd=$_r; fi
+    if [ "$_k" -gt "$_bk" ]; then _bk=$_k; F_DOTNET_DIR=$_d; _bd=$_r; _bn=$_v; fi
   done
   return 0
 }
 
-safe_dir() { # true when other local users cannot plant a dotnet here: the folder and its dotnet (resolved) are owned by root or this
-  # user and writable by neither others nor a group other than root's
-  _u=$(id -u 2>/dev/null)
-  for _x in "$1" "$1/dotnet"; do
+safe_dir() { # $1 = folder, $2 = its newest SDK: true when other local users cannot plant code a job's dotnet runs. The folder, its
+  # dotnet, host, host/fxr and its version folders and that SDK folder (each resolved): owned by root or this user, writable by nobody
+  # else (a group may write when it is root's or this user's own private group). Every parent folder of the path as given and as
+  # resolved: owned by root or this user, and not writable by others or another group unless sticky (then nobody can rename our entry).
+  _u=$(id -u 2>/dev/null); _pg=0; [ "$(id -gn 2>/dev/null)" = "$(id -un 2>/dev/null)" ] && _pg=$(id -g 2>/dev/null)
+  for _x in "$1" "$1/dotnet" "$1/host" "$1/host/fxr" "$1"/host/fxr/* "$1/sdk/$2"; do
+    case "$_x" in "$1/host"*|"$1/sdk/") [ -e "$_x" ] && [ "$_x" != "$1/sdk/" ] || continue ;; esac
     _x=$(readlink -f -- "$_x" 2>/dev/null) || return 1
-    [ -n "$(find "$_x" -maxdepth 0 \( -user 0 -o -user "$_u" \) ! -perm -0002 \( ! -perm -0020 -o -group 0 \) 2>/dev/null)" ] || return 1
+    [ -n "$(find "$_x" -maxdepth 0 \( -user 0 -o -user "$_u" \) ! -perm -0002 \( ! -perm -0020 -o -group 0 -o -group "$_pg" \) 2>/dev/null)" ] || return 1
+  done
+  _r=$(readlink -f -- "$1" 2>/dev/null) || return 1
+  for _a in "$1" "$_r"; do
+    while _a=${_a%/*}; [ -n "$_a" ]; do
+      [ -n "$(find "$_a" -maxdepth 0 \( -user 0 -o -user "$_u" \) \( -type l -o -perm -1000 -o \( ! -perm -0002 \( ! -perm -0020 -o -group 0 -o -group "$_pg" \) \) \) 2>/dev/null)" ] || return 1
+    done
   done
   return 0
 }
@@ -706,12 +715,12 @@ in_list() { # $1 = a Match criterion, $2 = its comma list: true when it applies 
   _rl="$2,"; _hit=1
   while [ -n "$_rl" ]; do
     _pt=${_rl%%,*}; _rl=${_rl#*,}
-    # shellcheck disable=SC2254 # the list holds glob patterns, as sshd reads them
+    # shellcheck disable=SC2254,SC2086 # glob patterns as sshd reads them; group names are split on spaces
     case "$1:$_pt" in
       [Uu]ser:!*) case "$_ku" in ${_pt#!}) return 1 ;; esac ;;
       [Uu]ser:*) case "$_ku" in $_pt) _hit=0 ;; esac ;;
-      [Gg]roup:!*) case "$_kg" in *" ${_pt#!} "*) return 1 ;; esac ;;
-      [Gg]roup:*) case "$_kg" in *" $_pt "*) _hit=0 ;; esac ;;
+      [Gg]roup:!*) for _g in $_kg; do case "$_g" in ${_pt#!}) return 1 ;; esac; done ;;
+      [Gg]roup:*) for _g in $_kg; do case "$_g" in $_pt) _hit=0 ;; esac; done ;;
     esac
   done
   return $_hit
@@ -720,18 +729,24 @@ in_list() { # $1 = a Match criterion, $2 = its comma list: true when it applies 
 keys_files() { # sshd config text on stdin, $1 = user, $2 = home, $3 = the user's groups -> line 1: default|global|match, then one
   # authorized-keys file per line. As sshd: the first AuthorizedKeysFile in a Match block that applies (all, or User/Group, at most
   # two criteria; anything else cannot be judged here, so that block is skipped) wins over the global one, else the default.
-  _ku=$1; _kh=$2; _kg=" $3 "; _kv=""; _kw=default; _in=0; _ok=0; _gl=""; _gs=0; _hs=0
+  _ku=$1; _kh=$2; _kg=" $3 "; _kv=""; _kw=default; _in=0; _ok=0; _gl=""; _gs=0; _hs=0; _stk=""
   while IFS= read -r _l || [ -n "$_l" ]; do
+    case "$_l" in
+      "${SEP}include-start") _stk="$_in$_ok $_stk"; continue ;;
+      "${SEP}include-end") _t=${_stk%% *}; _stk=${_stk#* }; _in=${_t%?}; _ok=${_t#?}; continue ;;
+    esac
     read -r _k _v <<EOF
 ${_l%%#*}
 EOF
+    case "$_k" in *=*) _v="${_k#*=} $_v"; _k=${_k%%=*} ;; esac
+    _v=${_v#=}
     case "$(printf '%s' "$_k" | tr 'A-Z' 'a-z')" in
       match)
         _in=1; _ok=0
         read -r _c1 _p1 _c2 _p2 _more <<EOF
 $_v
 EOF
-        if [ "$_c1" = all ] && [ -z "$_p1" ]; then _ok=1; continue; fi
+        if [ "$(printf '%s' "$_c1" | tr 'A-Z' 'a-z')" = all ] && [ -z "$_p1" ]; then _ok=1; continue; fi
         [ -z "$_more" ] && [ -n "$_p1" ] && in_list "$_c1" "$_p1" || continue
         if [ -n "$_c2" ]; then [ -n "$_p2" ] && in_list "$_c2" "$_p2" || continue; fi
         _ok=1 ;;
@@ -743,7 +758,8 @@ EOF
   if [ "$_hs" = 0 ] && [ "$_gs" = 1 ]; then _kv=$_gl; _kw=global; fi
   if [ "$_hs" = 0 ] && [ "$_gs" = 0 ]; then _kv=".ssh/authorized_keys .ssh/authorized_keys2"; fi
   echo "$_kw"
-  printf '%s\n' "$_kv" | tr ' \t' '\n\n' | awk -v h="$_kh" -v u="$_ku" 'BEGIN { hh = h; gsub(/[\\&]/, "\\\\&", hh); uu = u; gsub(/[\\&]/, "\\\\&", uu) } { gsub(/"/, "") } $0 == "" || $0 == "none" { next } { gsub(/%%/, "\001"); gsub(/%h/, hh); gsub(/%u/, uu); gsub(/\001/, "%"); print (substr($0, 1, 1) == "/" ? $0 : h "/" $0) }'
+  _kid=$(id -u 2>/dev/null)
+  printf '%s\n' "$_kv" | tr ' \t' '\n\n' | awk -v h="$_kh" -v u="$_ku" -v uid="$_kid" 'BEGIN { hh = h; gsub(/[\\&]/, "\\\\&", hh); uu = u; gsub(/[\\&]/, "\\\\&", uu) } { gsub(/"/, "") } $0 == "" || $0 == "none" { next } { gsub(/%%/, "\001"); gsub(/%h/, hh); gsub(/%u/, uu); gsub(/%U/, uid); gsub(/\001/, "%"); print (substr($0, 1, 1) == "/" ? $0 : h "/" $0) }'
 }
 
 gather_facts() {
@@ -832,7 +848,7 @@ EOF
   F_TARKIND=none; if have tar; then F_TARKIND=$(classify_tar "$(run_t 8 tar --version 2>&1)"); fi
   if have gzip; then F_GZIP=yes; else F_GZIP=no; fi
   # dotnet SDKs (no process is started): the folders lanq 0.8 searches, at most 5 s
-  F_DOTNET=""; F_DOTNET_DIR=""; _bd=""; F_DOTNET_OFFPATH=no; F_DOTNET_OPEN=no; _dn=""; _seen=" "; _bk=0; _end=$(( $(date +%s) + 5 ))
+  F_DOTNET=""; F_DOTNET_DIR=""; _bd=""; _bn=""; F_DOTNET_OFFPATH=no; F_DOTNET_OPEN=no; _dn=""; _seen=" "; _bk=0; _end=$(( $(date +%s) + 5 ))
   if have dotnet; then _dp=$(command -v dotnet)
     case "$_dp" in /snap/bin/*) _dn=/snap/dotnet-sdk/current ;; *) _dp=$(readlink -f -- "$_dp" 2>/dev/null || echo "$_dp"); _dn=${_dp%/*} ;; esac
   fi
@@ -841,7 +857,7 @@ EOF
   for _f in /etc/dotnet/install_location /etc/dotnet/install_location_*; do [ -r "$_f" ] && sdk_root "$(sed -n 1p "$_f" | tr -d '\r')"; done
   for _d in /usr/share/dotnet /usr/lib/dotnet /usr/lib64/dotnet /opt/dotnet /snap/dotnet-sdk/current /usr/local/share/dotnet /opt/homebrew/opt/dotnet/libexec /usr/local/opt/dotnet/libexec; do sdk_root "$_d"; done
   if [ -n "$F_DOTNET_DIR" ] && [ "$_bd" != "$(readlink -f -- "$_dn" 2>/dev/null || echo "$_dn")" ]; then F_DOTNET_OFFPATH=yes
-    safe_dir "$F_DOTNET_DIR" || F_DOTNET_OPEN=yes
+    safe_dir "$F_DOTNET_DIR" "$_bn" || F_DOTNET_OPEN=yes
   fi
   F_DOCKER_CLI=no; F_DOCKER_SERVER=""; F_DOCKER_REMOTE=no
   _dctx=${DOCKER_CONTEXT:-}
