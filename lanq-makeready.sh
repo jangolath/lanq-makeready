@@ -34,7 +34,7 @@ advice() {
     disk.low) echo "Free disk space is low. Each job needs room for a worktree plus build output; keep at least 20 GB free, below 10 GB the worker is refused. Find space: sudo apt clean ; du -xh -d1 ~ | sort -h ; or use a bigger disk." ;;
     dotnet.glibc) echo "The .NET 10 SDK needs glibc 2.27 or newer (musl 1.2.3 or newer on Alpine). Use a newer distribution release (Ubuntu 22.04/24.04, Debian 13, Alpine 3.21+)." ;;
     dotnet.mac) echo ".NET 10 supports macOS 15 and newer." ;;
-    dotnet.path) echo "The newest .NET SDK is in a folder that is not on PATH for this account, so a job running dotnet gets another one (or none). In machines.yml add path_prepend: [that folder] and env: DOTNET_ROOT: that folder (the snippet below has both; LanQueue 0.8+). Nothing on this machine is changed." ;;
+    dotnet.path) echo "The newest .NET SDK is in a folder that is not on PATH for this account, so a job running dotnet gets another one (or none). In machines.yml add path_prepend: [that folder] and env: DOTNET_ROOT: that folder (the snippet below has both; LanQueue 0.8+). If the step says other local users can write there, the snippet leaves it out: first let only root and the build account write to that folder, then run this again. Nothing on this machine is changed." ;;
     docker.daemon) echo "The docker client is installed but the engine is not answering (or you lack permission). Start the service or check group membership yourself." ;;
     docker.ram) echo "Under 4 GB RAM: containers are not recommended on this machine." ;;
     power.desktop) echo "A desktop is installed; its power settings cannot be read from this session (no desktop session bus, e.g. over SSH). GNOME and GDM suspend on AC after about 15-20 minutes by default. Check Settings > Power > Automatic Suspend on the PC, or as the desktop user: gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing' ; for the GDM login screen: sudo -u gdm dbus-run-session gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing' ; or block all suspend: sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target" ;;
@@ -288,7 +288,13 @@ eval_checks() { # reads F_* facts, fills CHECKS
     *:no) add_check ssh.password "SSH passwords" OK "key-only (PasswordAuthentication no)" ;;
     *) add_check ssh.password "SSH passwords" SKIP "sshd config not readable" ;;
   esac
-  if [ "$F_AUTHKEYS" = yes ]; then add_check ssh.keys "SSH keys" OK "authorized_keys present and non-empty"
+  if [ "$F_AUTHKEYS" = yes ]; then
+    case "$F_AUTHVIA" in
+      match) add_check ssh.keys "SSH keys" OK "authorized keys present and non-empty (the file a Match block in sshd_config names)" ;;
+      global) add_check ssh.keys "SSH keys" OK "authorized keys present and non-empty (the file sshd_config names)" ;;
+      *) add_check ssh.keys "SSH keys" OK "authorized_keys present and non-empty" ;;
+    esac
+  elif [ "$F_AUTHVIA" = unreadable ]; then add_check ssh.keys "SSH keys" WARN "no ~/.ssh/authorized_keys, and sshd_config is not readable, so keys may be set up elsewhere" ssh.nokeys
   else add_check ssh.keys "SSH keys" WARN "no authorized_keys for this user" ssh.nokeys; fi
   if [ -n "$F_GIT" ]; then add_check git git OK "$F_GIT"
   else add_check git git WARN "not found (needed for transfer: git only)" git.install; fi
@@ -349,6 +355,7 @@ eval_dotnet() {
   _t=".NET 10 SDK"
   _have="no SDK found"; [ -n "$F_DOTNET" ] && _have="SDK majors found: $F_DOTNET"
   [ "$F_DOTNET_OFFPATH" = yes ] && _have="$_have; the newest is in $F_DOTNET_DIR, not the dotnet on PATH"
+  [ "$F_DOTNET_OPEN" = yes ] && _have="$_have, but other local users can write there, so it is not suggested"
   if [ "$F_OS" = Darwin ]; then
     if [ "${F_OSVER:-0}" -ge 15 ]; then add_check dotnet "$_t" OK "macOS $F_OSVER ($_have)"
     else add_check dotnet "$_t" WARN "macOS ${F_OSVER:-unknown} is older than 15 ($_have)" dotnet.mac; fi
@@ -487,14 +494,16 @@ render_snippet() {
     echo "    # wake:   # not ready yet (see the Wake-on-LAN step); uncomment once it is fixed"
     echo "    #   mac: \"$F_WOL_MAC\""
   fi
-  if [ "$F_DOTNET_OFFPATH" = yes ]; then
+  _pp=no; [ "$F_DOTNET_OFFPATH" = yes ] && [ "$F_DOTNET_OPEN" = no ] && _pp=yes
+  [ "$F_DOTNET_OPEN" = yes ] && echo "    # path_prepend: not suggested: other local users can write to $F_DOTNET_DIR (see the .NET step)"
+  if [ "$_pp" = yes ]; then
     echo "    path_prepend: [\"$F_DOTNET_DIR\"]   # the newest .NET SDK is here, not on PATH (LanQueue 0.8+)"
     echo "    env:"
     echo "      DOTNET_ROOT: \"$F_DOTNET_DIR\""
   fi
   if [ "$M_RAMGB" -lt 6 ]; then
     echo "    # Low-RAM PC: keep max_jobs: 1. Optional caps for build tools (job environment only):"
-    [ "$F_DOTNET_OFFPATH" = yes ] || echo "    # env:"
+    [ "$_pp" = yes ] || echo "    # env:"
     echo "    #   DOTNET_GCHeapHardLimitPercent: \"0x32\"     # .NET GC heap at most 50% of RAM (hexadecimal)"
     echo "    #   NODE_OPTIONS: \"--max-old-space-size=1024\"  # Node heap at most 1 GB"
     echo "    # For .NET jobs on a small box, add -m:1 to dotnet build / dotnet test commands (one MSBuild process)."
@@ -583,7 +592,7 @@ EOF
   printf '  "suggestedMachine": {"name": "%s", "os": "%s", "ssh": "%s", "work_root": "/srv/lq", "capabilities": [%s], "max_jobs": %s, "min_free_mem_gb": %s, "transfer": "%s"' "$(json_esc "$M_NAME")" "$M_OS" "$(json_esc "$M_SSH")" "$(json_list "$M_CAPS")" "$M_JOBS" "$M_MINMEM" "$M_TRANSFER"
   [ -n "$M_HOURS" ] && printf ', "allowed_hours": "%s"' "$M_HOURS"
   [ "$M_WAKE" = yes ] && printf ', "wake": {"mac": "%s"}' "$(json_esc "$F_WOL_MAC")"
-  [ "$F_DOTNET_OFFPATH" = yes ] && printf ', "path_prepend": ["%s"], "env": {"DOTNET_ROOT": "%s"}' "$(json_esc "$F_DOTNET_DIR")" "$(json_esc "$F_DOTNET_DIR")"
+  [ "$F_DOTNET_OFFPATH" = yes ] && [ "$F_DOTNET_OPEN" = no ] && printf ', "path_prepend": ["%s"], "env": {"DOTNET_ROOT": "%s"}' "$(json_esc "$F_DOTNET_DIR")" "$(json_esc "$F_DOTNET_DIR")"
   printf '}\n}\n'
 }
 
@@ -661,20 +670,80 @@ gather_wol() { # physical wired NIC, its MAC, and ethtool Wake-on when readable 
   F_WOL_ON=$(printf '%s\n' "$_eo" | sed -n 's/^[[:space:]]*Wake-on:[[:space:]]*//p' | head -n 1)
 }
 
-sdk_root() { # $1 = a folder that may hold dotnet: adds its SDK majors to F_DOTNET; F_DOTNET_DIR = the folder of the newest SDK
-  [ -n "$1" ] && [ "$(date +%s)" -le "$_end" ] && [ -x "$1/dotnet" ] && [ -d "$1/sdk" ] || return 0
-  _r=$(readlink -f "$1" 2>/dev/null) || _r=${1%/}
-  case "$_seen" in *" $_r "*|*'"'*|*'\'*) return 0 ;; esac # a quote or backslash would break the YAML snippet
+sdk_root() { # $1 = a folder that may hold dotnet: adds its SDK majors to F_DOTNET; F_DOTNET_DIR = the folder of the newest stable SDK
+  # as given (so /snap/dotnet-sdk/current stays valid across refreshes), _bd = that folder resolved; a tie keeps the earlier folder
+  _d=${1%/}
+  [ -n "$_d" ] && [ "$(date +%s)" -le "$_end" ] && [ -x "$_d/dotnet" ] && [ -d "$_d/sdk" ] || return 0
+  case "$_d" in *'"'*|*'\'*) return 0 ;; esac # a quote or backslash would break the YAML snippet
+  [ "$(printf '%s' "$_d" | LC_ALL=C tr -d ' -~' | wc -c)" -eq 0 ] || return 0 # printable ASCII only: no newline, nothing json_esc turns into ?
+  _r=$(readlink -f -- "$_d" 2>/dev/null) || _r=$_d
+  case "$_seen" in *" $_r "*) return 0 ;; esac
   _seen="$_seen$_r "
   for _s in "$_r"/sdk/[0-9]*.[0-9]*.[0-9]*; do
     [ -f "$_s/dotnet.dll" ] || continue
     _v=${_s##*/}; _m=${_v%%.*}; _n=${_v#*.}; _mi=${_n%%.*}; _p=${_n#*.}; _p=${_p%%[!0-9]*}
     case "$_m.$_mi.$_p" in *[!0-9.]*|*..*|.*|*.|0[0-9]*|*.0[0-9]*|*[0-9][0-9][0-9][0-9][0-9][0-9]*) continue ;; esac # leading 0 = octal, long = overflow
     case " $F_DOTNET " in *" $_m "*) ;; *) F_DOTNET="${F_DOTNET:+$F_DOTNET }$_m" ;; esac
+    case "$_v" in *-*) continue ;; esac # a preview counts for the capability, never as the newest
     _k=$(( $_m * 1000000 + $_mi * 1000 + $_p ))
-    if [ "$_k" -gt "$_bk" ]; then _bk=$_k; F_DOTNET_DIR=$_r; fi
+    if [ "$_k" -gt "$_bk" ]; then _bk=$_k; F_DOTNET_DIR=$_d; _bd=$_r; fi
   done
   return 0
+}
+
+safe_dir() { # true when other local users cannot plant a dotnet here: the folder and its dotnet (resolved) are owned by root or this
+  # user and writable by neither others nor a group other than root's
+  _u=$(id -u 2>/dev/null)
+  for _x in "$1" "$1/dotnet"; do
+    _x=$(readlink -f -- "$_x" 2>/dev/null) || return 1
+    [ -n "$(find "$_x" -maxdepth 0 \( -user 0 -o -user "$_u" \) ! -perm -0002 \( ! -perm -0020 -o -group 0 \) 2>/dev/null)" ] || return 1
+  done
+  return 0
+}
+
+in_list() { # $1 = a Match criterion, $2 = its comma list: true when it applies to the user (_ku) or one of their groups (_kg); ! negates
+  case "$1" in [Uu]ser|[Gg]roup) ;; *) return 1 ;; esac
+  _rl="$2,"; _hit=1
+  while [ -n "$_rl" ]; do
+    _pt=${_rl%%,*}; _rl=${_rl#*,}
+    # shellcheck disable=SC2254 # the list holds glob patterns, as sshd reads them
+    case "$1:$_pt" in
+      [Uu]ser:!*) case "$_ku" in ${_pt#!}) return 1 ;; esac ;;
+      [Uu]ser:*) case "$_ku" in $_pt) _hit=0 ;; esac ;;
+      [Gg]roup:!*) case "$_kg" in *" ${_pt#!} "*) return 1 ;; esac ;;
+      [Gg]roup:*) case "$_kg" in *" $_pt "*) _hit=0 ;; esac ;;
+    esac
+  done
+  return $_hit
+}
+
+keys_files() { # sshd config text on stdin, $1 = user, $2 = home, $3 = the user's groups -> line 1: default|global|match, then one
+  # authorized-keys file per line. As sshd: the first AuthorizedKeysFile in a Match block that applies (all, or User/Group, at most
+  # two criteria; anything else cannot be judged here, so that block is skipped) wins over the global one, else the default.
+  _ku=$1; _kh=$2; _kg=" $3 "; _kv=""; _kw=default; _in=0; _ok=0; _gl=""; _gs=0; _hs=0
+  while IFS= read -r _l || [ -n "$_l" ]; do
+    read -r _k _v <<EOF
+${_l%%#*}
+EOF
+    case "$(printf '%s' "$_k" | tr 'A-Z' 'a-z')" in
+      match)
+        _in=1; _ok=0
+        read -r _c1 _p1 _c2 _p2 _more <<EOF
+$_v
+EOF
+        if [ "$_c1" = all ] && [ -z "$_p1" ]; then _ok=1; continue; fi
+        [ -z "$_more" ] && [ -n "$_p1" ] && in_list "$_c1" "$_p1" || continue
+        if [ -n "$_c2" ]; then [ -n "$_p2" ] && in_list "$_c2" "$_p2" || continue; fi
+        _ok=1 ;;
+      authorizedkeysfile)
+        if [ "$_in" = 0 ]; then if [ "$_gs" = 0 ]; then _gl=$_v; _gs=1; fi
+        elif [ "$_ok" = 1 ] && [ "$_hs" = 0 ]; then _kv=$_v; _kw=match; _hs=1; fi ;;
+    esac
+  done
+  if [ "$_hs" = 0 ] && [ "$_gs" = 1 ]; then _kv=$_gl; _kw=global; fi
+  if [ "$_hs" = 0 ] && [ "$_gs" = 0 ]; then _kv=".ssh/authorized_keys .ssh/authorized_keys2"; fi
+  echo "$_kw"
+  printf '%s\n' "$_kv" | tr ' \t' '\n\n' | awk -v h="$_kh" -v u="$_ku" 'BEGIN { hh = h; gsub(/[\\&]/, "\\\\&", hh); uu = u; gsub(/[\\&]/, "\\\\&", uu) } { gsub(/"/, "") } $0 == "" || $0 == "none" { next } { gsub(/%%/, "\001"); gsub(/%h/, hh); gsub(/%u/, uu); gsub(/\001/, "%"); print (substr($0, 1, 1) == "/" ? $0 : h "/" $0) }'
 }
 
 gather_facts() {
@@ -752,17 +821,28 @@ gather_facts() {
   F_SYSFREEGB=$(( $(df -Pk / 2>/dev/null | awk 'NR==2 {print $4}') / 1048576 ))
   _wd=/srv; [ -d /srv ] || _wd=/
   F_WORKFREEGB=$(( $(df -Pk "$_wd" 2>/dev/null | awk 'NR==2 {print $4}') / 1048576 ))
-  if [ -s "$HOME/.ssh/authorized_keys" ]; then F_AUTHKEYS=yes; else F_AUTHKEYS=no; fi
+  _kc=/dev/null; F_AUTHVIA=""; if [ -r /etc/ssh/sshd_config ]; then _kc=/etc/ssh/sshd_config; else F_AUTHVIA=unreadable; fi
+  _kf=$(sshd_conf_lines "$_kc" 0 | keys_files "$(id -un 2>/dev/null)" "$HOME" "$(id -Gn 2>/dev/null)")
+  [ -n "$F_AUTHVIA" ] || F_AUTHVIA=$(printf '%s\n' "$_kf" | sed -n 1p)
+  F_AUTHKEYS=no
+  while IFS= read -r _f; do if [ -n "$_f" ] && [ -s "$_f" ]; then F_AUTHKEYS=yes; fi; done <<EOF
+$(printf '%s\n' "$_kf" | sed 1d)
+EOF
   F_GIT=""; if have git && mac_probe_ok git; then F_GIT=$(first_line "$(run_t 8 git --version 2>/dev/null)"); fi
   F_TARKIND=none; if have tar; then F_TARKIND=$(classify_tar "$(run_t 8 tar --version 2>&1)"); fi
   if have gzip; then F_GZIP=yes; else F_GZIP=no; fi
   # dotnet SDKs (no process is started): the folders lanq 0.8 searches, at most 5 s
-  F_DOTNET=""; F_DOTNET_DIR=""; F_DOTNET_OFFPATH=no; _dn=/nonexistent; _seen=" "; _bk=0; _end=$(( $(date +%s) + 5 ))
-  if have dotnet; then _dp=$(command -v dotnet); _dp=$(readlink -f "$_dp" 2>/dev/null || echo "$_dp"); _dn=${_dp%/*}; fi
+  F_DOTNET=""; F_DOTNET_DIR=""; _bd=""; F_DOTNET_OFFPATH=no; F_DOTNET_OPEN=no; _dn=""; _seen=" "; _bk=0; _end=$(( $(date +%s) + 5 ))
+  if have dotnet; then _dp=$(command -v dotnet)
+    case "$_dp" in /snap/bin/*) _dn=/snap/dotnet-sdk/current ;; *) _dp=$(readlink -f -- "$_dp" 2>/dev/null || echo "$_dp"); _dn=${_dp%/*} ;; esac
+  fi
+  sdk_root "$_dn" # the dotnet on PATH first: it wins a tie
   for _d in "${DOTNET_ROOT:-}" "${DOTNET_ROOT_X64:-}" "${DOTNET_ROOT_ARM64:-}" "$HOME/.dotnet"; do sdk_root "$_d"; done
   for _f in /etc/dotnet/install_location /etc/dotnet/install_location_*; do [ -r "$_f" ] && sdk_root "$(sed -n 1p "$_f" | tr -d '\r')"; done
-  for _d in /usr/share/dotnet /usr/lib/dotnet /usr/lib64/dotnet /opt/dotnet /snap/dotnet-sdk/current /usr/local/share/dotnet /opt/homebrew/opt/dotnet/libexec /usr/local/opt/dotnet/libexec "$_dn"; do sdk_root "$_d"; done
-  if [ -n "$F_DOTNET_DIR" ] && [ "$F_DOTNET_DIR" != "$(readlink -f "$_dn" 2>/dev/null || echo "$_dn")" ]; then F_DOTNET_OFFPATH=yes; fi
+  for _d in /usr/share/dotnet /usr/lib/dotnet /usr/lib64/dotnet /opt/dotnet /snap/dotnet-sdk/current /usr/local/share/dotnet /opt/homebrew/opt/dotnet/libexec /usr/local/opt/dotnet/libexec; do sdk_root "$_d"; done
+  if [ -n "$F_DOTNET_DIR" ] && [ "$_bd" != "$(readlink -f -- "$_dn" 2>/dev/null || echo "$_dn")" ]; then F_DOTNET_OFFPATH=yes
+    safe_dir "$F_DOTNET_DIR" || F_DOTNET_OPEN=yes
+  fi
   F_DOCKER_CLI=no; F_DOCKER_SERVER=""; F_DOCKER_REMOTE=no
   _dctx=${DOCKER_CONTEXT:-}
   if [ -z "$_dctx" ] && have docker; then _dctx=$(first_line "$(run_t 5 docker context show 2>/dev/null)"); fi

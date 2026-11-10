@@ -11,6 +11,8 @@
 - Windows: OpenSSH Server no longer FAILs as "installed but not running" when the account may not read the service status
   (`OpenService` access denied for a non-admin build user). Run over ssh, it is reported running (the session came in
   through it), with the start type from the registry; run locally, the check is SKIP with that reason.
+  `sshd.exe` without a registered service is still a FAIL.
+- Windows: without WMI, Windows Server Core counts as a server (it was taken for a client OS).
 - Windows: without WMI, Windows 11 is no longer shown as "Windows 10" (the registry `ProductName` still says Windows 10 on 11).
 - Wider .NET SDK search, the same folders LanQueue 0.8 searches. Windows: `DOTNET_ROOT` (and `_X64`, `_ARM64`),
   Program Files, `%LOCALAPPDATA%\Microsoft\dotnet`, `%USERPROFILE%\.dotnet`, the `InstalledVersions` registry keys, and
@@ -20,7 +22,18 @@
   `dotnet` executable, so a runtime-only install is not reported as an SDK. The search starts no process and stops after 5 seconds.
 - New `dotnet.path` WARN: when the newest SDK is not the `dotnet` on PATH, the check names that folder and the
   `machines.yml` snippet and `--json` `suggestedMachine` add `path_prepend: [FOLDER]` and `env: DOTNET_ROOT`
-  (LanQueue 0.8+ keys). The folder is redacted like other free text under `--redact`.
+  (LanQueue 0.8+ keys). The `dotnet` on PATH is searched first and wins a tie; preview SDKs never count as the newest; a
+  snap install keeps its stable `/snap/dotnet-sdk/current` folder. The folder is redacted like other free text under
+  `--redact` (the whole profile folder, also when it is not named after the account).
+- `path_prepend` is suggested only for a folder other local users cannot plant a `dotnet` in: the folder and its
+  `dotnet` owned by Administrators, SYSTEM or TrustedInstaller (root on Linux and macOS) or the account itself, and not
+  writable by Users, Authenticated Users, Interactive or Everyone (others, or a group other than root's). Otherwise the
+  check says so and the snippet carries a comment instead (a world-writable drive-root folder on a shared PC could
+  otherwise make jobs run a planted `dotnet`).
+- SSH keys: the check reads `AuthorizedKeysFile` from `sshd_config` the way sshd does (a matching `Match all`, `User` or
+  `Group` block before the global value, `%h`, `%u`, `%%` and `__PROGRAMDATA__`), so keys in a central file such as
+  `C:\ProgramData\ssh\<user>_authorized_keys` no longer give a false "no authorized_keys" WARN. When `sshd_config`
+  cannot be read, the WARN says keys may be set up elsewhere.
 
 ## 0.2.0 (2026-11-09)
 

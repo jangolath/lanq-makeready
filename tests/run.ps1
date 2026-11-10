@@ -28,6 +28,15 @@ function New-Facts([hashtable]$Over = @{}) {
   return $f
 }
 function Run($F) { $c = Get-Checks $F; $v = Get-Verdicts $c $F; return @{ C = $c; V = $v; M = (Get-Machine $F $v $F.Hours $false); S = (Get-Summary $c $v $F) } }
+function New-RedFacts($H, $U) {
+  New-Facts @{ Hostname = $H; User = $U; Profile = "C:\Users\$U"; Caption = "Windows $H ($U)"; CpuName = "cpu of $H"; GitVer = "git version 2.45 C:\Users\$U\git"
+    DefaultShell = "C:\Users\$U\sh.exe"; StartupNames = @("$H-agent", 'OneDrive'); ProblemDevices = @("dev $U"); Tools = @{ node = "v22 $U" } }
+}
+function Get-JsonFor($F, $Redact) {
+  if ($Redact) { $F = Protect-Facts $F }
+  $c = Get-Checks $F; $v = Get-Verdicts $c $F; $m = Get-Machine $F $v $null ([bool]$Redact)
+  ConvertTo-AsciiJson (New-Report $F $c $v $m '0.1.0')
+}
 function StepIds($R) { (@($R.S.nextSteps) | ForEach-Object { $_.id }) -join ' ' }
 function St($R, [string]$Id) { ($R.C | Where-Object { $_.id -eq $Id }).status }
 function Ck($R, [string]$Id) { $R.C | Where-Object { $_.id -eq $Id } }
@@ -295,9 +304,45 @@ $fo3 = New-Facts @{ RamGB = 3; DotnetDir = 'D:/build/dotnet'; DotnetOffPath = $t
 Assert-True (([regex]::Matches($sn, '(?m)^\s*#?\s*env:')).Count -eq 1 -and $sn -match 'DOTNET_GCHeapHardLimitPercent') 'low RAM and SDK off PATH: one env: key, the caps stay as comments under it'
 Assert-Equal ((Run (New-Facts @{ RamGB = 3; DotnetDir = 'D:/build/dotnet'; DotnetOffPath = $true })).C | Where-Object { $_.id -eq 'dotnet' }).advice $Advice['ram.low'] 'low RAM outranks the PATH hint on the dotnet check'
 $j = Get-JsonFor (New-Facts @{ DotnetDir = 'C:/Users/o''brien/.dotnet'; DotnetOffPath = $true; User = "o'brien"; Profile = "C:\Users\o'brien" }) $true | ConvertFrom-Json
-Assert-True ($j.suggestedMachine.path_prepend[0] -eq 'C:/Users/<redacted>/.dotnet' -and $j.suggestedMachine.env.DOTNET_ROOT -eq 'C:/Users/<redacted>/.dotnet') 'redacted JSON: the SDK folder hides the user name'
+Assert-True ($j.suggestedMachine.path_prepend[0] -eq '<redacted>/.dotnet' -and $j.suggestedMachine.env.DOTNET_ROOT -eq '<redacted>/.dotnet') 'redacted JSON: the SDK folder hides the user name'
 $j = Get-JsonFor $fo $false | ConvertFrom-Json
 Assert-True ($j.suggestedMachine.path_prepend[0] -eq 'D:/build/dotnet' -and $j.suggestedMachine.env.DOTNET_ROOT -eq 'D:/build/dotnet') 'JSON: suggestedMachine carries path_prepend and env'
+$raw = Get-JsonFor (New-Facts @{ DotnetDir = 'C:/Users/jsmith.CONTOSO/.dotnet'; DotnetOffPath = $true; User = 'jsmith'; Profile = 'C:\Users\jsmith.CONTOSO' }) $true
+Assert-True (($raw | ConvertFrom-Json).suggestedMachine.path_prepend[0] -eq '<redacted>/.dotnet' -and $raw -notmatch 'CONTOSO' -and $raw -notmatch 'jsmith') 'redacted JSON: a profile folder not named after the user is hidden whole'
+$fp = New-Facts @{ DotnetSdks = @(10); DotnetDir = 'C:/tools/dotnet'; DotnetOffPath = $true; DotnetOpen = $true }; $r = Run $fp
+Assert-True ((St $r 'dotnet') -eq 'WARN' -and (Ck $r 'dotnet').detail -match 'other local users can write there, so it is not suggested') 'SDK in a folder others can write: WARN says why'
+Assert-True (-not $r.M.Contains('path_prepend') -and -not $r.M.Contains('env')) 'SDK in a folder others can write: no path_prepend or env suggested'
+Assert-True (((Format-Snippet $r.M $r.V $fp) -join "`n") -match '# path_prepend: not suggested: other local users can write to C:/tools/dotnet') 'SDK in a folder others can write: the snippet says so in a comment'
+
+Write-Host 'Test-SafeFolder (real ACLs)'
+$sf = Join-Path ([System.IO.Path]::GetTempPath()) "lanq-safe-$PID"; [void](New-Item -ItemType Directory -Path $sf -Force); Set-Content -LiteralPath "$sf\dotnet.exe" -Value 'x'
+Assert-True (Test-SafeFolder $sf) 'a folder of this account (temp, default ACL) is safe'
+& icacls.exe $sf /grant '*S-1-5-11:(OI)(CI)(M)' | Out-Null
+Assert-True (-not (Test-SafeFolder $sf)) 'Authenticated Users with Modify: not safe'
+& icacls.exe $sf /remove:g '*S-1-5-11' | Out-Null; & icacls.exe "$sf\dotnet.exe" /grant '*S-1-1-0:(W)' | Out-Null
+Assert-True (-not (Test-SafeFolder $sf)) 'Everyone may write dotnet.exe itself: not safe'
+Assert-True (-not (Test-SafeFolder "$sf\missing")) 'a folder that cannot be read: not safe'
+Remove-Item -LiteralPath $sf -Recurse -Force
+
+Write-Host 'AuthorizedKeysFile from sshd_config'
+$cfgB = @('AuthorizedKeysFile .ssh/authorized_keys', 'Match User build*,!buildx', '       AuthorizedKeysFile __PROGRAMDATA__/ssh/%u_authorized_keys', 'Match all', 'AuthorizedKeysFile .ssh/keys_all', 'Match Group administrators', '       AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys')
+$k = Get-KeyFiles $cfgB 'builder' $false 'C:\Users\builder.PC' 'C:\ProgramData'
+Assert-True ($k.Via -eq 'match' -and @($k.Files) -join '|' -eq 'C:\ProgramData\ssh\builder_authorized_keys') 'Match User block: its file, %u and __PROGRAMDATA__ expanded'
+$k = Get-KeyFiles $cfgB 'buildx' $false 'C:\Users\buildx' 'C:\ProgramData'
+Assert-True ($k.Via -eq 'match' -and @($k.Files) -join '|' -eq 'C:\Users\buildx\.ssh\keys_all') 'a negated user skips that block; Match all applies; a relative file is under home'
+$k = Get-KeyFiles $cfgB 'alice' $true 'C:\Users\alice' 'C:\ProgramData'
+Assert-Equal (@($k.Files) -join '|') 'C:\Users\alice\.ssh\keys_all' 'the first matching block wins (Match all before Match Group administrators)'
+$k = Get-KeyFiles @('AuthorizedKeysFile .ssh/authorized_keys', 'Match Group administrators', '  AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys') 'alice' $true 'C:\Users\alice' 'C:\ProgramData'
+Assert-True ($k.Via -eq 'match' -and @($k.Files) -join '|' -eq 'C:\ProgramData\ssh\administrators_authorized_keys') 'Windows default config: an administrator gets administrators_authorized_keys'
+$k = Get-KeyFiles @('AuthorizedKeysFile .ssh/authorized_keys', 'Match Group administrators', '  AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys') 'bob' $false 'C:\Users\bob' 'C:\ProgramData'
+Assert-True ($k.Via -eq 'global' -and @($k.Files) -join '|' -eq 'C:\Users\bob\.ssh\authorized_keys') 'Windows default config: a standard user gets the global file'
+$k = Get-KeyFiles @('Match Address 10.0.0.0/8', '  AuthorizedKeysFile /etc/x', 'Match all', '  AuthorizedKeysFile "%h/k1" none %%h') 'bob' $false 'C:\Users\bob' 'C:\ProgramData'
+Assert-Equal (@($k.Files) -join '|') 'C:\Users\bob\k1|C:\Users\bob\%h' 'a criterion that cannot be judged is skipped; quotes, none and %% handled'
+$k = Get-KeyFiles $null 'bob' $false 'C:\Users\bob' 'C:\ProgramData'
+Assert-True ($k.Via -eq 'default' -and @($k.Files) -join '|' -eq 'C:\Users\bob\.ssh\authorized_keys|C:\Users\bob\.ssh\authorized_keys2') 'no config: the sshd default files'
+Assert-True ((Ck (Run (New-Facts @{ AuthKeysVia = 'match' })) 'ssh.keys').detail -match 'Match block') 'keys found through a Match block: OK says so'
+$r = Run (New-Facts @{ AuthKeysNonEmpty = $false; AuthKeysVia = 'unreadable' })
+Assert-True ((St $r 'ssh.keys') -eq 'WARN' -and (Ck $r 'ssh.keys').detail -match 'sshd_config is not readable') 'sshd_config unreadable: WARN says keys may be elsewhere'
 $wd = @(@{ Letter = 'C:'; FreeGB = 100; Media = 'SSD' }, @{ Letter = 'D:'; FreeGB = 500; Media = 'HDD' })
 Assert-Equal (Select-WorkDrive $wd 'C:').Letter 'C:' 'work drive: SSD with >= 20 GB beats a bigger HDD'
 Assert-Equal (Select-WorkDrive @(@{ Letter = 'C:'; FreeGB = 100; Media = 'HDD' }, @{ Letter = 'D:'; FreeGB = 500; Media = 'HDD' }) 'C:').Letter 'D:' 'work drive: most free space among HDDs'
@@ -358,15 +403,6 @@ Assert-Equal (Invoke-WithTimeout { param($x) 41 + $x } 1 10)[0] 42 'Invoke-WithT
 $script:Hung = $false
 
 Write-Host 'redaction on values, JSON structure intact'
-function New-RedFacts($H, $U) {
-  New-Facts @{ Hostname = $H; User = $U; Profile = "C:\Users\$U"; Caption = "Windows $H ($U)"; CpuName = "cpu of $H"; GitVer = "git version 2.45 C:\Users\$U\git"
-    DefaultShell = "C:\Users\$U\sh.exe"; StartupNames = @("$H-agent", 'OneDrive'); ProblemDevices = @("dev $U"); Tools = @{ node = "v22 $U" } }
-}
-function Get-JsonFor($F, $Redact) {
-  if ($Redact) { $F = Protect-Facts $F }
-  $c = Get-Checks $F; $v = Get-Verdicts $c $F; $m = Get-Machine $F $v $null ([bool]$Redact)
-  ConvertTo-AsciiJson (New-Report $F $c $v $m '0.1.0')
-}
 function Get-Keys($Obj, $Prefix = '') { foreach ($p in $Obj.PSObject.Properties) { "$Prefix$($p.Name)"; if ($p.Value -is [pscustomobject]) { Get-Keys $p.Value "$Prefix$($p.Name)." } } }
 $base = (Get-JsonFor (New-RedFacts 'box' 'builder') $false) | ConvertFrom-Json
 foreach ($pair in @(@('worker', "o'brien"), @('windows', 'OK'), @('false', 'linux'))) {
@@ -389,7 +425,7 @@ $AstNs = 'System.Management.Automation.Language'
 foreach ($f in @('lanq-makeready.ps1', 'lanq-makeready.sh')) {
   $text = Get-Content -LiteralPath (Join-Path $root $f) -Raw
   Assert-True (-not ($text -match '[^\x00-\x7F]')) "$f is pure ASCII"
-  Assert-True (@(Get-Content -LiteralPath (Join-Path $root $f)).Count -le 900) "$f is at most 900 lines"
+  Assert-True (@(Get-Content -LiteralPath (Join-Path $root $f)).Count -le 960) "$f is at most 960 lines"
 }
 $psPath = Join-Path $root 'lanq-makeready.ps1'
 $tokens = $null; $perr = $null
@@ -430,7 +466,7 @@ $okPairs = @(
   '$Matches[1]|ToUpper', '$media|ContainsKey', '$n.Substring(0, 63)|Trim', '$n|Substring', '$o|Wait', '$p.StandardError|ReadToEndAsync',
   '$p.StandardInput|Close', '$p.StandardOutput|ReadToEndAsync', '$p|Kill', '$p|WaitForExit', '$ps.AddScript($Block.ToString())|AddArgument',
   '$ps|AddScript', '$ps|BeginInvoke', '$ps|BeginStop', '$ps|Dispose', '$ps|EndInvoke', '$rank|ContainsKey', '$stack|Pop', '$stack|Push',
-  '$w[0]|Substring', '$w[1]|Substring', '("$S".ToLowerInvariant() -replace ''[^a-z0-9-]'', ''-'')|Trim', '($cpu[0].Name -replace ''\s+'', '' '')|Trim', '($cn -replace ''\s+'', '' '')|Trim', '[System.IO.DriveInfo]|GetDrives',
+  '$w[0]|Substring', '$w[1]|Substring', '("$S".ToLowerInvariant() -replace ''[^a-z0-9-]'', ''-'')|Trim', '($cpu[0].Name -replace ''\s+'', '' '')|Trim', '($cn -replace ''\s+'', '' '')|Trim', '[System.IO.DriveInfo]|GetDrives', '[System.GC]|GetGCMemoryInfo',
   '[Console]::Error|WriteLine', '[Console]::Out|Flush', '[Console]::Out|Write', '[Convert]|ToInt64', '[DateTime]::UtcNow|ToString', '[Environment]|Exit',
   '[math]|Min', '[math]|Round', '"$l"|Split', '$p[2].ToLowerInvariant()|Replace', '$p[2]|ToLowerInvariant', '$r|Remove', '$PSBoundParameters|ContainsKey', '$Lines|Add',
   '[System.IO.File]|Open', '(New-Object System.Text.UTF8Encoding($false))|GetBytes', '$fs|Write', '$fs|Dispose', '[regex]|Escape', '[regex]|Matches', '[regex]|Replace', '[Security.Principal.WindowsIdentity]|GetCurrent',

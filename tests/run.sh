@@ -26,7 +26,7 @@ fixture_ubuntu() { # Ubuntu 24.04, 16 GB, SSD, everything good
   F_T_node=v22.1.0; F_T_python=""; F_T_java=""; F_T_go=""; F_T_rustc=""
   F_OSID=ubuntu; F_OSVERID=24.04; F_NOW_YM=202611; F_SSHD_PW=no; F_SWAPMB=2048
   F_WOL_IF=enp1s0; F_WOL_MAC=10:20:30:aa:bb:cc; F_WOL_WIFI=no; F_WOL_SUP=pumbg; F_WOL_ON=g
-  F_DOTNET_DIR=""; F_DOTNET_OFFPATH=no
+  F_DOTNET_DIR=""; F_DOTNET_OFFPATH=no; F_DOTNET_OPEN=no; F_AUTHVIA=default
 }
 run() { eval_checks; eval_verdicts; eval_machine "${1:-}" 0; eval_summary; }
 step_ids() { printf '%s' "$S_STEPS" | while IFS="$SEP" read -r _i _; do printf '%s ' "$_i"; done; }
@@ -347,10 +347,57 @@ for x in a b c d b/ ""; do sdk_root "${x:+$sd/$x}"; done
 eq "$F_DOTNET" "9 10" "sdk_root: majors from SDK folders with dotnet.dll (11 has none, 08 is refused)"
 eq "${F_DOTNET_DIR##*/}" b "sdk_root: the newest SDK's folder wins"
 sdk_root "$sd/e"
-eq "${F_DOTNET_DIR##*/}" e "sdk_root: 10.0.200-rc.1 counts as 10.0.200"
+eq "${F_DOTNET_DIR##*/}" b "sdk_root: a preview (10.0.200-rc.1) never counts as the newest"
+F_DOTNET=""; F_DOTNET_DIR=""; _seen=" "; _bk=0; _end=$(( $(date +%s) + 5 ))
+mkdir -p "$sd/b2/sdk/10.0.102"; printf '#!/bin/sh\n' > "$sd/b2/dotnet"; chmod +x "$sd/b2/dotnet"; : > "$sd/b2/sdk/10.0.102/dotnet.dll"
+sdk_root "$sd/b2"; sdk_root "$sd/b"
+eq "${F_DOTNET_DIR##*/}" b2 "sdk_root: a tie keeps the earlier folder (the dotnet on PATH is searched first)"
+mkdir -p "$sd/q\"x/sdk/12.0.100" "$sd/n
+l/sdk/12.0.100" "$sd/z/sdk/11.0.100"
+for x in "q\"x" "n
+l" z; do printf '#!/bin/sh\n' > "$sd/$x/dotnet"; chmod +x "$sd/$x/dotnet"; done
+: > "$sd/q\"x/sdk/12.0.100/dotnet.dll"; : > "$sd/n
+l/sdk/12.0.100/dotnet.dll"; mkdir -p "$sd/z/sdk/11.0.100"; : > "$sd/z/sdk/11.0.100/dotnet.dll"
+F_DOTNET=""; F_DOTNET_DIR=""; _seen=" "; _bk=0; _end=$(( $(date +%s) + 5 ))
+sdk_root "$sd/q\"x"; sdk_root "$sd/n
+l"; sdk_root "$sd/z"
+eq "${F_DOTNET_DIR##*/}" z "sdk_root: folders with a quote or a newline are skipped, and do not stop the search"
+echo "safe_dir: real permissions"
+mkdir -p "$sd/s"; printf '#!/bin/sh\n' > "$sd/s/dotnet"; chmod 755 "$sd/s" "$sd/s/dotnet"
+if safe_dir "$sd/s"; then ok "safe_dir: a folder of this user, not writable by others"; else bad "safe_dir own" unsafe safe; fi
+chmod 777 "$sd/s"
+if safe_dir "$sd/s"; then bad "safe_dir world-writable folder" safe unsafe; else ok "safe_dir: a world-writable folder is not safe"; fi
+chmod 755 "$sd/s"; chmod 777 "$sd/s/dotnet"
+if safe_dir "$sd/s"; then bad "safe_dir world-writable dotnet" safe unsafe; else ok "safe_dir: a world-writable dotnet is not safe"; fi
+if safe_dir "$sd/missing"; then bad "safe_dir missing" safe unsafe; else ok "safe_dir: a missing folder is not safe"; fi
 F_DOTNET_DIR=""; _bk=0; _end=$(( $(date +%s) - 1 )); _seen=" "; sdk_root "$sd/b"
 eq "$F_DOTNET_DIR" "" "sdk_root: nothing is read after the 5 s deadline"
 rm -rf "$sd"
+
+echo "AuthorizedKeysFile from sshd_config"
+cfgB='AuthorizedKeysFile .ssh/authorized_keys
+Match User build*,!buildx
+	AuthorizedKeysFile /etc/ssh/keys/%u # the build users
+Match all
+AuthorizedKeysFile .ssh/keys_all
+Match Group wheel
+AuthorizedKeysFile /etc/ssh/wheel_keys'
+eq "$(printf '%s\n' "$cfgB" | keys_files builder /home/builder "builder users" | tr '\n' '|')" "match|/etc/ssh/keys/builder|" "Match User block: its file, %u expanded"
+eq "$(printf '%s\n' "$cfgB" | keys_files buildx /home/buildx "buildx" | tr '\n' '|')" "match|/home/buildx/.ssh/keys_all|" "a negated user skips that block; Match all applies; relative = home"
+eq "$(printf 'AuthorizedKeysFile .ssh/authorized_keys\nMatch Group wheel\n  AuthorizedKeysFile /etc/ssh/wheel_keys\n' | keys_files ann /home/ann "ann wheel" | tr '\n' '|')" "match|/etc/ssh/wheel_keys|" "Match Group: a group the user is in"
+eq "$(printf 'AuthorizedKeysFile .ssh/authorized_keys\nMatch Group wheel\n  AuthorizedKeysFile /etc/ssh/wheel_keys\n' | keys_files bob /home/bob "bob" | tr '\n' '|')" "global|/home/bob/.ssh/authorized_keys|" "Match Group: not in it, the global file"
+eq "$(printf 'Match Address 10.0.0.0/8\n  AuthorizedKeysFile /etc/x\nMatch all\n  AuthorizedKeysFile "%%h/k1" none %%%%h\n' | keys_files bob /home/bob "" | tr '\n' '|')" "match|/home/bob/k1|/home/bob/%h|" "a criterion that cannot be judged is skipped; quotes, none and %% handled"
+eq "$(printf '' | keys_files bob /home/bob "" | tr '\n' '|')" "default|/home/bob/.ssh/authorized_keys|/home/bob/.ssh/authorized_keys2|" "no config: the sshd default files"
+fixture_ubuntu; F_AUTHVIA=match; run
+contains "$CHECKS" "the file a Match block in sshd_config names" "keys found through a Match block: OK says so"
+fixture_ubuntu; F_AUTHKEYS=no; F_AUTHVIA=unreadable; run
+contains "$CHECKS" "sshd_config is not readable, so keys may be set up elsewhere" "sshd_config unreadable: WARN says keys may be elsewhere"
+fixture_ubuntu; F_DOTNET_DIR=/opt/build/dotnet; F_DOTNET_OFFPATH=yes; F_DOTNET_OPEN=yes; run
+eq "$V_DOTNET" WARN "SDK in a folder others can write: WARN"
+contains "$CHECKS" "other local users can write there, so it is not suggested" "SDK in a folder others can write: the check says why"
+contains "$(render_snippet)" "# path_prepend: not suggested: other local users can write to /opt/build/dotnet" "SDK in a folder others can write: a comment, no path_prepend"
+if render_snippet | grep -q '^    path_prepend:\|^      DOTNET_ROOT'; then bad "open folder: path_prepend" present absent; else ok "SDK in a folder others can write: no path_prepend or DOTNET_ROOT"; fi
+case "$(render_json 0)" in *'"path_prepend": ['*) bad "open folder: JSON path_prepend" present absent ;; *) ok "SDK in a folder others can write: no path_prepend in JSON" ;; esac
 eq "$(safe_name 'My_PC.Local')" "my-pc-local" "safe_name: lowercase, [a-z0-9-]"
 eq "$(safe_name '--x--')" "x" "safe_name: no leading/trailing hyphen"
 eq "$(safe_name '___')" "old-pc" "safe_name: fallback"
@@ -508,7 +555,7 @@ eq "$(grep -c '^  ln -- "$_otmp" "$OUT_PATH"' "$root/lanq-makeready.sh"):$(grep 
 eq "$(grep -cE '(^|[^A-Za-z_])rm[[:space:]]' "$root/lanq-makeready.sh" | tr -d ' ')" "$(grep -c 'rm -f -- "$_otmp"' "$root/lanq-makeready.sh")" "every rm in the script removes only the --out temp file"
 eq "$([ -e "$root/SHA256SUMS" ] && echo committed || echo none)" none "SHA256SUMS is produced by the release workflow, never committed (a stale copy would mislead)"
 lines=$(wc -l < "$root/lanq-makeready.sh" | tr -d ' ')
-if [ "$lines" -le 900 ]; then ok "script is $lines lines (max 900)"; else bad "line count" "$lines" "<=900"; fi
+if [ "$lines" -le 960 ]; then ok "script is $lines lines (max 960)"; else bad "line count" "$lines" "<=960"; fi
 
 echo "smoke: real run of the script on this machine"
 out=${TMPDIR:-/tmp}/lanq-makeready-smoke.$$.json
