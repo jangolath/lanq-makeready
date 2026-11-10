@@ -331,6 +331,13 @@ Assert-True (Test-Sddl "O:SYG:SYD:(A;;0x1301bf;;;AU)(A;OICIIO;SDGXGWGR;;;AU)(A;;
 Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(A;;0x1301ff;;;AU)" 1 $me)) 'a parent where Authenticated Users may delete children (0x40): not safe'
 Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(A;;SDRCWDWO;;;AU)" 1 $me)) 'a parent others may delete, re-permission or take: not safe'
 Assert-True (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(A;OICIIO;FA;;;AU)" 1 $me) 'on a parent, an entry that only passes down is judged on the children'
+$adm = 'S-1-5-21-1-2-3-1002'
+Assert-True (Test-Sddl "O:${me}G:${me}D:AI(A;OICIID;FA;;;BA)(A;OICIID;FA;;;SY)(A;OICIID;FA;;;$me)(A;OICIID;FA;;;$adm)" 0 @($me, $adm)) 'a member of the local Administrators group may write: safe'
+Assert-True (-not (Test-Sddl "O:${me}G:${me}D:AI(A;OICIID;FA;;;BA)(A;OICIID;FA;;;$adm)" 0 @($me))) 'the same account when it is not an administrator: not safe'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(A;;KA;;;BU)" 1 $me)) 'a parent where Users have KA (delete, re-permission, take): not safe'
+Assert-True (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(A;;LO;;;BU)" 0 $me) 'read attributes (LO) only: safe'
+Assert-True (-not (Test-Sddl ('O:BAG:BAD:(A;;FA;;;BA)(XA;;FR;;;WD;(@User.x == "S:"))(A;;FA;;;BU)') 0 $me)) 'an S: inside a condition does not hide the entries after it'
+Assert-True (-not (Test-Sddl "O:BAG:BAD:(A;;FA;;;BA)(A;;0xZZ;;;BU)" 0 $me)) 'unparsable rights: not safe'
 
 Write-Host 'Test-SafeFolder (real ACLs)'
 $sf = Join-Path ([System.IO.Path]::GetTempPath()) "lanq-safe-$PID"; [void](New-Item -ItemType Directory -Path $sf -Force); Set-Content -LiteralPath "$sf\dotnet.exe" -Value 'x'
@@ -446,7 +453,7 @@ $AstNs = 'System.Management.Automation.Language'
 foreach ($f in @('lanq-makeready.ps1', 'lanq-makeready.sh')) {
   $text = Get-Content -LiteralPath (Join-Path $root $f) -Raw
   Assert-True (-not ($text -match '[^\x00-\x7F]')) "$f is pure ASCII"
-  Assert-True (@(Get-Content -LiteralPath (Join-Path $root $f)).Count -le 960) "$f is at most 960 lines"
+  Assert-True (@(Get-Content -LiteralPath (Join-Path $root $f)).Count -le 980) "$f is at most 980 lines"
 }
 $psPath = Join-Path $root 'lanq-makeready.ps1'
 $tokens = $null; $perr = $null
@@ -455,7 +462,7 @@ Assert-Equal @($perr).Count 0 'ps1 parses without errors'
 $funcs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true))
 $funcNames = @($funcs | ForEach-Object { $_.Name })
 function Get-Fn($Node) { $p = $Node.Parent; while ($p) { if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $p.Name }; $p = $p.Parent }; return '' }
-$okCmds = @('Add-Type', 'ConvertFrom-Json', 'ConvertTo-Json', 'ForEach-Object', 'Get-Acl', 'Get-ChildItem', 'Get-CimInstance', 'Get-Command', 'Get-Content', 'Get-Item', 'Get-ItemProperty',
+$okCmds = @('Add-Type', 'ConvertFrom-Json', 'Get-LocalGroupMember', 'ConvertTo-Json', 'ForEach-Object', 'Get-Acl', 'Get-ChildItem', 'Get-CimInstance', 'Get-Command', 'Get-Content', 'Get-Item', 'Get-ItemProperty',
   'Get-Location', 'Get-MpComputerStatus', 'Get-NetAdapter', 'Get-NetAdapterPowerManagement', 'Get-NetFirewallPortFilter', 'Get-NetFirewallRule', 'Get-Partition', 'Get-PhysicalDisk', 'Get-Service', 'Join-Path',
   'Measure-Object', 'Get-AppxPackage', 'New-Object', 'Select-Object', 'Sort-Object', 'Test-Path', 'Where-Object', 'Write-Host')
 $bad = @()

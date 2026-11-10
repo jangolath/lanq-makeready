@@ -655,37 +655,41 @@ function Get-KeyFiles($Lines, [string]$User, [bool]$IsAdmin, [string]$HomeDir, [
   return @{ Files = $files; Via = $via }
 }
 
-# True when this security descriptor (SDDL) lets nobody but Administrators, SYSTEM, TrustedInstaller or $Me (the trusted) change what a
-# job's dotnet runs. Kind 0, an item a job runs from: a trusted owner, a DACL (not NULL), and no Allow entry giving anyone else more
-# than read/execute. Kind 1, a parent folder (2, a drive root): a trusted owner, and nobody else may delete or rename what is in it
-# (DT, WD, WO, GA, FA, and SD below the root; entries that only pass down to children are judged on the children).
-function Test-Sddl([string]$Sd, [int]$Kind, [string]$Me) {
-  $trust = '^(BA|SY|CO|OW|S-1-5-32-544|S-1-5-18|S-1-3-0|S-1-3-4|S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464|' + [regex]::Escape($Me) + ')$'
+# True when this security descriptor (SDDL) lets nobody but the trusted change what a job's dotnet runs. Trusted: Administrators, SYSTEM,
+# TrustedInstaller, creator/owner entries and the SIDs in $Trusted (this account and the members of the local Administrators group).
+# Kind 0, an item a job runs from: a trusted owner, a DACL (not NULL), and no Allow entry giving anyone else more than read/execute.
+# Kind 1, a parent folder (2, a drive root): a trusted owner, and nobody else may delete or rename what is in it (DT, WD, WO, GA, FA,
+# KA, and SD below the root; entries that only pass down to children are judged on the children). Anything unparsable is unsafe.
+function Test-Sddl([string]$Sd, [int]$Kind, [string[]]$Trusted) {
+  $trust = '^(BA|SY|CO|OW|S-1-5-32-544|S-1-5-18|S-1-3-0|S-1-3-4|S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464|' + ((@($Trusted) | Where-Object { $_ } | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')$'
   if ($Sd -notmatch '^O:([^G]+)G:' -or $Matches[1] -notmatch $trust) { return $false }
   if ($Sd -notmatch 'D:' -or $Sd -match 'D:[A-Z]*NO_ACCESS_CONTROL') { return $false }
-  foreach ($m in [regex]::Matches((($Sd -replace '^.*?D:', '') -replace 'S:.*$', ''), '\((A|OA|XA|ZA);([^;]*);([^;]*);[^;]*;[^;]*;([^;)]+)[^)]*\)')) {
-    if ($m.Groups[4].Value -match $trust -or ($Kind -gt 0 -and $m.Groups[2].Value -match 'IO')) { continue }
+  foreach ($m in [regex]::Matches(($Sd -replace '^.*?D:', ''), '\((A|OA|XA|ZA);([^;]*);([^;]*);[^;]*;[^;]*;([^;)]+)[^)]*\)')) {
+    if ($m.Groups[4].Value -match $trust -or ($Kind -gt 0 -and $m.Groups[2].Value -match '^(..)*?IO')) { continue }
     $r = $m.Groups[3].Value
-    if ($Kind -eq 0) { $mask = 0x5FEDFF56; $codes = '^(..)*?(?!CC|SW|WP|LT|RC|GR|GX|FR|FX)..' }
-    else { $mask = 0x100C0040 + 0x10000 * [int]($Kind -eq 1); $codes = '^(..)*?(DT|WD|WO|GA|FA' + ('|SD' * [int]($Kind -eq 1)) + ')' }
-    if ($r -match '^0x([0-9A-Fa-f]{1,8})$') { if (([Convert]::ToInt64($Matches[1], 16) -band $mask) -ne 0) { return $false } }
+    if ($Kind -eq 0) { $mask = 0x5FEDFF56; $codes = '^(..)*?(?!CC|SW|WP|LO|LT|RC|GR|GX|FR|FX)..' }
+    else { $mask = 0x100C0040 + 0x10000 * [int]($Kind -eq 1); $codes = '^(..)*?(DT|WD|WO|GA|FA|KA' + ('|SD' * [int]($Kind -eq 1)) + ')' }
+    if ($r -match '^0x([0-9A-Fa-f]{1,8})$') { try { $hv = [Convert]::ToInt64($Matches[1], 16) } catch { return $false }; if (($hv -band $mask) -ne 0) { return $false } }
     elseif ($r -match $codes) { return $false } }
   return $true
 }
 
-# True when other local users cannot plant code a job's dotnet would run (Test-Sddl): the folder, dotnet.exe, host, host\fxr and its
-# version folders and the given SDK folder as kind 0, every parent folder as kind 1 or 2. Anything unreadable counts as unsafe.
+# True when other local users cannot plant code a job's dotnet would run (Test-Sddl): kind 0 for the folder, dotnet.exe, sdk and the given
+# SDK folder, host, host\fxr and its version folders, shared, shared\Microsoft.NETCore.App and its version folders; kind 1 or 2 for every
+# parent folder. A junction or link anywhere on the path, or anything unreadable, counts as unsafe.
 function Test-SafeFolder([string]$Dir, [string]$Sdk = '') {
-  try { $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { $me = 'none' }
-  $chk = @(@($Dir, 0), @("$Dir\dotnet.exe", 0), @("$Dir\host", 3), @("$Dir\host\fxr", 3))
-  foreach ($x in @(Get-ChildItem -LiteralPath "$Dir\host\fxr" -Directory -ErrorAction SilentlyContinue)) { $chk += , @($x.FullName, 0) }
+  $tr = @(); try { $tr += [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { }
+  try { $tr += @((Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop).SID.Value) } catch { }
+  $chk = @(@($Dir, 0), @("$Dir\dotnet.exe", 0), @("$Dir\sdk", 0), @("$Dir\host", 3), @("$Dir\host\fxr", 3), @("$Dir\shared", 3), @("$Dir\shared\Microsoft.NETCore.App", 3))
+  foreach ($x in @(Get-ChildItem -LiteralPath "$Dir\host\fxr" -Directory -ErrorAction SilentlyContinue) + @(Get-ChildItem -LiteralPath "$Dir\shared\Microsoft.NETCore.App" -Directory -ErrorAction SilentlyContinue)) { $chk += , @($x.FullName, 0) }
   if ($Sdk) { $chk += , @("$Dir\sdk\$Sdk", 0) }
   $parts = @($Dir -split '\\')
   for ($i = $parts.Count - 2; $i -ge 0; $i--) { if ($i -eq 0) { $chk += , @("$($parts[0])\", 2) } else { $chk += , @(($parts[0..$i] -join '\'), 1) } }
   foreach ($c in $chk) {
     $k = $c[1]; if ($k -eq 3) { if (-not (Test-Path -LiteralPath $c[0])) { continue }; $k = 0 }
-    try { $sd = "$((Get-Acl -LiteralPath $c[0] -ErrorAction Stop).Sddl)" } catch { return $false }
-    if (-not (Test-Sddl $sd $k $me)) { return $false } }
+    try { $it = Get-Item -LiteralPath $c[0] -Force -ErrorAction Stop; $sd = "$((Get-Acl -LiteralPath $c[0] -ErrorAction Stop).Sddl)" } catch { return $false }
+    if ($k -ne 2 -and ($it.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return $false }
+    if (-not (Test-Sddl $sd $k $tr)) { return $false } }
   return $true
 }
 
@@ -797,7 +801,7 @@ function Get-Facts([string]$H) {
     try { foreach ($x in [System.IO.Directory]::EnumerateDirectories("$($dr.Letter)\")) { if (++$n -gt 64 -or $sw.Elapsed.TotalSeconds -gt 5) { break }; $roots += "$x\dotnet" } } catch { } }
   $majors = @(); $seen = @(); $best = $null; $bestN = ''; $bestV = [version]'0.0'
   foreach ($rt in $roots) { $rt = "$rt" -replace '/', '\' -replace '\\+$', ''
-    if (-not $rt -or $seen -contains $rt -or $sw.Elapsed.TotalSeconds -gt 5 -or -not (Test-Path -LiteralPath "$rt\dotnet.exe" -PathType Leaf)) { continue }; $seen += $rt
+    if ($rt -notmatch '^[A-Za-z]:\\' -or $seen -contains $rt -or $sw.Elapsed.TotalSeconds -gt 5 -or -not (Test-Path -LiteralPath "$rt\dotnet.exe" -PathType Leaf)) { continue }; $seen += $rt
     foreach ($dir in @(Get-ChildItem -LiteralPath "$rt\sdk" -Directory -ErrorAction SilentlyContinue)) {
       if ($dir.Name -match '^(\d{1,5})\.(\d{1,5})\.(\d{1,6})' -and (Test-Path -LiteralPath "$($dir.FullName)\dotnet.dll")) { $majors += [int]$Matches[1]
         $v = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])"; if ($dir.Name -notmatch '-' -and $v -gt $bestV) { $bestV = $v; $best = $rt; $bestN = $dir.Name } } } }

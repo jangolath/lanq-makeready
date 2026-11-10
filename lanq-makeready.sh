@@ -673,7 +673,8 @@ gather_wol() { # physical wired NIC, its MAC, and ethtool Wake-on when readable 
 sdk_root() { # $1 = a folder that may hold dotnet: adds its SDK majors to F_DOTNET; F_DOTNET_DIR = the folder of the newest stable SDK
   # as given (so /snap/dotnet-sdk/current stays valid across refreshes), _bd = that folder resolved; a tie keeps the earlier folder
   _d=${1%/}
-  [ -n "$_d" ] && [ "$(date +%s)" -le "$_end" ] && [ -x "$_d/dotnet" ] && [ -d "$_d/sdk" ] || return 0
+  case "$_d" in /*) ;; *) return 0 ;; esac # absolute only (a relative one would depend on the working folder)
+  [ "$(date +%s)" -le "$_end" ] && [ -x "$_d/dotnet" ] && [ -d "$_d/sdk" ] || return 0
   case "$_d" in *'"'*|*'\'*) return 0 ;; esac # a quote or backslash would break the YAML snippet
   [ "$(printf '%s' "$_d" | LC_ALL=C tr -d ' -~' | wc -c)" -eq 0 ] || return 0 # printable ASCII only: no newline, nothing json_esc turns into ?
   _r=$(readlink -f -- "$_d" 2>/dev/null) || _r=$_d
@@ -692,18 +693,21 @@ sdk_root() { # $1 = a folder that may hold dotnet: adds its SDK majors to F_DOTN
 }
 
 safe_dir() { # $1 = folder, $2 = its newest SDK: true when other local users cannot plant code a job's dotnet runs. The folder, its
-  # dotnet, host, host/fxr and its version folders and that SDK folder (each resolved): owned by root or this user, writable by nobody
+  # dotnet, sdk and that SDK folder, host, host/fxr and its version folders, shared, shared/Microsoft.NETCore.App and its version folders
+  # (each resolved): owned by root or this user, writable by nobody
   # else (a group may write when it is root's or this user's own private group). Every parent folder of the path as given and as
   # resolved: owned by root or this user, and not writable by others or another group unless sticky (then nobody can rename our entry).
   _u=$(id -u 2>/dev/null); _pg=0; [ "$(id -gn 2>/dev/null)" = "$(id -un 2>/dev/null)" ] && _pg=$(id -g 2>/dev/null)
-  for _x in "$1" "$1/dotnet" "$1/host" "$1/host/fxr" "$1"/host/fxr/* "$1/sdk/$2"; do
-    case "$_x" in "$1/host"*|"$1/sdk/") [ -e "$_x" ] && [ "$_x" != "$1/sdk/" ] || continue ;; esac
+  case "$1" in /*) ;; *) return 1 ;; esac
+  for _x in "$1" "$1/dotnet" "$1/sdk" "$1/sdk/$2" "$1/host" "$1/host/fxr" "$1"/host/fxr/* "$1/shared" "$1/shared/Microsoft.NETCore.App" "$1"/shared/Microsoft.NETCore.App/*; do
+    case "$_x" in "$1/host"*|"$1/shared"*|"$1/sdk"|"$1/sdk/") [ -e "$_x" ] && [ "$_x" != "$1/sdk/" ] || continue ;; esac
     _x=$(readlink -f -- "$_x" 2>/dev/null) || return 1
     [ -n "$(find "$_x" -maxdepth 0 \( -user 0 -o -user "$_u" \) ! -perm -0002 \( ! -perm -0020 -o -group 0 -o -group "$_pg" \) 2>/dev/null)" ] || return 1
   done
   _r=$(readlink -f -- "$1" 2>/dev/null) || return 1
   for _a in "$1" "$_r"; do
-    while _a=${_a%/*}; [ -n "$_a" ]; do
+    while _n=${_a%/*}; [ "$_n" != "$_a" ] && [ -n "$_n" ]; do
+      _a=$_n
       [ -n "$(find "$_a" -maxdepth 0 \( -user 0 -o -user "$_u" \) \( -type l -o -perm -1000 -o \( ! -perm -0002 \( ! -perm -0020 -o -group 0 -o -group "$_pg" \) \) \) 2>/dev/null)" ] || return 1
     done
   done

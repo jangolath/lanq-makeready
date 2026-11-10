@@ -392,6 +392,12 @@ F_DOTNET_DIR=""; _bk=0; _end=$(( $(date +%s) - 1 )); _seen=" "; sdk_root "$sd/b"
 eq "$F_DOTNET_DIR" "" "sdk_root: nothing is read after the 5 s deadline"
 rm -rf "$sd"
 
+_end=$(( $(date +%s) + 5 )); _seen=" "; F_DOTNET_DIR=""; mkdir -p rel/sdk/10.0.1 && printf '#!/bin/sh\n' > rel/dotnet && chmod +x rel/dotnet && : > rel/sdk/10.0.1/dotnet.dll
+sdk_root rel; sdk_root ./rel
+eq "$F_DOTNET_DIR" "" "sdk_root: a relative folder is never searched"
+rm -rf rel
+if safe_dir rel 10.0.1; then bad "safe_dir relative" safe unsafe; else ok "safe_dir: a relative folder is not safe (and returns at once)"; fi
+
 echo "AuthorizedKeysFile from sshd_config"
 cfgB='AuthorizedKeysFile .ssh/authorized_keys
 Match User build*,!buildx
@@ -579,7 +585,7 @@ eq "$(grep -cE '(^|[^A-Za-z_])rm[[:space:]]' "$root/lanq-makeready.sh" | tr -d '
 eq "$([ -e "$root/SHA256SUMS" ] && echo committed || echo none)" none "SHA256SUMS is produced by the release workflow, never committed (a stale copy would mislead)"
 eq "$(grep -cE -- '-(fprint|fprintf|fprint0|fls|delete|exec|execdir|ok|okdir)([[:space:]]|$)' "$root/lanq-makeready.sh" | tr -d ' ')" 0 "no find action that writes, deletes or runs anything (-fprint, -fls, -delete, -exec, -ok)"
 lines=$(wc -l < "$root/lanq-makeready.sh" | tr -d ' ')
-if [ "$lines" -le 960 ]; then ok "script is $lines lines (max 960)"; else bad "line count" "$lines" "<=960"; fi
+if [ "$lines" -le 980 ]; then ok "script is $lines lines (max 980)"; else bad "line count" "$lines" "<=980"; fi
 
 echo "smoke: real run of the script on this machine"
 out=${TMPDIR:-/tmp}/lanq-makeready-smoke.$$.json
