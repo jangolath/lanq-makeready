@@ -346,6 +346,23 @@ Assert-True (-not (Test-SafeFolder $sf)) 'Authenticated Users with Modify: not s
 Assert-True (-not (Test-SafeFolder "$sf\missing")) 'a folder that cannot be read: not safe'
 Remove-Item -LiteralPath $sf -Recurse -Force
 $pf = "$env:ProgramFiles\dotnet"
+if (Test-Path -LiteralPath "$pf\dotnet.exe") {
+  $lo = Join-Path $env:LOCALAPPDATA "lanq-open-$PID"
+  foreach ($d in 'sdk\10.0.102', 'shared\Microsoft.AspNetCore.App\10.0.2', 'packs', 'sdk-manifests') { [void](New-Item -ItemType Directory -Force -Path (Join-Path $lo $d)) }
+  Set-Content -LiteralPath "$lo\dotnet.exe" -Value 'x'
+  & icacls.exe "$lo\shared\Microsoft.AspNetCore.App\10.0.2" /grant '*S-1-5-11:(OI)(CI)(M)' | Out-Null
+  Assert-True (-not (Test-SafeFolder $lo '10.0.102')) 'a shared framework version folder others may modify: not safe'
+  & icacls.exe "$lo\shared\Microsoft.AspNetCore.App\10.0.2" /remove:g '*S-1-5-11' | Out-Null; & icacls.exe "$lo\packs" /grant '*S-1-5-11:(OI)(CI)(M)' | Out-Null
+  Assert-True (-not (Test-SafeFolder $lo '10.0.102')) 'packs others may modify: not safe'
+  # a junction to a scratch folder (never to a real install): the link alone is removed with rmdir, never Remove-Item (which would
+  # ask, or with -Recurse empty the target)
+  $lk = Join-Path $env:LOCALAPPDATA "lanq-junction-$PID"
+  [void](New-Item -ItemType Junction -Path $lk -Target $lo)
+  Assert-True (-not (Test-SafeFolder $lk '10.0.102')) 'a junction is refused (its target''s parents are never judged)'
+  & cmd.exe /c rmdir "$lk"
+  Remove-Item -LiteralPath $lo -Recurse -Force
+}
+$pf = "$env:ProgramFiles\dotnet"
 if (Test-Path -LiteralPath "$pf\dotnet.exe") { Assert-True (Test-SafeFolder $pf) 'Program Files\dotnet (installer default): safe' }
 
 Write-Host 'AuthorizedKeysFile from sshd_config'

@@ -376,7 +376,11 @@ chmod 777 "$sd/s/host/fxr/10.0.2"
 if safe_dir "$sd/s" 10.0.102; then bad "safe_dir open fxr" safe unsafe; else ok "safe_dir: a world-writable host/fxr version folder is not safe"; fi
 chmod 755 "$sd/s/host/fxr/10.0.2"; chmod 777 "$sd/s/sdk/10.0.102"
 if safe_dir "$sd/s" 10.0.102; then bad "safe_dir open sdk" safe unsafe; else ok "safe_dir: a world-writable SDK folder is not safe"; fi
-chmod 755 "$sd/s/sdk/10.0.102"; mkdir -p "$sd/open/inner"; chmod 777 "$sd/open"; cp -R "$sd/s" "$sd/open/inner/d" 2>/dev/null || :
+chmod 755 "$sd/s/sdk/10.0.102"; mkdir -p "$sd/s/shared/Microsoft.AspNetCore.App/10.0.2" "$sd/s/packs"; chmod 777 "$sd/s/shared/Microsoft.AspNetCore.App/10.0.2"
+if safe_dir "$sd/s" 10.0.102; then bad "safe_dir open shared" safe unsafe; else ok "safe_dir: a world-writable shared framework version folder is not safe"; fi
+chmod 755 "$sd/s/shared/Microsoft.AspNetCore.App/10.0.2"; chmod 777 "$sd/s/packs"
+if safe_dir "$sd/s" 10.0.102; then bad "safe_dir open packs" safe unsafe; else ok "safe_dir: world-writable packs is not safe"; fi
+chmod 755 "$sd/s/packs"; mkdir -p "$sd/open/inner"; chmod 777 "$sd/open"; cp -R "$sd/s" "$sd/open/inner/d" 2>/dev/null || :
 chmod -R go-w "$sd/open/inner"
 if safe_dir "$sd/open/inner/d" 10.0.102; then bad "safe_dir open parent" safe unsafe; else ok "safe_dir: a parent folder others may write (not sticky) is not safe"; fi
 chmod 1777 "$sd/open"

@@ -675,20 +675,21 @@ function Test-Sddl([string]$Sd, [int]$Kind, [string[]]$Trusted) {
 }
 
 # True when other local users cannot plant code a job's dotnet would run (Test-Sddl): kind 0 for the folder, dotnet.exe, sdk and the given
-# SDK folder, host, host\fxr and its version folders, shared, shared\Microsoft.NETCore.App and its version folders; kind 1 or 2 for every
-# parent folder. A junction or link anywhere on the path, or anything unreadable, counts as unsafe.
+# SDK folder, host, host\fxr and its version folders, shared with every framework and version folder, packs and sdk-manifests; kind 1 or 2
+# for every parent folder. A junction or link (a folder) anywhere on the path, or anything unreadable, counts as unsafe.
 function Test-SafeFolder([string]$Dir, [string]$Sdk = '') {
   $tr = @(); try { $tr += [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { }
   try { $tr += @((Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop).SID.Value) } catch { }
-  $chk = @(@($Dir, 0), @("$Dir\dotnet.exe", 0), @("$Dir\sdk", 0), @("$Dir\host", 3), @("$Dir\host\fxr", 3), @("$Dir\shared", 3), @("$Dir\shared\Microsoft.NETCore.App", 3))
-  foreach ($x in @(Get-ChildItem -LiteralPath "$Dir\host\fxr" -Directory -ErrorAction SilentlyContinue) + @(Get-ChildItem -LiteralPath "$Dir\shared\Microsoft.NETCore.App" -Directory -ErrorAction SilentlyContinue)) { $chk += , @($x.FullName, 0) }
+  $chk = @(@($Dir, 0), @("$Dir\dotnet.exe", 0), @("$Dir\sdk", 0), @("$Dir\host", 3), @("$Dir\host\fxr", 3), @("$Dir\shared", 3), @("$Dir\packs", 3), @("$Dir\sdk-manifests", 3))
+  $fw = @(Get-ChildItem -LiteralPath "$Dir\shared" -Directory -ErrorAction SilentlyContinue)
+  foreach ($x in @(Get-ChildItem -LiteralPath "$Dir\host\fxr" -Directory -ErrorAction SilentlyContinue) + $fw + @($fw | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue })) { $chk += , @($x.FullName, 0) }
   if ($Sdk) { $chk += , @("$Dir\sdk\$Sdk", 0) }
   $parts = @($Dir -split '\\')
   for ($i = $parts.Count - 2; $i -ge 0; $i--) { if ($i -eq 0) { $chk += , @("$($parts[0])\", 2) } else { $chk += , @(($parts[0..$i] -join '\'), 1) } }
   foreach ($c in $chk) {
     $k = $c[1]; if ($k -eq 3) { if (-not (Test-Path -LiteralPath $c[0])) { continue }; $k = 0 }
     try { $it = Get-Item -LiteralPath $c[0] -Force -ErrorAction Stop; $sd = "$((Get-Acl -LiteralPath $c[0] -ErrorAction Stop).Sddl)" } catch { return $false }
-    if ($k -ne 2 -and ($it.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return $false }
+    if ($k -ne 2 -and $it.PSIsContainer -and ($it.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return $false }   # a junction or link (a compressed file is fine)
     if (-not (Test-Sddl $sd $k $tr)) { return $false } }
   return $true
 }

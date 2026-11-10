@@ -693,14 +693,14 @@ sdk_root() { # $1 = a folder that may hold dotnet: adds its SDK majors to F_DOTN
 }
 
 safe_dir() { # $1 = folder, $2 = its newest SDK: true when other local users cannot plant code a job's dotnet runs. The folder, its
-  # dotnet, sdk and that SDK folder, host, host/fxr and its version folders, shared, shared/Microsoft.NETCore.App and its version folders
+  # dotnet, sdk and that SDK folder, host, host/fxr and its version folders, shared with every framework and version folder, packs, sdk-manifests
   # (each resolved): owned by root or this user, writable by nobody
   # else (a group may write when it is root's or this user's own private group). Every parent folder of the path as given and as
   # resolved: owned by root or this user, and not writable by others or another group unless sticky (then nobody can rename our entry).
   _u=$(id -u 2>/dev/null); _pg=0; [ "$(id -gn 2>/dev/null)" = "$(id -un 2>/dev/null)" ] && _pg=$(id -g 2>/dev/null)
   case "$1" in /*) ;; *) return 1 ;; esac
-  for _x in "$1" "$1/dotnet" "$1/sdk" "$1/sdk/$2" "$1/host" "$1/host/fxr" "$1"/host/fxr/* "$1/shared" "$1/shared/Microsoft.NETCore.App" "$1"/shared/Microsoft.NETCore.App/*; do
-    case "$_x" in "$1/host"*|"$1/shared"*|"$1/sdk"|"$1/sdk/") [ -e "$_x" ] && [ "$_x" != "$1/sdk/" ] || continue ;; esac
+  for _x in "$1" "$1/dotnet" "$1/sdk" "$1/sdk/$2" "$1/host" "$1/host/fxr" "$1"/host/fxr/* "$1/shared" "$1"/shared/* "$1"/shared/*/* "$1/packs" "$1/sdk-manifests"; do
+    case "$_x" in "$1/host"*|"$1/shared"*|"$1/packs"|"$1/sdk-manifests"|"$1/sdk"|"$1/sdk/") [ -e "$_x" ] && [ "$_x" != "$1/sdk/" ] || continue ;; esac
     _x=$(readlink -f -- "$_x" 2>/dev/null) || return 1
     [ -n "$(find "$_x" -maxdepth 0 \( -user 0 -o -user "$_u" \) ! -perm -0002 \( ! -perm -0020 -o -group 0 -o -group "$_pg" \) 2>/dev/null)" ] || return 1
   done
