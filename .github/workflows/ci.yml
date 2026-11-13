@@ -32,6 +32,9 @@ jobs:
       - name: shellcheck
         if: runner.os == 'Linux'
         run: shellcheck --severity=warning lanq-makeready.sh lanq-makeready-fix.sh tests/run.sh tests/fix.sh tests/real-fix.sh
+      - name: setfacl for the real ACL test
+        if: runner.os == 'Linux'
+        run: command -v setfacl >/dev/null || { sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q acl; }
       - name: Tests
         run: sh tests/run.sh
       - name: Fix-script tests, fakes only
@@ -42,6 +45,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: setfacl for the real ACL test
+        run: apk add --no-cache acl
       - name: Tests (busybox sh)
         run: sh tests/run.sh
       - name: Fix-script tests, fakes only (busybox sh)

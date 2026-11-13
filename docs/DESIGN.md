@@ -94,6 +94,17 @@ Toolchains (informational capabilities; feed the `capabilities:` list)
   `/opt/dotnet`, the snap and Homebrew folders, and on Windows `DRIVE:\dotnet` and `DRIVE:\DIR\dotnet` on every fixed
   drive (64 folders per drive, 5 s in all). Report SDK majors; when the newest SDK's folder is not the `dotnet` on PATH,
   WARN `dotnet.path` and suggest `path_prepend` + `env: DOTNET_ROOT`.
+  Only when that folder is safe: other local users must not be able to plant code the job's dotnet runs. Windows reads
+  the owner and DACL. Linux (`safe_dir`): the folder, `dotnet`, `sdk` and the newest SDK folder, `host`, `host/fxr`
+  and its version folders, `shared` and its framework and version folders, `packs` and `sdk-manifests` (each
+  resolved) are owned by root or this user and writable by nobody else, and every parent folder (as given and as
+  resolved) is owned by root or this user and not writable by others unless sticky. "Writable" is judged by `find
+  -perm` and, from 0.4.1, by `acl_ok`: `getfacl -cpn` output split on `:` after `#effective:` is cut off (the
+  effective rights win); a `user:ID` or `group:ID` entry with `w` is open unless the id is 0, this user, or the
+  private group. The owner entries (`user::`, `group::`), `other::` and `mask::` are left to the mode bits (with an ACL
+  the group bits are the mask), and `default:` entries (four fields) are skipped. getfacl failing counts as open;
+  without getfacl the `ls -ld` marker `+` counts as open. On Darwin `acl_ok` is skipped (macOS ACLs are not read, and a
+  Mac gets no entry). Not read: NFSv4 ACLs, SELinux.
   Verdict for "can install .NET 10" from the OS table (see docs/research-summary in README): Win11 OK, Win Server
   2012+ OK, Win10 Enterprise/IoT LTSC listed builds OK, consumer Win10 → WARN "not on .NET 10's supported list; usually
   runs; consider Windows 11 or Linux". Linux: glibc ≥ 2.27 (`ldd --version` / `getconf GNU_LIBC_VERSION`) else FAIL;

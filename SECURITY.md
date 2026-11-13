@@ -25,6 +25,10 @@ are two kinds of script, and each promise below names the script it covers.
   name, user name, profile paths and the network adapter's MAC address before the report is built.
 - **No admin needed.** Checks that need admin are reported as `SKIP`.
 - **Bounded.** Every external command has a time limit; no whole-disk walks.
+- **Suggests only safe toolchain folders.** `path_prepend` is suggested only for a .NET folder other local users
+  cannot write: the owner and DACL on Windows; on Linux the owner, the mode bits and (0.4.1+) the POSIX ACL read with
+  `getfacl`, or, without it, the `ls` ACL marker (`+`). NFSv4 ACLs and SELinux are not read; on macOS no entry is
+  suggested.
 
 ### The fix script: `lanq-makeready-fix.ps1` / `lanq-makeready-fix.sh` (0.4.0+)
 

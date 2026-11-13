@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.1 (2026-11-13)
+
+### Security
+
+- The Linux safe-folder check (before `path_prepend` is suggested for a .NET SDK outside PATH) now also reads POSIX
+  ACLs. Before, it judged the mode bits only, and with an ACL the group bits are the mask, so a folder owned by
+  `root:root` with `drwxrwxr-x+` and a `user:<other>:rwx` entry passed. Now, with `getfacl` installed, a named
+  `user:` or `group:` entry that can write (its effective rights, under the mask) makes the folder open unless it is
+  root, you, or your own private group. Without `getfacl`, the `ls` ACL marker (`+`) makes it open. getfacl failing
+  makes it open. `default:` entries do not count, and a sticky parent folder (like `/tmp`) is still fine. On macOS the
+  check is skipped (macOS ACLs are not read; a Mac never gets a machines.yml entry). NFSv4 ACLs and SELinux are not
+  read.
+- The scanner stays read-only: `getfacl` and `ls` are on its test-time command allow-list, and `setfacl` is not.
+- The fix scripts are unchanged apart from the version.
+
 ## 0.4.0 (2026-11-13)
 
 - **Fix mode**, in new, separate scripts: `lanq-makeready-fix.ps1` (Windows PowerShell 5.1 and PowerShell 7) and

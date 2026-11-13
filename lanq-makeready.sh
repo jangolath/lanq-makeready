@@ -8,7 +8,7 @@
 #        --out FILE also saves the human report to FILE (a new file only: an existing file is never overwritten)
 # Exit:  0 = worker-ready, 1 = not ready, 2 = bad arguments.
 
-TOOL_VERSION=0.4.0
+TOOL_VERSION=0.4.1
 SEP=$(printf '\037')
 CHECKS=""
 
@@ -692,23 +692,38 @@ sdk_root() { # $1 = a folder that may hold dotnet: adds its SDK majors to F_DOTN
   return 0
 }
 
+acl_ok() { # $1 = folder: false when a POSIX ACL user:ID or group:ID entry can write (its #effective: rights win) and ID is not 0, this user (_u) or the private
+  # group (_pg); also when getfacl fails, or without getfacl when ls shows the ACL marker (+). user::, group::, other:: and mask:: are left to the mode bits,
+  # default: entries (4 fields) do not count. Skipped on macOS (no getfacl; a Mac gets no entry). NFSv4 ACLs and SELinux are not read.
+  [ "$(uname -s)" = Darwin ] && return 0
+  if command -v getfacl >/dev/null 2>&1; then
+    _acl=$(getfacl -cpn -- "$1" 2>/dev/null) || return 1
+    printf '%s\n' "$_acl" | awk -v u="$_u" -v g="$_pg" '{ e = $0; eff = ""; i = index(e, "#effective:"); if (i) { eff = substr(e, i + 11); e = substr(e, 1, i - 1) } gsub(/[ \t]+$/, "", e); gsub(/[ \t]/, "", eff); n = split(e, f, ":"); if (n != 3) next; p = (eff != "") ? eff : f[3]; if (p !~ /w/ || f[2] == "") next; if (f[1] == "user" && f[2] != 0 && f[2] != u) bad = 1; if (f[1] == "group" && f[2] != 0 && f[2] != g) bad = 1 } END { exit bad }'
+  else
+    case "$(ls -ld -- "$1" 2>/dev/null | cut -c11)" in +) return 1 ;; esac
+  fi
+}
+
 safe_dir() { # $1 = folder, $2 = its newest SDK: true when other local users cannot plant code a job's dotnet runs. The folder, its
   # dotnet, sdk and that SDK folder, host, host/fxr and its version folders, shared with every framework and version folder, packs, sdk-manifests
   # (each resolved): owned by root or this user, writable by nobody
-  # else (a group may write when it is root's or this user's own private group). Every parent folder of the path as given and as
-  # resolved: owned by root or this user, and not writable by others or another group unless sticky (then nobody can rename our entry).
+  # else (a group may write when it is root's or this user's own private group), by the mode bits and by the POSIX ACL (acl_ok). Every parent folder of
+  # the path as given and as resolved: owned by root or this user, and not writable by others or another group (mode or ACL) unless sticky (then nobody
+  # can rename our entry).
   _u=$(id -u 2>/dev/null); _pg=0; [ "$(id -gn 2>/dev/null)" = "$(id -un 2>/dev/null)" ] && _pg=$(id -g 2>/dev/null)
   case "$1" in /*) ;; *) return 1 ;; esac
   for _x in "$1" "$1/dotnet" "$1/sdk" "$1/sdk/$2" "$1/host" "$1/host/fxr" "$1"/host/fxr/* "$1/shared" "$1"/shared/* "$1"/shared/*/* "$1/packs" "$1/sdk-manifests"; do
     case "$_x" in "$1/host"*|"$1/shared"*|"$1/packs"|"$1/sdk-manifests"|"$1/sdk"|"$1/sdk/") [ -e "$_x" ] && [ "$_x" != "$1/sdk/" ] || continue ;; esac
     _x=$(readlink -f -- "$_x" 2>/dev/null) || return 1
     [ -n "$(find "$_x" -maxdepth 0 \( -user 0 -o -user "$_u" \) ! -perm -0002 \( ! -perm -0020 -o -group 0 -o -group "$_pg" \) 2>/dev/null)" ] || return 1
+    acl_ok "$_x" || return 1
   done
   _r=$(readlink -f -- "$1" 2>/dev/null) || return 1
   for _a in "$1" "$_r"; do
     while _n=${_a%/*}; [ "$_n" != "$_a" ] && [ -n "$_n" ]; do
       _a=$_n
       [ -n "$(find "$_a" -maxdepth 0 \( -user 0 -o -user "$_u" \) \( -type l -o -perm -1000 -o \( ! -perm -0002 \( ! -perm -0020 -o -group 0 -o -group "$_pg" \) \) \) 2>/dev/null)" ] || return 1
+      [ -L "$_a" ] || [ -n "$(find "$_a" -maxdepth 0 -perm -1000 2>/dev/null)" ] || acl_ok "$_a" || return 1
     done
   done
   return 0
