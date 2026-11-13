@@ -402,6 +402,160 @@ eq "$F_DOTNET_DIR" "" "sdk_root: a relative folder is never searched"
 rm -rf rel
 if safe_dir rel 10.0.1; then bad "safe_dir relative" safe unsafe; else ok "safe_dir: a relative folder is not safe (and returns at once)"; fi
 
+echo "safe_dir: POSIX ACLs (fake getfacl, ls and uname on PATH)"
+ab=${TMPDIR:-/tmp}/lanq-acl.$$
+mkdir -p "$ab/with" "$ab/without"
+for _t in awk cut sh sleep timeout gtimeout; do _p=$(command -v "$_t") || continue; for _b in with without; do printf '#!/bin/sh\nexec "%s" "$@"\n' "$_p" > "$ab/$_b/$_t"; done; done
+for _b in with without; do
+  printf '#!/bin/sh\n[ "$1" = -s ] && echo "${FAKE_UNAME:-Linux}"\nexit 0\n' > "$ab/$_b/uname"
+  # fake ls: FAKE_LS (a GNU-style line when unset; may be empty), FAKE_LS_RC its exit code, FAKE_LS_HELP for --help
+  printf '#!/bin/sh\nif [ "$1" = --help ]; then printf "%%s\\n" "${FAKE_LS_HELP:-Usage: ls [OPTION]... [FILE]...}"; exit 0; fi\nprintf "%%s\\n" "${FAKE_LS-drwxr-xr-x  2 root root 4096 Jan  1 00:00 x}"\nexit "${FAKE_LS_RC:-0}"\n' > "$ab/$_b/ls"
+done
+# fake getfacl: only the exact options the scanner uses (else exit 9); FAKE_ACL for FAKE_ACL_FOR (every folder when unset), plain mode
+# entries for the others; FAKE_ACL_RC its exit code
+printf '#!/bin/sh\n[ "$1" = -cpn ] && [ "$2" = -- ] || exit 9\nfor _a in "$@"; do _l=$_a; done\nif [ -z "$FAKE_ACL_FOR" ] || [ "$_l" = "$FAKE_ACL_FOR" ]; then printf "%%s\\n" "$FAKE_ACL"; else printf "user::rwx\\ngroup::r-x\\nother::r-x\\n"; fi\nexit "${FAKE_ACL_RC:-0}"\n' > "$ab/with/getfacl"
+chmod +x "$ab/with/"* "$ab/without/"*
+# acl_case NAME EXPECT(safe|open) BIN(with|without) ACL: acl_ok with only the fakes on PATH, as uid 1000 with private group 1000.
+# x_uname, x_ls, x_lsrc, x_lshelp and x_rc tune the fakes for one case.
+acl_case() {
+  # shellcheck disable=SC2123 # a PATH with only the fakes, on purpose
+  if ( PATH=$ab/$3; FAKE_ACL=$4; FAKE_UNAME=${x_uname:-Linux}; FAKE_ACL_RC=${x_rc:-0}; FAKE_LS_RC=${x_lsrc:-0}; FAKE_LS_HELP=${x_lshelp:-}; FAKE_ACL_FOR=""
+       export FAKE_ACL FAKE_UNAME FAKE_ACL_RC FAKE_LS_RC FAKE_LS_HELP FAKE_ACL_FOR
+       if [ -n "${x_ls+set}" ]; then FAKE_LS=$x_ls; export FAKE_LS; else unset FAKE_LS; fi
+       _u=1000; _pg=1000; acl_ok /opt/dotnet ); then _got=safe; else _got=open; fi
+  eq "$_got" "$2" "$1"; unset x_uname x_ls x_lsrc x_lshelp x_rc
+}
+tab=$(printf '\t')
+acl_case "PlainModesUnchanged: base entries only" safe with "user::rwx
+group::r-x
+other::r-x"
+x_ls="drwxr-xr-x  2 root root 4096 Jan  1 00:00 x"; acl_case "PlainModesUnchanged: no getfacl and no ACL marker" safe without ""
+acl_case "NamedUserWithWriteIsOpen" open with "user::rwx
+user:1001:rwx
+group::r-x
+mask::rwx
+other::r-x"
+acl_case "NamedUserWithReadOnlyIsFine" safe with "user::rwx
+user:1001:r-x
+group::r-x
+mask::r-x
+other::r-x"
+acl_case "NamedGroupWithWriteIsOpen (the mask lets it write)" open with "user::rwx
+group::r-x
+group:1002:rwx
+mask::rwx
+other::r-x"
+acl_case "MaskWithoutWriteStaysSafe (#effective:r-x)" safe with "user::rwx
+user:1001:rwx${tab}${tab}#effective:r-x
+group::r-x
+group:1002:rwx${tab}${tab}#effective:r-x
+mask::r-x
+other::r-x"
+acl_case "MaskWithWriteKeepsANamedEntryOpen (#effective:rw-)" open with "user::rwx
+user:1001:rwx${tab}#effective:rw-
+group::r-x
+mask::rw-
+other::r-x"
+acl_case "TrustedNamedEntriesAreFine (root, this user, the private group)" safe with "user::rwx
+user:0:rwx
+user:1000:rwx
+group::r-x
+group:0:rwx
+group:1000:rwx
+mask::rwx
+other::r-x"
+acl_case "OwnerEntriesUserColonColonAreNotParsedAsNamed" safe with "user::rwx
+group::rwx
+mask::rwx
+other::r-x"
+acl_case "DefaultUserWithWriteIsOpen (new folders would inherit it)" open with "user::rwx
+group::r-x
+other::r-x
+default:user::rwx
+default:user:1001:rwx
+default:group::r-x
+default:mask::rwx
+default:other::r-x"
+acl_case "DefaultGroupWithWriteIsOpen (raw rights, the default mask is not applied)" open with "user::rwx
+group::r-x
+other::r-x
+default:user::rwx
+default:group::r-x
+default:group:1002:rwx${tab}#effective:r-x
+default:mask::r-x
+default:other::r-x"
+acl_case "DefaultEntriesTrustedOrReadOnlyAreFine" safe with "user::rwx
+group::r-x
+other::r-x
+default:user::rwx
+default:user:0:rwx
+default:user:1000:rwx
+default:user:1001:r-x
+default:group::rwx
+default:group:1000:rwx
+default:mask::rwx
+default:other::r-x"
+x_rc=1; acl_case "getfacl failing counts as open" open with "user::rwx
+group::r-x
+other::r-x"
+acl_case "EmptyGetfaclOutputIsOpen" open with ""
+acl_case "UnrecognisedGetfaclOutputIsOpen (no user:: line)" open with "getfacl: something else
+nothing: here"
+x_ls="drwxrwxr-x+ 2 root root 4096 Jan  1 00:00 x"; acl_case "AclMarkerWithoutGetfaclIsOpen" open without ""
+x_lsrc=2; acl_case "LsFailingWithoutGetfaclIsOpen" open without ""
+x_ls=""; acl_case "LsEmptyOutputWithoutGetfaclIsOpen (no marker column)" open without ""
+x_ls="drwxrwxr-x 2 root root 4096 Jan  1 00:00 x"; x_lshelp="BusyBox v1.36.1 (2024-01-01) multi-call binary."
+acl_case "BusyboxLsGroupWriteIsOpen (no marker there; group write is the mask)" open without ""
+x_ls="drwxr-xr-x 2 root root 4096 Jan  1 00:00 x"; x_lshelp="BusyBox v1.36.1 (2024-01-01) multi-call binary."
+acl_case "BusyboxLsWithoutGroupWriteIsFine" safe without ""
+x_ls="drwxrwxr-x  2 root root 4096 Jan  1 00:00 x"; acl_case "GNU ls group write without a marker: left to the mode bits" safe without ""
+x_uname=Darwin; acl_case "DarwinSkipsTheAclCheck (named write ACL)" safe with "user::rwx
+user:1001:rwx
+mask::rwx
+other::r-x"
+x_uname=Darwin; x_ls="drwxr-xr-x+ 2 me staff 64 Jan  1 00:00 x"; acl_case "DarwinSkipsTheAclCheck (ACL marker, no getfacl)" safe without ""
+# through safe_dir, on real folders (skipped where the file system has no POSIX modes, such as NTFS under Git Bash; a failure on Linux CI)
+real_skip() { # $1 why
+  if [ "${CI:-}" = true ] && [ "$(uname -s)" = Linux ]; then bad "RealAclOnLinux must run on Linux CI ($1)" skipped ran; else echo "  skip RealAclOnLinux ($1)"; fi
+}
+ad=$(cd "${TMPDIR:-/tmp}" && pwd -P)/lanq-acld.$$
+mkdir -p "$ad/p/d/sdk/10.0.102"; printf '#!/bin/sh\n' > "$ad/p/d/dotnet"; chmod 755 "$ad" "$ad/p" "$ad/p/d" "$ad/p/d/dotnet" "$ad/p/d/sdk" "$ad/p/d/sdk/10.0.102"
+_named="user::rwx
+user:65534:rwx
+group::r-x
+mask::rwx
+other::r-x"
+sd_acl() { # $1 the folder the fake ACL is on, $2 the ACL (default: a named-user write): safe | open
+  if ( PATH=$ab/with:$PATH; FAKE_ACL=${2:-$_named}; FAKE_ACL_FOR=$1; FAKE_UNAME=Linux; export FAKE_ACL FAKE_ACL_FOR FAKE_UNAME; safe_dir "$ad/p/d" 10.0.102 ); then echo safe; else echo open; fi
+}
+chmod 1777 "$ad/p"; _sticky=$(find "$ad/p" -maxdepth 0 -perm -1002 2>/dev/null); chmod 755 "$ad/p"
+if [ -n "$_sticky" ] && [ "$(sd_acl /none)" = safe ]; then
+  eq "$(sd_acl "$ad/p/d/sdk/10.0.102")" open "safe_dir: a named-user write ACL on the SDK folder is not safe"
+  eq "$(sd_acl "$ad/p")" open "safe_dir: a named-user write ACL on a parent folder is not safe"
+  eq "$(sd_acl "$ad/p/d/sdk" "user::rwx
+group::r-x
+other::r-x
+default:user:65534:rwx")" open "safe_dir: a default ACL that lets another user write on the sdk folder is not safe"
+  chmod 1777 "$ad/p"
+  eq "$(sd_acl "$ad/p")" safe "StickyParentWithAclStillPasses"
+  chmod 755 "$ad/p"
+  if ! command -v setfacl >/dev/null 2>&1 || [ "$(uname -s)" != Linux ]; then real_skip "no setfacl, or not Linux"
+  elif ! setfacl -m u:65534:rwx "$ad/p/d/sdk" 2>/dev/null; then real_skip "no ACL support on this file system"
+  else
+    if safe_dir "$ad/p/d" 10.0.102; then bad "RealAclOnLinux: named-user write" safe unsafe; else ok "RealAclOnLinux: a real named-user write ACL (setfacl) is not safe"; fi
+    setfacl -n -m m::r-x "$ad/p/d/sdk" 2>/dev/null
+    if safe_dir "$ad/p/d" 10.0.102; then ok "RealAclOnLinux: the same entry under a r-x mask is fine"; else bad "RealAclOnLinux: masked entry" unsafe safe; fi
+    setfacl -b "$ad/p/d/sdk"; setfacl -d -m u:65534:rwx "$ad/p/d/sdk"
+    if safe_dir "$ad/p/d" 10.0.102; then bad "RealAclOnLinux: default ACL write" safe unsafe; else ok "RealAclOnLinux: a real default ACL (setfacl -d) that lets another user write is not safe"; fi
+    setfacl -b "$ad/p/d/sdk"; setfacl -m "u:$(id -u):rwx" "$ad/p/d/sdk"
+    if ( _u=$(id -u); _pg=0; acl_ok "$ad/p/d/sdk" ); then ok "RealAclOnLinux: an entry for this uid stays safe (getfacl -n prints ids, not names)"; else bad "RealAclOnLinux: trusted entry" open safe; fi
+  fi
+else
+  echo "  skip safe_dir ACL tests on real folders (no POSIX modes here, such as NTFS under Git Bash)"
+  real_skip "no POSIX modes"
+fi
+rm -rf "$ab" "$ad"
+
 echo "AuthorizedKeysFile from sshd_config"
 cfgB='AuthorizedKeysFile .ssh/authorized_keys
 Match User build*,!buildx
@@ -517,7 +671,7 @@ cmd_words() {
       }
     }' | sort -u
 }
-allowed=" printf echo awk sed tr cut head wc grep find cat command readlink uname hostname id df getconf ldd sw_vers sysctl vm_stat pmset launchctl pgrep systemctl gsettings xcode-select docker git tar gzip du date sleep kill wait timeout gtimeout sh exec cd exit return export eval read test /usr/libexec/java_home type shift sort true false break continue fi done esac then else elif do in while for if case until [ ]] "
+allowed=" printf echo awk sed tr cut head wc grep find cat command readlink uname getfacl ls hostname id df getconf ldd sw_vers sysctl vm_stat pmset launchctl pgrep systemctl gsettings xcode-select docker git tar gzip du date sleep kill wait timeout gtimeout sh exec cd exit return export eval read test /usr/libexec/java_home type shift sort true false break continue fi done esac then else elif do in while for if case until [ ]] "
 forbidden=" sudo chmod chown apk apt apt-get dnf yum rm mv cp ln mkdir touch tee curl wget nc ssh scp mount dd su install useradd passwd iex bash "
 # guard_check FILE: prints one line per violation (nothing when clean)
 guard_check() {
@@ -572,6 +726,8 @@ mutant "eval with \$(" 'eval "y=$(id)"'
 mutant "systemctl restart" "systemctl restart ssh"
 mutant "systemctl --user mask" "systemctl --user mask foo"
 mutant "git config write" "git config user.name x"
+mutant "setfacl (an ACL write)" "setfacl -m u:65534:rwx /opt/dotnet"
+mutant "getfacl writing a file" "getfacl -cpn /opt/dotnet > /tmp/acl"
 mutant "redirect to a file" "echo hi > /tmp/f"
 mutant "sudo in text" "echo 'sudo ls'"
 mutant "rm -rf" "rm -rf /tmp/x"
@@ -589,7 +745,8 @@ eq "$(grep -cE '(^|[^A-Za-z_])rm[[:space:]]' "$root/lanq-makeready.sh" | tr -d '
 eq "$([ -e "$root/SHA256SUMS" ] && echo committed || echo none)" none "SHA256SUMS is produced by the release workflow, never committed (a stale copy would mislead)"
 eq "$(grep -cE -- '-(fprint|fprintf|fprint0|fls|delete|exec|execdir|ok|okdir)([[:space:]]|$)' "$root/lanq-makeready.sh" | tr -d ' ')" 0 "no find action that writes, deletes or runs anything (-fprint, -fls, -delete, -exec, -ok)"
 lines=$(wc -l < "$root/lanq-makeready.sh" | tr -d ' ')
-if [ "$lines" -le 980 ]; then ok "script is $lines lines (max 980)"; else bad "line count" "$lines" "<=980"; fi
+# the cap keeps the script short enough to read before running it; raised from 980 to 1050 in 0.4.1 for the POSIX ACL check
+if [ "$lines" -le 1050 ]; then ok "script is $lines lines (max 1050)"; else bad "line count" "$lines" "<=1050"; fi
 
 echo "smoke: real run of the script on this machine"
 out=${TMPDIR:-/tmp}/lanq-makeready-smoke.$$.json

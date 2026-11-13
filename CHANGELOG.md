@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.1 (2026-11-13)
+
+### Security
+
+- The Linux safe-folder check (before `path_prepend` is suggested for a .NET SDK outside PATH) now also reads POSIX
+  ACLs. Before, it judged the mode bits only, and with an ACL the group bits are the mask, so a folder owned by
+  `root:root` with `drwxrwxr-x+` and a `user:<other>:rwx` entry passed. Now, with `getfacl` installed, a named
+  `user:` or `group:` entry that can write (its effective rights, under the mask) makes the folder open unless it is
+  root, you, or your own private group. A `default:user:` or `default:group:` entry that can write (raw rights) makes
+  it open too, since the next SDK or shared framework folder inherits it. getfacl failing or timing out, or output
+  with no `user::` line, makes it open. A sticky parent folder (like `/tmp`) is still fine.
+- Without `getfacl`: the `ls` ACL marker (`+`), `ls` failing, or a line without the marker column makes the folder
+  open. busybox `ls` shows no marker, so there any group write makes it open (with an ACL the group bits are the
+  mask). An ACL with only `default:` entries is not seen on busybox without getfacl: install the `acl` package.
+- `getfacl` and `ls` run under the scanner's time limit (`run_t`, 5 s). SECURITY.md's "Bounded" now says which quick
+  local reads are not wrapped.
+- On macOS the check is skipped (macOS ACLs are not read; a Mac never gets a machines.yml entry). NFSv4 ACLs and
+  SELinux are not read. Only folders and `dotnet` itself are checked, not the files inside them (documented; as
+  before).
+- The scanner's line cap in the tests is raised from 980 to 1050 for this check.
+- The scanner stays read-only: `getfacl` and `ls` are on its test-time command allow-list, and `setfacl` is not.
+- The fix scripts are unchanged apart from the version.
+
 ## 0.4.0 (2026-11-13)
 
 - **Fix mode**, in new, separate scripts: `lanq-makeready-fix.ps1` (Windows PowerShell 5.1 and PowerShell 7) and

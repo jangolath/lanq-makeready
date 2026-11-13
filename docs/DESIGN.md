@@ -28,8 +28,9 @@ Then it prints a ready-to-paste `machines.yml` entry for LanQueue, and optionall
 - **No dependencies.** Windows: Windows PowerShell 5.1 built-ins only (no modules from the gallery, no .NET install).
   Linux/macOS: POSIX `sh` + coreutils/procfs; optional tools (`docker`, `git`, `systemctl`, `smartctl`) are probed
   with `command -v` and their absence is itself a finding.
-- **Bounded.** Every external command call has a timeout (Windows: jobs with `Wait-Job -Timeout`; sh: `timeout` when
-  present). Never walks the whole disk: folder sizes only for a fixed list of known temp/cache folders, with a cap.
+- **Bounded.** Every probe of a tool, and every ACL read (`getfacl`, `ls`), has a timeout (Windows: jobs with
+  `Wait-Job -Timeout`; sh: `run_t`, with `timeout` when present). Quick local reads of one path (`find -maxdepth 0`,
+  `readlink`, `id`, `uname`) are not wrapped. Never walks the whole disk: folder sizes only for a fixed list of known temp/cache folders, with a cap.
 - **Honest verdicts.** Three words with fixed meanings: `OK`, `WARN` (works, but degraded or unsupported-but-may-run),
   `FAIL` (will not work for that role). Plus `SKIP` (could not check, with reason).
 - Small: at most 900 lines per script (a test enforces it).
@@ -94,6 +95,26 @@ Toolchains (informational capabilities; feed the `capabilities:` list)
   `/opt/dotnet`, the snap and Homebrew folders, and on Windows `DRIVE:\dotnet` and `DRIVE:\DIR\dotnet` on every fixed
   drive (64 folders per drive, 5 s in all). Report SDK majors; when the newest SDK's folder is not the `dotnet` on PATH,
   WARN `dotnet.path` and suggest `path_prepend` + `env: DOTNET_ROOT`.
+  Only when that folder is safe: other local users must not be able to plant code the job's dotnet runs. Windows reads
+  the owner and DACL. Linux (`safe_dir`): the folder, `dotnet`, `sdk` and the newest SDK folder, `host`, `host/fxr`
+  and its version folders, `shared` and its framework and version folders, `packs` and `sdk-manifests` (each
+  resolved) are owned by root or this user and writable by nobody else, and every parent folder (as given and as
+  resolved) is owned by root or this user and not writable by others unless sticky. "Writable" is judged by `find
+  -perm` and, from 0.4.1, by `acl_ok`, which reads the globals `_u` (`id -u`) and `_pg` (`id -g` when the primary
+  group's name is the user's name, else 0) that `safe_dir` sets:
+  - `getfacl -cpn` (under `run_t 5`) output is split on `:` after `#effective:` is cut off. A `user:ID` or `group:ID`
+    entry (3 fields) is open when its effective rights (under the mask) contain `w`; a `default:user:ID` or
+    `default:group:ID` entry (4 fields) is open when its raw rights contain `w`, since new folders (the next SDK, a new
+    shared framework) inherit it. Trusted ids: 0, `_u`, `_pg`.
+  - The owner entries (`user::`, `group::`), `other::` and `mask::` are left to the mode bits (with an ACL the group
+    bits are the mask), and so are their `default:` forms.
+  - getfacl failing or timing out, and output with no `user::` line (empty or unrecognised), count as open.
+  - Without getfacl, `ls -ld` (under `run_t 5`) failing, a line too short to have the marker column, or the marker `+`
+    count as open. busybox `ls` (its `--help` says BusyBox) shows no marker, so there group write (`?????w`) counts as
+    open even for root's or the private group: with an ACL that is the mask.
+  - On Darwin `acl_ok` is skipped (macOS ACLs are not read, and a Mac gets no entry). Not read: NFSv4 ACLs, SELinux.
+  - Limit (since 0.3.0): only folders and `dotnet` itself are checked. Files inside them (`libhostfxr.so`, the SDK's
+    `.dll` files) are not, so a file another user may write in an otherwise safe folder is not seen.
   Verdict for "can install .NET 10" from the OS table (see docs/research-summary in README): Win11 OK, Win Server
   2012+ OK, Win10 Enterprise/IoT LTSC listed builds OK, consumer Win10 → WARN "not on .NET 10's supported list; usually
   runs; consider Windows 11 or Linux". Linux: glibc ≥ 2.27 (`ldd --version` / `getconf GNU_LIBC_VERSION`) else FAIL;

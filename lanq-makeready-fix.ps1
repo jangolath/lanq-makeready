@@ -27,7 +27,7 @@
 param([switch]$WhatIf, [switch]$List, [switch]$Help, [Parameter(ValueFromRemainingArguments = $true)][string[]]$Extra)
 
 $FixInvocation = $MyInvocation
-$ToolVersion = '0.4.0'
+$ToolVersion = '0.4.1'
 $RecordSchema = 'lanq-makeready-fix/v1'
 $FixIds = @('ssh.start', 'ssh.auto', 'power.sleep', 'longpaths.on', 'git.longpaths', 'ssh.aclkeys')
 # check id in the scanner's report, and what is wrong

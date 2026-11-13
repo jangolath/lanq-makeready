@@ -206,7 +206,7 @@ The snippet follows LanQueue's registry schema (`machines.example.yml`, [docs/WO
 | `max_jobs` | from RAM: under 6 GB `1`, 6-11 GB `2`, 12-23 GB `3` (`4` with 8+ logical CPUs), 24 GB and more `6` (`8` with 16+; 24-31 GB counts as this top band), never more than the logical CPUs |
 | `min_free_mem_gb` | `1.5` under 6 GB, else `2`: headroom for one more job; LanQueue starts no new job while less is free |
 | `wake` | the wired adapter's MAC; active only when the `wol` check is OK, otherwise commented out (`<mac>` under `-Redact`) |
-| `path_prepend`, `env: DOTNET_ROOT` | only when the newest .NET SDK is in a folder that is not the `dotnet` on PATH (for example a private `D:/build/dotnet`): that folder, so jobs use that SDK (LanQueue 0.8+). The search covers the usual install folders, the registry or `install_location` files, and on Windows `DRIVE:\dotnet` and `DRIVE:\DIR\dotnet` on every fixed drive |
+| `path_prepend`, `env: DOTNET_ROOT` | only when the newest .NET SDK is in a folder that is not the `dotnet` on PATH (for example a private `D:/build/dotnet`): that folder, so jobs use that SDK (LanQueue 0.8+). The search covers the usual install folders, the registry or `install_location` files, and on Windows `DRIVE:\dotnet` and `DRIVE:\DIR\dotnet` on every fixed drive. Left out (with a note) when other local users could plant code there: see [the safe-folder check](#safety-details) |
 | `transfer` | `git` when git is present; `archive` when git is missing but a usable tar is (Windows bsdtar, GNU tar or bsdtar plus gzip; busybox tar is refused, as LanQueue does) |
 | `allowed_hours` | from `-Hours` (`"HH:mm-HH:mm"`, the worker's own clock); otherwise a commented overnight example |
 
@@ -512,6 +512,17 @@ Never run those on a PC you care about.
 - The guard tests parse the PowerShell with its AST and allow only a fixed list of read-only commands and (receiver, method) pairs,
   and check the sh script word by word against a command allow-list. **These guards are a test-time tripwire against accidental
   mutating code, not a sandbox.** The read-only guarantee rests on reading the scripts (they are short on purpose) and on code review.
+- **The safe-folder check** (before `path_prepend` is suggested). Windows: the folder's owner and DACL. Linux: the SDK
+  folder and the folders its `dotnet` loads from must be owned by root or you and writable by nobody else, by the mode
+  bits and, from 0.4.1, by the POSIX ACL (`getfacl`, when installed): a named `user:` or `group:` entry that can
+  write (its effective rights, under the mask) makes the folder open, and so does a `default:user:` or
+  `default:group:` entry that can write (new folders, such as the next SDK, inherit it), unless it is root, you, or
+  your own private group. Output getfacl cannot give (an error, a time-out, or no `user::` line) also counts as open.
+  Without `getfacl`, the `ls` ACL marker (`+`), or `ls` failing, makes the folder open; busybox `ls` shows no marker,
+  so there any group write makes it open (with an ACL the group bits are the mask); an ACL with only `default:`
+  entries is not seen there (install the `acl` package). Parent folders must pass the same
+  test unless they are sticky (like `/tmp`). Only folders and `dotnet` itself are checked, not the files inside them.
+  NFSv4 ACLs and SELinux are not read, and on macOS ACLs are not read (a Mac never gets a machines.yml entry).
 - `~/.docker/config.json` (which can hold registry credentials) is never read; the Docker context comes from `DOCKER_CONTEXT` or `docker context show`.
 
 ## Known limits

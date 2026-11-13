@@ -24,7 +24,14 @@ are two kinds of script, and each promise below names the script it covers.
 - **No secrets.** It never reads private keys or `~/.docker/config.json`. `-Redact` / `--redact` removes host
   name, user name, profile paths and the network adapter's MAC address before the report is built.
 - **No admin needed.** Checks that need admin are reported as `SKIP`.
-- **Bounded.** Every external command has a time limit; no whole-disk walks.
+- **Bounded.** Every tool probe and every ACL read (`getfacl`, `ls`) has a time limit. Quick local reads of one file or
+  folder (`find -maxdepth 0`, `readlink`, `id`, `uname`, `sed` on a config file) do not. No whole-disk walks.
+- **Suggests only safe toolchain folders.** `path_prepend` is suggested only for a .NET folder other local users
+  cannot write: the owner and DACL on Windows; on Linux the owner, the mode bits and (0.4.1+) the POSIX ACL read with
+  `getfacl` (access and default entries), or, without it, the `ls` ACL marker (`+`; on busybox, any group write).
+  Anything the check cannot read counts as open, with one limit: on busybox without getfacl, an ACL with only
+  `default:` entries is not seen (install the `acl` package). Only folders and `dotnet` itself are checked, not the files in them.
+  NFSv4 ACLs and SELinux are not read; on macOS no entry is suggested.
 
 ### The fix script: `lanq-makeready-fix.ps1` / `lanq-makeready-fix.sh` (0.4.0+)
 
