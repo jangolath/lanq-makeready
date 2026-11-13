@@ -470,7 +470,8 @@ $AstNs = 'System.Management.Automation.Language'
 foreach ($f in @('lanq-makeready.ps1', 'lanq-makeready.sh')) {
   $text = Get-Content -LiteralPath (Join-Path $root $f) -Raw
   Assert-True (-not ($text -match '[^\x00-\x7F]')) "$f is pure ASCII"
-  Assert-True (@(Get-Content -LiteralPath (Join-Path $root $f)).Count -le 980) "$f is at most 980 lines"
+  # the cap keeps each script short enough to read before running it; raised from 980 to 1050 in 0.4.1 (the sh script's POSIX ACL check)
+  Assert-True (@(Get-Content -LiteralPath (Join-Path $root $f)).Count -le 1050) "$f is at most 1050 lines"
 }
 $psPath = Join-Path $root 'lanq-makeready.ps1'
 $tokens = $null; $perr = $null

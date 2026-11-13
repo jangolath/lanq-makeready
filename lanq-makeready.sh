@@ -692,15 +692,26 @@ sdk_root() { # $1 = a folder that may hold dotnet: adds its SDK majors to F_DOTN
   return 0
 }
 
-acl_ok() { # $1 = folder: false when a POSIX ACL user:ID or group:ID entry can write (its #effective: rights win) and ID is not 0, this user (_u) or the private
-  # group (_pg); also when getfacl fails, or without getfacl when ls shows the ACL marker (+). user::, group::, other:: and mask:: are left to the mode bits,
-  # default: entries (4 fields) do not count. Skipped on macOS (no getfacl; a Mac gets no entry). NFSv4 ACLs and SELinux are not read.
+acl_ok() { # $1 = folder: false (open) when other users could write there by POSIX ACL. Uses the globals _u (this uid) and _pg (the private gid, or 0)
+  # set by safe_dir. Trusted ids: 0, _u, _pg. Not read on macOS (no getfacl; a Mac never gets an entry). NFSv4 ACLs and SELinux are not read.
   [ "$(uname -s)" = Darwin ] && return 0
   if command -v getfacl >/dev/null 2>&1; then
-    _acl=$(getfacl -cpn -- "$1" 2>/dev/null) || return 1
-    printf '%s\n' "$_acl" | awk -v u="$_u" -v g="$_pg" '{ e = $0; eff = ""; i = index(e, "#effective:"); if (i) { eff = substr(e, i + 11); e = substr(e, 1, i - 1) } gsub(/[ \t]+$/, "", e); gsub(/[ \t]/, "", eff); n = split(e, f, ":"); if (n != 3) next; p = (eff != "") ? eff : f[3]; if (p !~ /w/ || f[2] == "") next; if (f[1] == "user" && f[2] != 0 && f[2] != u) bad = 1; if (f[1] == "group" && f[2] != 0 && f[2] != g) bad = 1 } END { exit bad }'
-  else
-    case "$(ls -ld -- "$1" 2>/dev/null | cut -c11)" in +) return 1 ;; esac
+    _acl=$(run_t 5 getfacl -cpn -- "$1" 2>/dev/null) || return 1 # getfacl failing or timing out: open
+    # Each line is split on ":" once "#effective:" is cut off. user:ID / group:ID: the effective rights (under the mask) count. default:user:ID /
+    # default:group:ID: the raw rights count (new folders inherit them). user::, group::, other:: and mask:: are left to the mode bits.
+    _aw='{ e = $0; eff = ""; i = index(e, "#effective:"); if (i) { eff = substr(e, i + 11); e = substr(e, 1, i - 1) }'
+    _aw=$_aw' gsub(/[ \t]+$/, "", e); gsub(/[ \t]/, "", eff); n = split(e, f, ":");'
+    _aw=$_aw' if (n == 3 && f[1] == "user" && f[2] == "") seen = 1;'
+    _aw=$_aw' if (n == 4 && f[1] == "default") { t = f[2]; id = f[3]; p = f[4] } else if (n == 3) { t = f[1]; id = f[2]; p = (eff != "") ? eff : f[3] } else next;'
+    _aw=$_aw' if (p !~ /w/ || id == "" || id == 0) next;'
+    _aw=$_aw' if ((t == "user" && id != u) || (t == "group" && id != g)) bad = 1 }'
+    _aw=$_aw' END { exit (bad || !seen) }' # no user:: line: empty or unknown output, open
+    printf '%s\n' "$_acl" | awk -v u="$_u" -v g="$_pg" "$_aw"
+  else # no getfacl: ls failing, a short line or the ACL marker (+) is open. busybox ls shows no marker, and with an ACL the group bits are the mask,
+    # so there group write is open even for root's or the private group
+    _m=$(run_t 5 ls -ld -- "$1" 2>/dev/null) || return 1
+    case "$_m" in ??????????[!+]*) ;; *) return 1 ;; esac
+    case "$(run_t 5 ls --help 2>&1)" in *BusyBox*) case "$_m" in ?????w*) return 1 ;; esac ;; esac
   fi
 }
 
