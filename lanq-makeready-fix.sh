@@ -65,9 +65,15 @@ over_ssh() {
   done
   return 1
 }
+# Linux: the shell's own command line has -c or -s before the script (dash does not show c in $-).
+started_with_c_or_s() {
+  [ -r "/proc/$$/cmdline" ] || return 1
+  cat "/proc/$$/cmdline" | tr '\000' '\n' | awk 'NR == 1 { next } $0 == "--" { exit } /^-[A-Za-z]*[cs][A-Za-z]*$/ { f = 1; exit } /^-/ { next } { exit } END { exit !f }'
+}
 # Started from this file: not sh -c or sh -s (a pipe), $0 is lanq-makeready-fix.sh and holds the marker line.
 from_file() {
   case "$-" in *c*|*s*) return 1 ;; esac
+  started_with_c_or_s && return 1
   [ "${FIX_SELF##*/}" = lanq-makeready-fix.sh ] && [ -f "$FIX_SELF" ] && grep -q 'lanq-makeready-fix-marker' "$FIX_SELF" 2>/dev/null
 }
 has_console() { [ -t 0 ]; }

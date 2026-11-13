@@ -10,7 +10,10 @@ $fixPath = Join-Path $root 'lanq-makeready-fix.ps1'
 $script:pass = 0; $script:fail = 0
 function Assert-Equal($Actual, $Expected, [string]$Name) {
   if ("$Actual" -ceq "$Expected") { $script:pass++; Write-Host "  ok   $Name" }
-  else { $script:fail++; Write-Host "  FAIL $Name : expected '$Expected' got '$Actual'" -ForegroundColor Red }
+  else {
+    $script:fail++; Write-Host "  FAIL $Name : expected '$Expected' got '$Actual'" -ForegroundColor Red
+    if ($script:LastChild) { Write-Host "       child exit $($script:LastChild.Code); stdout: $($script:LastChild.Out.Trim()); stderr: $($script:LastChild.Err.Trim())" }
+  }
 }
 function Assert-True($Cond, [string]$Name) { Assert-Equal ([bool]$Cond) 'True' $Name }
 
@@ -99,6 +102,7 @@ Assert-True ((Get-UndoArg @('-Undo')).Error -match 'needs a record file') '-Undo
 Assert-True ((Get-UndoArg @('-undo', '-List')).Error -match 'needs a record file') '-Undo followed by a flag: usage error'
 Assert-True ((Get-UndoArg @('-Undo', 'a', '-Undo', 'b')).Error -match 'twice') '-Undo twice: usage error'
 Assert-Equal ((Get-UndoArg @('-Yes')).Rest -join ',') '-Yes' 'other arguments stay unknown'
+Assert-True (@((Get-UndoArg $null).Rest).Count -eq 0 -and @((Get-UndoArg @('')).Rest).Count -eq 0 -and -not (Get-UndoArg @($null)).Error) 'no remaining arguments (PowerShell 7 may pass one empty element): nothing unknown'
 
 Write-Host 'state reads on this machine (read-only: Get-Service, powercfg /q, git config --get/--list, registry, Get-Acl)'
 foreach ($id in $FixIds) { $st = Get-FixState $id; Assert-True ($st -is [hashtable]) "Get-FixState $id returns a state" }
@@ -265,7 +269,8 @@ function Start-Child([string]$ArgText, [string]$StdinText = $null, [hashtable]$E
   if ($StdinText) { $p.StandardInput.Write($StdinText) }
   $p.StandardInput.Close()
   [void]$p.WaitForExit(120000)
-  return @{ Code = $p.ExitCode; Out = "$($o.Result)"; Err = "$($e.Result)" }
+  $script:LastChild = @{ Code = $p.ExitCode; Out = "$($o.Result)"; Err = "$($e.Result)" }
+  return $script:LastChild
 }
 $fileArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$fixPath`""
 foreach ($a in '-Yes', '-Force', '--yes', '-y', '-AssumeYes') {
@@ -294,6 +299,7 @@ Assert-True ($r.Code -eq 3 -and $r.Err -match 'an alias would run instead' -and 
 $r = Start-Child "$fileArgs -List"
 Assert-True ($r.Code -eq 2 -and $r.Err -match 'LANQ_MAKEREADY_FIX_LIB=1 is only for tests') 'a direct run with LANQ_MAKEREADY_FIX_LIB=1 passes the refusals, then exits 2'
 
+$script:LastChild = $null
 # ---------- fakes ----------
 Write-Host 'fakes (nothing below touches this PC)'
 $SshdName = 'lanq-test-no-such-service'

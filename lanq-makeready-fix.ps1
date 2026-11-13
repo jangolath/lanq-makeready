@@ -822,7 +822,7 @@ function Invoke-FixMain([string]$Mode = 'apply', [string]$UndoPath = '', [bool]$
 # -Undo <file> is read from the remaining arguments, so a missing file name is a usage error (exit 2), not a binder error.
 # Returns @{ Path; Rest; Error }.
 function Get-UndoArg([string[]]$Rest) {
-  $out = @(); $path = $null; $err = ''; $a = @($Rest)
+  $out = @(); $path = $null; $err = ''; $a = @($Rest | Where-Object { $null -ne $_ -and "$_" -ne '' })   # PowerShell 7 can hand over one empty element
   for ($i = 0; $i -lt $a.Count; $i++) {
     if ($a[$i] -match '^-(?i:undo)$') {
       if ($null -ne $path) { $err = '-Undo given twice' }
