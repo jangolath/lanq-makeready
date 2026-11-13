@@ -92,7 +92,7 @@ fix_guard() { # FILE -> one line per violation
   done
   for _w in $(printf '%s\n' "$_outside$nl$_inside" | cmd_words); do case "$forbidden" in *" $_w "*) echo "forbidden command word: $_w" ;; esac; done
   for _w in $(printf '%s\n' "$_inside" | cmd_words); do
-    case "$_w" in systemctl|echo|printf|return|field|to_mask|fix_command|fix_change|esac|fi|done|then|else|elif) ;; *) echo "command word in FIXES other than systemctl and helpers: $_w" ;; esac
+    case "$_w" in systemctl|echo|printf|return|field|to_mask|fix_command|fix_change|'esac'|'fi'|'done'|'then'|'else'|'elif') ;; *) echo "command word in FIXES other than systemctl and helpers: $_w" ;; esac
   done
   printf '%s\n' "$_outside" | grep -vE '^[[:space:]]*#' | grep -nE "$mutating" | sed 's/^/mutating systemctl outside FIXES: /'
   printf '%s\n' "$_outside" | grep -vE '^[[:space:]]*#' | grep -nE 'systemctl' | grep -vE 'systemctl is-(enabled|active) "\$1"|command -v systemctl' | sed 's/^/systemctl other than is-enabled or is-active outside FIXES: /'
