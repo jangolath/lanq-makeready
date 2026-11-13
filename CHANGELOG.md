@@ -13,7 +13,7 @@
   with no `user::` line, makes it open. A sticky parent folder (like `/tmp`) is still fine.
 - Without `getfacl`: the `ls` ACL marker (`+`), `ls` failing, or a line without the marker column makes the folder
   open. busybox `ls` shows no marker, so there any group write makes it open (with an ACL the group bits are the
-  mask).
+  mask). An ACL with only `default:` entries is not seen on busybox without getfacl: install the `acl` package.
 - `getfacl` and `ls` run under the scanner's time limit (`run_t`, 5 s). SECURITY.md's "Bounded" now says which quick
   local reads are not wrapped.
 - On macOS the check is skipped (macOS ACLs are not read; a Mac never gets a machines.yml entry). NFSv4 ACLs and

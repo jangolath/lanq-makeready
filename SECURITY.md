@@ -29,7 +29,8 @@ are two kinds of script, and each promise below names the script it covers.
 - **Suggests only safe toolchain folders.** `path_prepend` is suggested only for a .NET folder other local users
   cannot write: the owner and DACL on Windows; on Linux the owner, the mode bits and (0.4.1+) the POSIX ACL read with
   `getfacl` (access and default entries), or, without it, the `ls` ACL marker (`+`; on busybox, any group write).
-  Anything the check cannot read counts as open. Only folders and `dotnet` itself are checked, not the files in them.
+  Anything the check cannot read counts as open, with one limit: on busybox without getfacl, an ACL with only
+  `default:` entries is not seen (install the `acl` package). Only folders and `dotnet` itself are checked, not the files in them.
   NFSv4 ACLs and SELinux are not read; on macOS no entry is suggested.
 
 ### The fix script: `lanq-makeready-fix.ps1` / `lanq-makeready-fix.sh` (0.4.0+)

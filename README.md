@@ -519,7 +519,8 @@ Never run those on a PC you care about.
   `default:group:` entry that can write (new folders, such as the next SDK, inherit it), unless it is root, you, or
   your own private group. Output getfacl cannot give (an error, a time-out, or no `user::` line) also counts as open.
   Without `getfacl`, the `ls` ACL marker (`+`), or `ls` failing, makes the folder open; busybox `ls` shows no marker,
-  so there any group write makes it open (with an ACL the group bits are the mask). Parent folders must pass the same
+  so there any group write makes it open (with an ACL the group bits are the mask); an ACL with only `default:`
+  entries is not seen there (install the `acl` package). Parent folders must pass the same
   test unless they are sticky (like `/tmp`). Only folders and `dotnet` itself are checked, not the files inside them.
   NFSv4 ACLs and SELinux are not read, and on macOS ACLs are not read (a Mac never gets a machines.yml entry).
 - `~/.docker/config.json` (which can hold registry credentials) is never read; the Docker context comes from `DOCKER_CONTEXT` or `docker context show`.
