@@ -32,12 +32,13 @@ Assert-Equal (ConvertTo-TimeText ([datetime]::SpecifyKind([datetime]'2026-11-13 
 Assert-Equal (ConvertTo-TimeText '2026-11-13T10:00:05Z') '2026-11-13T10:00:05Z' 'a time string stays as it is'
 Assert-True (Test-OnlyAdminsSystem 'D:PAI(A;;FA;;;BA)(A;;FA;;;SY)') 'DACL with BA and SY only: ok'
 Assert-True (-not (Test-OnlyAdminsSystem 'D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;BU)')) 'DACL with Users: not ok'
-$okStates = @(@('ssh.start', 'starttype=Manual status=Stopped'), @('ssh.auto', 'starttype=Disabled status=Running'), @('power.sleep', 'standby=1800 hibernate=-'),
-  @('power.sleep', 'standby=0 hibernate=3600'), @('longpaths.on', 'value=- type=none'), @('longpaths.on', 'value=0 type=dword'), @('git.longpaths', 'value=false'), @('git.longpaths', 'value=-'),
+$okStates = @(@('ssh.start', 'starttype=Manual status=Stopped'), @('ssh.auto', 'starttype=Disabled status=Running'), @('power.sleep', 'scheme=381b4222-f694-41f0-9685-ff5bb260df2e standby=1800 hibernate=-'),
+  @('power.sleep', 'scheme=381b4222-f694-41f0-9685-ff5bb260df2e standby=0 hibernate=3600'), @('longpaths.on', 'value=- type=none'), @('longpaths.on', 'value=0 type=dword'), @('git.longpaths', 'value=false'), @('git.longpaths', 'value=-'),
   @('ssh.aclkeys', 'dacl=D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;BU)(A;;FA;;;S-1-5-21-1-2-3-1001)'))
 foreach ($s in $okStates) { Assert-True ($null -ne (ConvertFrom-StateText $s[0] $s[1])) "state shape accepted: $($s[0]) $($s[1])" }
 $badStates = @(@('ssh.start', 'starttype=Manual status=Stopped; Stop-Computer'), @('ssh.start', 'starttype=$(x) status=Stopped'), @('ssh.auto', 'starttype=Boot status=Running'),
-  @('power.sleep', 'standby=99999999999 hibernate=0'), @('power.sleep', 'standby=-1 hibernate=0'), @('longpaths.on', 'value=1;x type=dword'), @('longpaths.on', 'value=0'),
+  @('power.sleep', 'scheme=381b4222-f694-41f0-9685-ff5bb260df2e standby=99999999999 hibernate=0'), @('power.sleep', 'scheme=381b4222-f694-41f0-9685-ff5bb260df2e standby=-1 hibernate=0'), @('power.sleep', 'standby=1800 hibernate=0'),
+  @('power.sleep', 'scheme=381B4222-F694-41F0-9685-FF5BB260DF2E standby=1800 hibernate=0'), @('power.sleep', 'scheme=x standby=1800 hibernate=0'), @('longpaths.on', 'value=1;x type=dword'), @('longpaths.on', 'value=0'),
   @('longpaths.on', 'value=1 type=string'), @('longpaths.on', 'value=- type=dword'), @('git.longpaths', "value=true'"),
   @('git.longpaths', 'value=a b'), @('ssh.aclkeys', 'dacl=D:(XA;;FA;;;WD;(@User.x == "y"))'), @('ssh.aclkeys', "dacl=D:(A;;FA;;;BA)')"), @('evil.fix', 'value=1'), @('power.sleep', ''))
 foreach ($s in $badStates) { Assert-True ($null -eq (ConvertFrom-StateText $s[0] $s[1])) "state shape rejected: $($s[0]) '$($s[1])'" }
@@ -52,6 +53,12 @@ foreach ($d in @(@('D:(A;;FA;;;WD)', 'would not both keep full control'), @('D:'
 Assert-Equal (Get-DaclCore 'D:AI(A;;FA;;;S-1-5-21-1-2-3-1001)(A;ID;FA;;;SY)(A;ID;FA;;;BA)') (Get-DaclCore 'D:AI(A;;FA;;;S-1-5-21-1-2-3-1001)(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;BU)') 'M1(d) inherited entries do not count when comparing'
 Assert-True ((Get-DaclCore 'D:PAI(A;;FA;;;BA)') -cne (Get-DaclCore 'D:AI(A;;FA;;;BA)')) 'M1(d) the protection flag counts'
 Assert-Equal (Get-RestoreDacl 'D:AI(A;;FA;;;S-1-5-21-1-2-3-1001)(A;ID;FA;;;SY)') 'D:AI(A;;FA;;;S-1-5-21-1-2-3-1001)' 'M1(d) restore = flags + explicit entries'
+Assert-True ((Test-SafeUndoDacl 'D:PAI(A;;FA;;;BU)(A;ID;FA;;;BA)(A;ID;FA;;;SY)') -match 'what undo writes') 'R2: a protected DACL whose explicit entries lack Administrators/SYSTEM: what undo writes is checked, refused'
+Assert-Equal (Test-SafeUndoDacl 'D:AI(A;;FA;;;BU)(A;ID;FA;;;BA)(A;ID;FA;;;SY)') '' 'R2: unprotected: the folder hands Administrators and SYSTEM back, accepted'
+Assert-True (Test-SameState 'ssh.aclkeys' 'dacl=D:PAI(A;;FA;;;BA)(A;;FA;;;SY)' 'dacl=D:PAI(A;;FA;;;SY)(A;;FA;;;BA)') 'R9: the same entries in another order are the same state'
+Assert-Equal ((Get-ExplicitOthers 'D:AI(A;;FA;;;S-1-5-21-1-2-3-1001)(A;;FA;;;BA)(A;ID;FA;;;BU)') -join ',') 'S-1-5-21-1-2-3-1001' 'R9: explicit entries for others than Administrators and SYSTEM'
+Assert-Equal (Get-AccountName 'S-1-5-32-545') 'BUILTIN\Users' 'account names: translated'
+Assert-Equal (Get-AccountName 'S-1-5-21-1-2-3-1001') 'S-1-5-21-1-2-3-1001' 'account names: the SID when unknown'
 $fd = (Format-Dacl 'D:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;BU)(A;;FA;;;S-1-5-21-1-2-3-1001)') -join "`n"
 Assert-True ($fd -match 'allow NT AUTHORITY\\SYSTEM : FullControl \(inherited\)' -and $fd -match 'BUILTIN\\Users : ReadAndExecute' -and $fd -match 'S-1-5-21-1-2-3-1001 : FullControl') 'M1(c) DACL in words: names, rights, SID when unknown'
 Assert-True ((Format-Dacl 'D:P(D;;FA;;;WD)(A;;FA;;;BA)') -join ' ' -match 'DENY') 'M1(c) deny entries are shown as DENY'
@@ -60,7 +67,7 @@ Write-Host 'M1(a) trusted record folder and files'
 Assert-Equal (Test-TrustedSddl $RecordDirSddl) '' 'the folder this script makes is trusted'
 Assert-Equal (Test-TrustedSddl $RecordFileSddl) '' 'the record files this script makes are trusted'
 Assert-Equal (Test-TrustedSddl 'O:SYG:SYD:AI(A;ID;FA;;;BA)(A;ID;FA;;;SY)(A;ID;0x1200a9;;;BU)') '' 'others may read: still trusted'
-foreach ($d in @(@('O:S-1-5-21-1-2-3-1001G:SYD:PAI(A;;FA;;;BA)', 'owned by S-1-5-21-1-2-3-1001'), @('O:BAG:SYD:AI(A;ID;FA;;;BA)(A;OICIIO;0x100116;;;BU)', 'S-1-5-32-545 may change it'),
+foreach ($d in @(@('O:S-1-5-21-1-2-3-1001G:SYD:PAI(A;;FA;;;BA)', 'owned by S-1-5-21-1-2-3-1001'), @('O:BAG:SYD:AI(A;ID;FA;;;BA)(A;OICIIO;0x100116;;;BU)', 'BUILTIN\Users may change it'),
     @('O:BAG:SYD:PAI(A;;FA;;;BA)(A;;FA;;;S-1-5-21-1-2-3-1001)', 'may change it'), @('O:BAG:SYD:NO_ACCESS_CONTROL', 'no DACL'), @('O:BAG:SYD:PAI(A;;0x40000;;;AU)', 'may change it'))) {
   Assert-True ((Test-TrustedSddl $d[0]) -match [regex]::Escape($d[1])) "not trusted: $($d[0])"
 }
@@ -71,6 +78,9 @@ $ks = Get-AuthKeySummary @('# comment', '', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAA
 Assert-Equal @($ks).Count 3 'three non-comment lines'
 Assert-True ($ks[0] -match '^ssh-ed25519 SHA256:[A-Za-z0-9+/]{43} build@build-01$') 'type, SHA256 fingerprint and comment'
 Assert-True ($ks[1] -match 'with options' -and $ks[2] -match 'cannot read') 'options and unreadable lines are flagged'
+$ks = Get-AuthKeySummary @('command="echo ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample planted" ssh-rsa AAAAB3NzaC1yc2E= real-key', 'from="10.20.30.0/24",command="a \"b c\"" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample k2')
+Assert-True ($ks[0] -match '^ssh-rsa SHA256:\S+ real-key \(with options\)$') 'R3: a key type inside a quoted option value is not taken for the key'
+Assert-True ($ks[1] -match '^ssh-ed25519 SHA256:\S+ k2 \(with options\)$') 'R3: escaped quotes inside an option value'
 
 Write-Host 'M2 over-SSH detection (Windows): parent walk with a deadline, PID reuse, session 0'
 $t0 = [datetime]'2026-11-13 08:00:00'
@@ -83,15 +93,17 @@ function Get-FixProcessTable { return $script:FakeProcs }
 function Get-FixSessionId { return $script:FakeSession }
 $script:FakeProcs = @($procs | ForEach-Object { if ($_.Id -eq 100) { [pscustomobject]@{ Id = $PID; Parent = 50; Name = 'powershell.exe'; Created = $_.Created } } else { $_ } })
 $script:FakeSession = 2
-Assert-True (Test-FixOverSsh) 'sshd among the parents: over SSH'
+$FixWalkCache = $null; Assert-True (Test-FixOverSsh) 'sshd among the parents: over SSH'
 $script:FakeProcs = @([pscustomobject]@{ Id = $PID; Parent = 50; Name = 'powershell.exe'; Created = $t0 }, [pscustomobject]@{ Id = 50; Parent = 4; Name = 'explorer.exe'; Created = $t0.AddMinutes(-1) })
-Assert-True (-not (Test-FixOverSsh)) 'a desktop session: not over SSH'
+$FixWalkCache = $null; Assert-True (-not (Test-FixOverSsh)) 'a desktop session: not over SSH'
 $script:FakeProcs = $null; $script:FakeSession = 0
-Assert-True (Test-FixOverSsh) 'process list unreadable (CIM failed or timed out) in session 0: refused, not passed'
+$FixWalkCache = $null; Assert-True (Test-FixOverSsh) 'process list unreadable (CIM failed or timed out) in session 0: refused, not passed'
 $script:FakeSession = 1
-Assert-True (-not (Test-FixOverSsh)) 'process list unreadable in a desktop session: not counted as SSH'
+$FixWalkCache = $null; Assert-True (-not (Test-FixOverSsh)) 'process list unreadable in a desktop session: not counted as SSH'
 $script:FakeSession = 0
 Assert-True (-not (Test-FixConsole)) 'session 0 is never an interactive console'
+$FixWalkCache = $null; $script:FakeProcs = $null; $script:FakeSession = 0; [void](Test-FixOverSsh); $script:FakeSession = 1
+Assert-True (Test-FixOverSsh) 'R9: the parent walk runs once per process (a cached answer is reused)'
 $env:LANQ_MAKEREADY_FIX_LIB = '1'; . $fixPath; Remove-Item Env:\LANQ_MAKEREADY_FIX_LIB   # the real Get-FixProcessTable and Get-FixSessionId again
 $sw = [Diagnostics.Stopwatch]::StartNew(); $pt = Get-FixProcessTable 15
 Assert-True (@($pt).Count -gt 0 -and $sw.Elapsed.TotalSeconds -lt 20) 'the real process table is read within its deadline'
@@ -130,23 +142,24 @@ function Get-FixGuardViolations([string]$Path) {
   if (($regionFns -join ',') -ne 'Get-FixCommand,Assert-Native,Invoke-FixChange') { [void]$bad.Add("functions in FIXES must be exactly Get-FixCommand, Assert-Native, Invoke-FixChange (found: $($regionFns -join ', '))") }
   $fnOf = { param($Node) $p = $Node.Parent; while ($p) { if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $p.Name }; $p = $p.Parent }; return '' }
   $read = @('Get-Service', 'Get-CimInstance', 'Get-Command', 'Get-Item', 'Get-Acl', 'Get-ChildItem', 'Get-Content', 'Get-Alias', 'Test-Path', 'Join-Path', 'Split-Path',
-    'Select-Object', 'Where-Object', 'ForEach-Object', 'Sort-Object', 'ConvertFrom-Json', 'Write-Host', 'New-Object', 'Get-Location')
+    'Select-Object', 'Where-Object', 'ForEach-Object', 'Sort-Object', 'ConvertFrom-Json', 'Write-Host', 'New-Object', 'Get-Location',
+    'Microsoft.PowerShell.Utility\Get-Alias', 'Microsoft.PowerShell.Core\Get-Command')
   $mut = @('Set-Service', 'Start-Service', 'Stop-Service', 'Set-ItemProperty', 'Remove-ItemProperty', 'Set-Acl')
-  $callers = @{ 'Invoke-FixChange' = @('Invoke-FixApply', 'Invoke-FixUndo'); 'Assert-Native' = @('Invoke-FixChange'); 'Set-FixRecordAcl' = @('Initialize-FixRecordDir', 'Save-FixRecord') }
+  $callers = @{ 'Invoke-FixChange' = @('Invoke-FixApply', 'Invoke-FixUndo'); 'Assert-Native' = @('Invoke-FixChange'); 'New-FixSecuredDir' = @('Initialize-FixRecordDir'); 'New-FixSecuredFile' = @('Save-FixRecord') }
   $okNative = @("`$PowercfgExe|@('/q', 'SCHEME_CURRENT', 'SUB_SLEEP', 'STANDBYIDLE')", "`$PowercfgExe|@('/q', 'SCHEME_CURRENT', 'SUB_SLEEP', 'HIBERNATEIDLE')",
-    "`$git|@('config', '--system', '--show-origin', '--get', 'core.longpaths')", "`$git|@('config', '--system', '--show-origin', '--list')", "`$git|@('config', '--get', 'core.longpaths')")
+    "`$PowercfgExe|@('/getactivescheme')", "`$git|@('config', '--system', '--show-origin', '--get', 'core.longpaths')", "`$git|@('config', '--system', '--show-origin', '--list')", "`$git|@('config', '--get', 'core.longpaths')")
   $okTypes = @('System.Diagnostics.ProcessStartInfo', 'Security.Principal.WindowsPrincipal', 'System.Text.UTF8Encoding', 'System.Collections.ArrayList', 'System.IO.FileInfo',
-    'System.Security.AccessControl.RawSecurityDescriptor')
+    'System.Security.AccessControl.RawSecurityDescriptor', 'System.Security.AccessControl.DirectorySecurity', 'System.Security.AccessControl.FileSecurity', 'System.IO.DirectoryInfo',
+    'System.IO.FileStream')
   foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
     $n = $c.GetCommandName(); $in = & $inR $c; $fn = & $fnOf $c
     if (-not $n) { [void]$bad.Add("dynamic command: $($c.Extent.Text)"); continue }
     if ($mut -contains $n) {
-      if (-not (($in -and $fn -eq 'Invoke-FixChange') -or ($n -eq 'Set-Acl' -and $fn -eq 'Set-FixRecordAcl'))) { [void]$bad.Add("mutating command $n outside Invoke-FixChange ('$fn')") }
+      if (-not ($in -and $fn -eq 'Invoke-FixChange')) { [void]$bad.Add("mutating command $n outside Invoke-FixChange ('$fn')") }
       continue
     }
     if ($read -notcontains $n -and $funcNames -notcontains $n) { [void]$bad.Add("command $n is not on the allow-list") }
     if ($callers.ContainsKey($n) -and $callers[$n] -notcontains $fn) { [void]$bad.Add("$n called from '$fn'") }
-    if ($n -eq 'Set-FixRecordAcl' -and @('$RecordDirSddl', '$RecordFileSddl') -notcontains $c.CommandElements[2].Extent.Text) { [void]$bad.Add("Set-FixRecordAcl with $($c.CommandElements[2].Extent.Text)") }
     if ($n -eq 'Invoke-Native' -and $fn -ne 'Invoke-Native') {
       $exe = $c.CommandElements[1].Extent.Text
       if ($in) { if ($fn -ne 'Invoke-FixChange' -or @('$PowercfgExe', '$IcaclsExe', '$Cur.Git') -notcontains $exe) { [void]$bad.Add("Invoke-Native in FIXES with $exe") } }
@@ -161,15 +174,19 @@ function Get-FixGuardViolations([string]$Path) {
   $okMembers = @('Add', 'RemoveAt', 'Remove', 'Close', 'ReadToEndAsync', 'WaitForExit', 'Wait', 'Kill', 'Start', 'Trim', 'TrimEnd', 'Split', 'Replace', 'StartsWith', 'Substring',
     'ToString', 'GetSecurityDescriptorSddlForm', 'SetSecurityDescriptorSddlForm', 'GetOwner', 'Translate', 'IsInRole', 'GetCurrent', 'GetCurrentProcess', 'GetFolderPath', 'Matches',
     'ToInt64', 'Exists', 'ReadAllText', 'WriteAllText', 'Move', 'CreateDirectory', 'WriteLine', 'ReadLine', 'IsPathRooted', 'ContainsKey', 'Round', 'ToUniversalTime',
-    'GetValueNames', 'GetValueKind', 'GetValue', 'Create', 'AddScript', 'BeginInvoke', 'WaitOne', 'BeginStop', 'EndInvoke', 'Dispose', 'ComputeHash', 'ToBase64String', 'FromBase64String')
-  $onlyIn = @{ 'WriteAllText' = @('Save-FixRecord'); 'Move' = @('Save-FixRecord'); 'CreateDirectory' = @('Initialize-FixRecordDir'); 'Start' = @('Invoke-Native'); 'Kill' = @('Invoke-Native')
-    'Remove' = @('Invoke-Native'); 'SetSecurityDescriptorSddlForm' = @('Invoke-FixChange', 'Set-FixRecordAcl'); 'AddScript' = @('Get-FixProcessTable'); 'BeginStop' = @('Get-FixProcessTable') }
+    'GetValueNames', 'GetValueKind', 'GetValue', 'Create', 'AddScript', 'BeginInvoke', 'WaitOne', 'BeginStop', 'EndInvoke', 'Dispose', 'ComputeHash', 'ToBase64String', 'FromBase64String',
+    'GetFullPath', 'ToLowerInvariant', 'GetBytes', 'Write', 'Min')
+  $onlyIn = @{ 'WriteAllText' = @('Save-FixRecord'); 'Move' = @('Save-FixRecord'); 'CreateDirectory' = @('New-FixSecuredDir'); 'Start' = @('Invoke-Native'); 'Kill' = @('Invoke-Native')
+    'Remove' = @('Invoke-Native'); 'SetSecurityDescriptorSddlForm' = @('Invoke-FixChange', 'New-FixSecuredDir', 'New-FixSecuredFile'); 'AddScript' = @('Get-FixProcessTable'); 'BeginStop' = @('Get-FixProcessTable')
+    'Write' = @('New-FixSecuredFile') }
   foreach ($m in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
     $mn = $m.Member.Extent.Text; $fn = & $fnOf $m; $ex = $m.Expression.Extent.Text
     if ($okMembers -notcontains $mn) { [void]$bad.Add("member call $ex.$mn"); continue }
     if ($onlyIn.ContainsKey($mn) -and $onlyIn[$mn] -notcontains $fn) { [void]$bad.Add("$mn outside $($onlyIn[$mn] -join '/') ('$fn')") }
     if ($mn -eq 'Replace' -and $ex -match 'IO\.File' -and $fn -ne 'Save-FixRecord') { [void]$bad.Add('File.Replace outside Save-FixRecord') }
-    if ($mn -eq 'Create' -and -not (($ex -eq '[System.Management.Automation.PowerShell]' -and $fn -eq 'Get-FixProcessTable') -or ($ex -eq '[System.Security.Cryptography.SHA256]' -and $fn -eq 'Get-AuthKeySummary'))) { [void]$bad.Add("Create on $ex in '$fn'") }
+    if ($mn -eq 'Create' -and -not (($ex -eq '[System.Management.Automation.PowerShell]' -and $fn -eq 'Get-FixProcessTable') -or ($ex -eq '[System.Security.Cryptography.SHA256]' -and $fn -eq 'Get-AuthKeySummary') -or
+        ($ex -eq '[System.IO.FileSystemAclExtensions]' -and @('New-FixSecuredDir', 'New-FixSecuredFile') -contains $fn))) { [void]$bad.Add("Create on $ex in '$fn'") }
+    if ($mn -eq 'SetSecurityDescriptorSddlForm' -and $fn -ne 'Invoke-FixChange' -and @('$RecordDirSddl', '$RecordFileSddl') -notcontains $m.Arguments[0].Extent.Text) { [void]$bad.Add("SetSecurityDescriptorSddlForm with $($m.Arguments[0].Extent.Text) in '$fn'") }
     if ($mn -eq 'AddScript') {
       $arg = $m.Arguments[0]
       if ($arg -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { [void]$bad.Add('AddScript with other than a constant') }
@@ -183,7 +200,22 @@ function Get-FixGuardViolations([string]$Path) {
   foreach ($m in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.MemberExpressionAst] -and $n.Static }, $true)) {
     if ($m.Expression -isnot [System.Management.Automation.Language.TypeExpressionAst]) { [void]$bad.Add("static member through a variable: $($m.Extent.Text)") }
   }
-  $okRoots = @('$psi', '$s', '$item', '$it', '$seen', '$byId', '$h')
+  # member and index assignments only on local hashtables (and the ProcessStartInfo Invoke-Native fills); those
+  # variables are never filled from a command or a .NET call (so $it can never be a FileInfo)
+  $okRoots = @('$psi', '$s', '$item', '$it', '$seen', '$byId')
+  $cmdNames = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() })
+  foreach ($a in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)) {
+    if (@('$s', '$item', '$it', '$seen', '$byId') -contains $a.Left.Extent.Text) {
+      $rc = @($a.Right.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | Where-Object { $funcNames -notcontains $_.GetCommandName() })
+      $rm = @($a.Right.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
+      if ($rc.Count -gt 0 -or $rm.Count -gt 0) { [void]$bad.Add("$($a.Left.Extent.Text) is filled from a command or .NET call: $($a.Extent.Text)") }
+    }
+  }
+  foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.ForEachStatementAst] }, $true)) {
+    if (@('$s', '$item', '$it', '$seen', '$byId') -contains $f.Variable.Extent.Text -and @($f.Condition.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | Where-Object { $funcNames -notcontains $_.GetCommandName() -and @('Where-Object', 'Sort-Object', 'ForEach-Object') -notcontains $_.GetCommandName() }).Count -gt 0) {
+      [void]$bad.Add("foreach $($f.Variable.Extent.Text) over a command")
+    }
+  }
   foreach ($a in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
     $l = $a.Left
     while ($l -is [System.Management.Automation.Language.ConvertExpressionAst] -or $l -is [System.Management.Automation.Language.AttributedExpressionAst]) { $l = $l.Child }
@@ -232,8 +264,12 @@ $mutants = [ordered]@{
   'L4: assignment to another object'         = "function Bad-TwentyThree { `$acl.Owner = 'x' }"
   'L4: static call through a variable'       = "function Bad-TwentyFour { `$f = [System.IO.File]; `$f::Delete('C:\x') }"
   'L4: static property through a variable'   = "function Bad-TwentyFive { `$f = [Environment]; `$f::CurrentDirectory }"
-  'L4: Set-FixRecordAcl with another SDDL'   = "function Save-FixRecord { Set-FixRecordAcl 'C:\x' 'O:BAD:(A;;FA;;;WD)' }"
-  'L4: Set-FixRecordAcl from elsewhere'      = "function Bad-TwentySix { Set-FixRecordAcl 'C:\x' `$RecordDirSddl }"
+  'R1: a record file with another SDDL'      = "function New-FixSecuredFile { `$fsec.SetSecurityDescriptorSddlForm('O:BAD:(A;;FA;;;WD)') }"
+  'R1: Set-Acl on the record folder'         = "function Initialize-FixRecordDir { Set-Acl -LiteralPath `$dir -AclObject `$a }"
+  'R1: New-FixSecuredDir from elsewhere'     = "function Bad-TwentySeven { New-FixSecuredDir 'C:\x' }"
+  'R8: a FileInfo in a hashtable variable'   = "function Bad-TwentyEight { `$it = Get-Item C:\x; `$it.IsReadOnly = `$true }"
+  'R8: foreach over files into it'           = "function Bad-TwentyNine { foreach (`$it in Get-ChildItem C:\x) { `$it.IsReadOnly = `$true } }"
+  'R8: a .NET object in a hashtable variable' = "function Bad-Thirty { `$s = [System.IO.FileInfo]::new('C:\x'); `$s.IsReadOnly = `$true }"
   'L4: AddScript with other commands'        = "function Get-FixProcessTable { `$ps.AddScript('Stop-Computer') }"
   'L4: AddScript with a variable'            = "function Get-FixProcessTable { `$ps.AddScript(`$x) }"
   'L4: Create on another type'               = "function Get-FixProcessTable { [System.Diagnostics.Process]::Create() }"
@@ -247,6 +283,9 @@ Test-Mutant 'L4: a mutation in Get-FixCommand (inside the region, outside Invoke
 $mt = $fixText.Replace("    'ssh.auto|undo' { Set-Service", "    'ssh.auto|undo' { Stop-Service -Name `$SshdName -ErrorAction Stop; Set-Service")
 [System.IO.File]::WriteAllText($mp, $mt)
 Assert-Equal (@(Get-FixGuardViolations $mp) -join '; ') '' 'guard sanity: another mutation inside Invoke-FixChange is allowed'
+$used = @($fast0 = [System.Management.Automation.Language.Parser]::ParseFile($fixPath, [ref]$null, [ref]$null); $fast0.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() } |
+  Where-Object { $_ -and $FixFunctionNames -notcontains $_ -and $_ -notmatch '\\' } | Sort-Object -Unique)
+Assert-Equal (@($used | Where-Object { $FixCmdletNames -notcontains $_ }) -join ',') '' 'R4: every cmdlet the script runs is in the shadow check'
 Remove-Item -LiteralPath $mdir -Recurse -Force
 
 Write-Host 'NoYesFlag'
@@ -295,7 +334,11 @@ Assert-True ($r.Code -eq 3 -and $r.Err -match 'no interactive console') 'Refuses
 $r = Start-Child "$fileArgs -Undo C:\none.json"
 Assert-True ($r.Code -eq 3 -and $r.Err -match 'no interactive console') 'RefusesWithoutConsole (real process, -Undo): exit 3'
 $r = Start-Child "-NoProfile -ExecutionPolicy Bypass -Command `"Set-Alias Get-FixState Get-Date; & '$fixPath' -WhatIf; exit `$LASTEXITCODE`""
-Assert-True ($r.Code -eq 3 -and $r.Err -match 'an alias would run instead' -and $r.Err -match 'Get-FixState') 'INFO: an alias shadowing a function of the script: refused'
+Assert-True ($r.Code -eq 3 -and $r.Err -match 'alias would run instead' -and $r.Err -match 'Get-FixState') 'INFO: an alias shadowing a function of the script: refused'
+$r = Start-Child "-NoProfile -ExecutionPolicy Bypass -Command `"function Set-Service { 'fake' }; & '$fixPath' -WhatIf; exit `$LASTEXITCODE`""
+Assert-True ($r.Code -eq 3 -and $r.Err -match 'function or alias would run instead' -and $r.Err -match 'Set-Service') 'R4: a function over a cmdlet the fixes use: refused'
+$r = Start-Child "-NoProfile -ExecutionPolicy Bypass -Command `"Set-Alias Get-Acl Get-Date; & '$fixPath' -WhatIf; exit `$LASTEXITCODE`""
+Assert-True ($r.Code -eq 3 -and $r.Err -match 'Get-Acl') 'R4: an alias over a cmdlet: refused'
 $r = Start-Child "$fileArgs -List"
 Assert-True ($r.Code -eq 2 -and $r.Err -match 'LANQ_MAKEREADY_FIX_LIB=1 is only for tests') 'a direct run with LANQ_MAKEREADY_FIX_LIB=1 passes the refusals, then exits 2'
 
@@ -311,13 +354,15 @@ $RecDir = Join-Path ([IO.Path]::GetTempPath()) ('lanq-fixrec-' + [Guid]::NewGuid
 $Inherited = '(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1200a9;;;BU)'   # what the fake parent folder hands down
 $OpenDacl = "D:AI$Inherited"
 $OwnDacl = "D:AI(A;;FA;;;S-1-5-21-1-2-3-1001)$Inherited"
+$BaOwnDacl = "D:AI(A;;FA;;;BA)$Inherited"
 $TightDacl = 'D:PAI(A;;FA;;;BA)(A;;FA;;;SY)'
 $KeyLine = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample build@build-01'
 $Calls = New-Object System.Collections.ArrayList
 $Snaps = New-Object System.Collections.ArrayList
 $Reads = New-Object System.Collections.ArrayList
 function Reset-Fake {
-  $script:F = @{ SvcInstalled = $true; Status = 'Running'; StartType = 'Automatic'; Standby = 0; Hibernate = 0; LongPaths = 1; LpKind = $null; GitSystem = 'true'; GitGlobal = $null; GitTrusted = $true
+  $script:F = @{ SvcInstalled = $true; Status = 'Running'; StartType = 'Automatic'; Scheme = '381b4222-f694-41f0-9685-ff5bb260df2e'; Standby = 0; Hibernate = 0; LongPaths = 1; LpKind = $null; LpRaw = $null
+    GitSystem = 'true'; GitGlobal = $null; GitTrusted = $true; PathGit = 'C:\fake\git.exe'
     Dacl = $TightDacl; Owner = $BaSid }
   $script:Elev = $true; $script:Console = $true; $script:Answers = New-Object System.Collections.Queue; $script:OnAnswer = $null; $script:Asked = 0; $script:Trust = ''; $script:DirWhy = ''
   $Calls.Clear(); $Snaps.Clear(); $Reads.Clear()
@@ -326,7 +371,9 @@ function Reset-Fake {
 function Get-FixRecordDir { return $RecDir }
 # the record store: the folder is created plain (no admin-owned ACL here), trust is what the test says
 function Initialize-FixRecordDir { if ($script:DirWhy) { return $script:DirWhy }; if (-not (Test-Path -LiteralPath $RecDir)) { [void](New-Item -ItemType Directory -Path $RecDir) }; return '' }
-function Set-FixRecordAcl([string]$Path, [string]$Sddl) { }
+function Get-FixRecordDirProblem { return $script:DirWhy }
+function New-FixSecuredDir([string]$Dir) { [void](New-Item -ItemType Directory -Path $Dir) }
+function New-FixSecuredFile([string]$Path, [byte[]]$Bytes) { $st = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::CreateNew); try { $st.Write($Bytes, 0, $Bytes.Length) } finally { $st.Dispose() } }
 function Test-FixRecordTrusted([string]$Path) { return $script:Trust }
 function Get-LatestRecord { $f = @(Get-ChildItem -LiteralPath $RecDir -Filter 'fix-*.json' -ErrorAction SilentlyContinue | Sort-Object -Property Name); if ($f.Count) { return $f[-1].FullName }; return $null }
 function Note-Call([string]$C) { [void]$Calls.Add($C); $p = Get-LatestRecord; if ($p) { [void]$Snaps.Add([System.IO.File]::ReadAllText($p)) } else { [void]$Snaps.Add('') } }
@@ -339,9 +386,9 @@ function Get-FixState([string]$Id) {
   [void]$Reads.Add($Id); $f = $script:F
   switch ($Id) {
     { @('ssh.start', 'ssh.auto') -contains $_ } { if (-not $f.SvcInstalled) { return @{ Installed = $false } }; return @{ Installed = $true; Status = $f.Status; StartType = $f.StartType } }
-    'power.sleep' { return @{ Standby = $f.Standby; Hibernate = $f.Hibernate } }
-    'longpaths.on' { $k = $f.LpKind; if (-not $k) { if ($null -eq $f.LongPaths) { $k = 'none' } else { $k = 'DWord' } }; return @{ Value = $f.LongPaths; Kind = $k } }
-    'git.longpaths' { $e = $f.GitSystem; if ($f.GitGlobal) { $e = $f.GitGlobal }; return @{ Git = 'C:\fake\git.exe'; Trusted = $f.GitTrusted; System = $f.GitSystem; Effective = $e; SystemFile = 'C:/fake/etc/gitconfig' } }
+    'power.sleep' { return @{ Scheme = $f.Scheme; Standby = $f.Standby; Hibernate = $f.Hibernate } }
+    'longpaths.on' { $k = $f.LpKind; if (-not $k) { if ($null -eq $f.LongPaths) { $k = 'none' } else { $k = 'DWord' } }; $v = $f.LongPaths; if ($k -ne 'DWord') { $v = $null }; return @{ Value = $v; Kind = $k; Raw = $f.LpRaw } }
+    'git.longpaths' { $e = $f.GitSystem; if ($f.GitGlobal) { $e = $f.GitGlobal }; return @{ Git = 'C:\fake\git.exe'; Trusted = $f.GitTrusted; System = $f.GitSystem; Effective = $e; SystemFile = 'C:/fake/etc/gitconfig'; PathGit = $f.PathGit } }
     'ssh.aclkeys' { if (-not $f.Dacl) { return @{ Exists = $false } }; return @{ Exists = $true; Reparse = $false; Dacl = $f.Dacl; Ok = (Test-OnlyAdminsSystem $f.Dacl); Owner = $f.Owner; Keys = (Get-AuthKeySummary @($KeyLine)) } }
   }
 }
@@ -372,10 +419,11 @@ function Invoke-Native([string]$Exe, [string[]]$ArgList, [int]$Sec = 60) {
   return @{ Code = 0; Out = '' }
 }
 $unsafe = @(foreach ($n in 'Set-Service', 'Start-Service', 'Stop-Service', 'Set-ItemProperty', 'Remove-ItemProperty', 'Set-Acl', 'Get-Acl', 'Invoke-Native', 'Get-FixState', 'Get-FixRecordDir',
-    'Test-FixElevated', 'Initialize-FixRecordDir', 'Set-FixRecordAcl', 'Test-FixRecordTrusted') {
+    'Test-FixElevated', 'Initialize-FixRecordDir', 'Get-FixRecordDirProblem', 'New-FixSecuredDir', 'New-FixSecuredFile', 'Test-FixRecordTrusted') {
     if (@(Get-Command $n)[0].CommandType -ne 'Function') { $n } })
 if ($unsafe.Count -gt 0) { Write-Host "ABORT: not faked: $($unsafe -join ', ')" -ForegroundColor Red; exit 1 }
 Assert-True $true 'every command that could change the PC is a fake'
+$FixCmdletNames = @()   # the fakes above are functions over cmdlet names on purpose; the shadow check is tested in a child process
 
 function Invoke-Fake([string]$Mode = 'apply', [string]$UndoPath = '', [object[]]$Ans = @()) {
   $FixOut.Clear(); $Calls.Clear(); $Snaps.Clear(); $Reads.Clear()
@@ -402,7 +450,7 @@ $cases = @(
   @('git.longpaths', @{ GitSystem = $null }, 'git.exe config --system core.longpaths true', 'git.exe config --system --unset core.longpaths'),
   @('git.longpaths', @{ GitSystem = 'false' }, 'git.exe config --system core.longpaths true', 'git.exe config --system core.longpaths false'),
   @('ssh.aclkeys', @{ Dacl = $OpenDacl }, "icacls.exe $KeysFile /inheritance:r /grant *S-1-5-32-544:F /grant *S-1-5-18:F", "Set-Acl $KeysFile D:AI"),
-  @('ssh.aclkeys', @{ Dacl = $OwnDacl }, "icacls.exe $KeysFile /inheritance:r /grant *S-1-5-32-544:F /grant *S-1-5-18:F", "Set-Acl $KeysFile D:AI(A;;FA;;;S-1-5-21-1-2-3-1001)")
+  @('ssh.aclkeys', @{ Dacl = $BaOwnDacl }, "icacls.exe $KeysFile /inheritance:r /grant *S-1-5-32-544:F /grant *S-1-5-18:F", "Set-Acl $KeysFile D:AI(A;;FA;;;BA)")
 )
 Write-Host 'apply and undo each fix (exact mutating commands; record written before the change; undo restores)'
 foreach ($c in $cases) {
@@ -452,6 +500,14 @@ Reset-Fake; $F.Dacl = 'D:NO_ACCESS_CONTROL'; $rc = Invoke-Fake 'dry'
 Assert-True ((OutText) -match 'not fixable here: .*no DACL at all') 'INFO: NULL DACL: reported as not fixable here, not silently OK'
 Reset-Fake; $F.Dacl = 'D:P(D;;FA;;;WD)(A;;FA;;;BA)(A;;FA;;;SY)(A;;FR;;;BU)'; $rc = Invoke-Fake 'dry'
 Assert-True ((OutText) -match 'not fixable here: -Undo could not safely put the current permissions back') 'M1(b): a DACL undo could not restore safely is not changed at all'
+Reset-Fake; $F.Dacl = $OwnDacl; $rc = Invoke-Fake 'dry'
+Assert-True ((OutText) -match 'not offered: .*own entries for S-1-5-21-1-2-3-1001, which icacls /grant leaves in place' -and (OutText) -match 'remove:g \*S-1-5-21-1-2-3-1001') 'R9: explicit entries for others: not offered, with the command to remove them'
+Reset-Fake; $F.LongPaths = $null; $F.LpKind = 'String'; $F.LpRaw = '1'; $rc = Invoke-Fake 'dry'
+Assert-True ((OutText) -notmatch 'LongPathsEnabled' -and (OutText) -notmatch '(?m)^longpaths\.on') 'R7(d): a REG_SZ "1" is on for the scanner too: nothing offered, nothing said'
+Reset-Fake; $F.GitSystem = $null; $F.PathGit = 'C:\Users\u\scoop\shims\git.exe'; $rc = Invoke-Fake 'dry'
+Assert-True ((OutText) -match 'the scanner checks the git first on PATH \(C:\\Users\\u\\scoop\\shims\\git.exe\)') 'R7(c): the scanner''s git and the fixed git differ: a note says so'
+Reset-Fake; $F.Standby = 1800; $F.Scheme = $null; $rc = Invoke-Fake 'dry'
+Assert-True ((OutText) -match 'not offered: the active power scheme could not be read') 'D4: no power scheme, no fix (undo is tied to it)'
 Reset-Fake; $F.Status = 'StartPending'; $rc = Invoke-Fake 'dry'
 Assert-True ((OutText) -match 'StartPending \(changing state\)') 'C13: a service changing state: says so'
 
@@ -506,7 +562,11 @@ $rc = Invoke-Fake 'undo' $rp @('y')
 Assert-True ($Calls.Count -eq 0 -and (OutText) -match 'changed since; left alone') 'undo: re-checks the state after the answer'
 $script:Elev = $false; $F.Standby = 0; $script:Asked = 0
 $rc = Invoke-Fake 'undo' $rp @('y')
-Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and $Reads.Count -eq 0 -and $script:Asked -eq 0 -and (OutText) -match 'needs an elevated PowerShell') 'C7: undo when not elevated: says so before reading any state'
+Assert-True ($rc -eq 1 -and $Calls.Count -eq 0 -and $Reads.Count -eq 0 -and $script:Asked -eq 0 -and (OutText) -match 'needs an elevated PowerShell') 'C7/D5: undo when not elevated: exit 1, says so before reading any state'
+Reset-Fake; $F.Standby = 1800; $rc = Invoke-Fake 'apply' '' @('y'); $rp = Get-LatestRecord
+$F.Scheme = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
+$rc = Invoke-Fake 'undo' $rp @('y')
+Assert-True ($Calls.Count -eq 0 -and (OutText) -match 'changed since; left alone') 'D4: another power scheme is active now: changed since; left alone'
 
 Write-Host 'C5 pending items'
 Reset-Fake; $F.Standby = 1800; $rc = Invoke-Fake 'apply' '' @('y'); $rp = Get-LatestRecord
@@ -531,12 +591,25 @@ Reset-Fake; $F.LongPaths = 0; $script:SaveN = 0
 $rc = Invoke-Fake 'apply' '' @('y')
 Assert-True ($rc -eq 1 -and (OutText) -match 'still says pending') 'C6: the record cannot be updated after the change: exit 1, says so'
 Set-Item -Path Function:\Save-FixRecord -Value $origSave
-Reset-Fake; $F.LongPaths = 0; $script:DirWhy = 'the record folder X is not safe (it is owned by S-1-5-21-1)'
+Reset-Fake; $F.LongPaths = 0; $script:DirWhy = 'the record folder X is not safe (it is owned by S-1-5-21-1). Nothing was changed.'
 $rc = Invoke-Fake 'apply' '' @('y')
-Assert-True ($rc -eq 1 -and $Calls.Count -eq 0 -and (OutText) -match 'not safe' -and (OutText) -match 'nothing changed') 'M1(a): an unsafe record folder: nothing is changed'
+Assert-True ($rc -eq 1 -and $Calls.Count -eq 0 -and $script:Asked -eq 0 -and (OutText) -match 'not safe') 'R1: an unsafe record folder stops the run before the first question'
+$script:DirWhy = ''
 Reset-Fake
 $rec0 = New-FixRecord; [void](New-Item -ItemType Directory -Path $RecDir); [System.IO.File]::WriteAllText($rec0.Path + '.tmp', 'planted'); $FixOut.Clear()
 Assert-True (-not (Save-FixRecord $rec0) -and (OutText) -match 'exists \(left by a crash, or planted\)' -and -not (Test-Path -LiteralPath $rec0.Path)) 'L1: an existing temp file is refused, never written through'
+
+Reset-Fake; $F.Dacl = $OpenDacl; $rc = Invoke-Fake 'apply' '' @('y'); $rp = Get-LatestRecord
+function Set-Acl { param($LiteralPath, $AclObject, $ErrorAction) Note-Call "Set-Acl $LiteralPath"; $script:F.Dacl = 'D:PAI(A;;FA;;;BU)' }
+$rc = Invoke-Fake 'undo' $rp @('y')
+Assert-True ($rc -eq 1 -and (OutText) -match 'FAILED: after the undo the keys file''s permissions are not safe' -and (OutText) -match '/grant \*S-1-5-32-544:F') 'R2: after the undo the real DACL is read again; Administrators/SYSTEM without full control fails loudly'
+function Set-Acl {
+  param($LiteralPath, $AclObject, $ErrorAction)
+  $d = $AclObject.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access)
+  Note-Call "Set-Acl $LiteralPath $d"
+  if ($d -cnotmatch '^D:P') { $d = $d + $Inherited }
+  $script:F.Dacl = $d
+}
 
 Write-Host 'WhatIfChangesNothing'
 Reset-Fake; $F.Status = 'Stopped'; $F.StartType = 'Manual'; $F.Standby = 1800; $F.LongPaths = $null; $F.GitSystem = $null; $F.Dacl = $OpenDacl; $script:Console = $false
@@ -618,8 +691,15 @@ Assert-True ($rc -eq 0 -and (OutText) -match 'power.sleep applied, longpaths.on 
 [System.IO.File]::WriteAllText((Join-Path $RecDir 'fix-20990101T000000Z.json'), '{"schema": "x"}')
 $rc = Invoke-Fake 'list'
 Assert-True ($rc -eq 0 -and (OutText) -match 'not a valid record') '-List marks a bad record'
-$rc = Invoke-Fake 'undo' (Join-Path $RecDir 'missing.json') @('y')
+$rc = Invoke-Fake 'undo' (Join-Path $RecDir 'fix-20990102T000000Z.json') @('y')
 Assert-True ($rc -eq 2 -and (OutText) -match 'no such file') 'undo of a missing file: exit 2'
+$rc = Invoke-Fake 'undo' (Join-Path $RecDir 'notes.json') @('y')
+Assert-True ($rc -eq 2 -and (OutText) -match 'reads only the records this script writes') 'R1: a file not named fix-<time>.json is refused'
+$other = Join-Path ([IO.Path]::GetTempPath()) ('lanq-other-' + [Guid]::NewGuid().ToString('N')); [void](New-Item -ItemType Directory -Path $other)
+Copy-Item -LiteralPath $rp -Destination (Join-Path $other (Split-Path -Leaf $rp))
+$rc = Invoke-Fake 'undo' (Join-Path $other (Split-Path -Leaf $rp)) @('y', 'y', 'y')
+Assert-True ($rc -eq 2 -and $Calls.Count -eq 0 -and (OutText) -match 'reads only the records this script writes') 'R1: a record outside the record folder is refused'
+Remove-Item -LiteralPath $other -Recurse -Force
 Remove-Item -LiteralPath $RecDir -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host 'ScannerUnchangedAndStillReadOnly'
@@ -641,6 +721,7 @@ $sch = [System.IO.File]::ReadAllText((Join-Path $root 'schema/fix-record.v1.json
 Assert-Equal $sch.properties.schema.const 'lanq-makeready-fix/v1' 'schema/fix-record.v1.json parses, schema id'
 Assert-Equal ((@($sch.'$defs'.item.properties.PSObject.Properties | ForEach-Object { $_.Name }) | Sort-Object) -join ',') 'after,before,command,id,seq,status,time' 'schema item fields = record item fields'
 Assert-True (@($FixIds | Where-Object { @($sch.'$defs'.item.properties.id.enum) -notcontains $_ }).Count -eq 0) 'schema lists every Windows fix id'
+Assert-True ('scheme=381b4222-f694-41f0-9685-ff5bb260df2e standby=60 hibernate=-' -cmatch $sch.'$defs'.stateShapes.properties.'windows:power.sleep'.pattern) 'schema: the power.sleep shape includes the scheme'
 Assert-True ('value=0 type=dword' -cmatch $sch.'$defs'.stateShapes.properties.'windows:longpaths.on'.pattern -and 'value=- type=none' -cmatch $sch.'$defs'.stateShapes.properties.'windows:longpaths.on'.pattern) 'schema: the longpaths shape includes the value type'
 
 Write-Host ("`nfix PowerShell tests: {0} passed, {1} failed" -f $script:pass, $script:fail)

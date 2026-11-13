@@ -41,13 +41,20 @@ $FixInfo = @{
 }
 # Every function this file defines; an alias with one of these names (or of a command a fix runs) would run instead.
 $FixFunctionNames = @('Write-FixLine', 'Write-FixErr', 'Get-FixSessionId', 'Get-FixProcessTable', 'Get-AncestorNames', 'Test-FixOverSsh', 'Test-FixFromFile',
-  'Test-FixConsole', 'Read-FixAnswer', 'Test-Yes', 'Confirm-Fix', 'Test-FixElevated', 'Get-FixAliasShadow', 'Get-FixRefusal', 'Invoke-Native', 'Get-PowercfgAcSeconds',
-  'Find-Git', 'Test-OnlyAdminsSystem', 'ConvertFrom-Sddl', 'Test-SafeRestoreDacl', 'Get-DaclCore', 'Get-RestoreDacl', 'Format-Dacl', 'Test-TrustedSddl',
+  'Test-FixConsole', 'Read-FixAnswer', 'Test-Yes', 'Confirm-Fix', 'Test-FixElevated', 'Get-FixCommandShadow', 'Get-FixRefusal', 'Invoke-Native', 'Get-PowercfgAcSeconds',
+  'Find-Git', 'Get-PathGit', 'Test-OnlyAdminsSystem', 'ConvertFrom-Sddl', 'Test-SafeRestoreDacl', 'Get-DaclCore', 'Get-RestoreDacl', 'Format-Dacl', 'Test-TrustedSddl',
   'Get-AuthKeySummary', 'Get-FixState', 'ConvertFrom-StateText', 'Get-StateText', 'Test-SameState', 'Get-FixNote', 'Test-FixNeeded', 'Test-FixDone', 'Get-ExpectedAfter',
-  'Get-StateSummary', 'Get-FixCommand', 'Assert-Native', 'Invoke-FixChange', 'Get-FixRecordDir', 'Get-UtcStamp', 'Get-SafeWord', 'Set-FixRecordAcl', 'Get-PathSddl',
+  'Get-StateSummary', 'Get-FixCommand', 'Assert-Native', 'Invoke-FixChange', 'Get-FixRecordDir', 'Get-UtcStamp', 'Get-SafeWord', 'Get-AccountName', 'Test-SafeUndoDacl', 'Get-ExplicitOthers', 'New-FixSecuredDir', 'New-FixSecuredFile',
+  'Get-FixRecordDirProblem', 'Get-PathSddl',
   'Test-FixRecordDirTrusted', 'Initialize-FixRecordDir', 'Test-FixRecordTrusted', 'New-FixRecord', 'ConvertTo-JsonText', 'ConvertTo-FixJson', 'Save-FixRecord',
   'Test-Props', 'Test-Str', 'ConvertTo-TimeText', 'New-RecordError', 'Read-FixRecord', 'Show-Fix', 'Invoke-FixApply', 'Invoke-FixUndo', 'Show-FixRecords', 'Invoke-FixMain',
   'Get-UndoArg')
+# Every cmdlet this file runs. A function or alias with one of these names would run instead of the cmdlet, so the
+# script refuses to start when any of them does not resolve to the cmdlet itself (Get-FixCommandShadow).
+$FixCmdletNames = @('Get-Service', 'Set-Service', 'Start-Service', 'Stop-Service', 'Get-Item', 'Set-ItemProperty', 'Remove-ItemProperty', 'Get-Acl', 'Set-Acl',
+  'Get-Content', 'Get-ChildItem', 'Test-Path', 'Join-Path', 'Split-Path', 'Get-Command', 'Get-CimInstance', 'Select-Object', 'Where-Object', 'ForEach-Object', 'Sort-Object',
+  'ConvertFrom-Json', 'Write-Host', 'New-Object', 'Get-Location', 'Get-Alias')
+$FixWalkCache = $null   # the parent-process walk is done once per process
 # The things the fixes touch. Fixed names, never taken from a record file.
 $SshdName = 'sshd'
 $FsKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem'
@@ -57,8 +64,8 @@ $IcaclsExe = Join-Path $SysDir 'icacls.exe'
 $KeysFile = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'ssh\administrators_authorized_keys'
 $BaSid = 'S-1-5-32-544'; $SySid = 'S-1-5-18'; $TiSid = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
 # The record folder and files: owned by Administrators, only Administrators and SYSTEM may use them, nothing inherited.
-$RecordDirSddl = 'O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)'
-$RecordFileSddl = 'O:BAG:SYD:PAI(A;;FA;;;BA)(A;;FA;;;SY)'
+$RecordDirSddl = 'O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)'
+$RecordFileSddl = 'O:BAD:PAI(A;;FA;;;BA)(A;;FA;;;SY)'
 # The DACL icacls leaves on the keys file (used to predict a pending record's after state).
 $TightDacl = 'D:PAI(A;;FA;;;BA)(A;;FA;;;SY)'
 $FixOut = New-Object System.Collections.ArrayList
@@ -110,11 +117,13 @@ function Get-AncestorNames($Procs, [int]$StartPid) {
 
 function Test-FixOverSsh {
   if ($env:SSH_CONNECTION -or $env:SSH_CLIENT -or $env:SSH_TTY) { return $true }
-  # an elevated or runas child may lose the variables: look for sshd among the parent processes
-  $t = Get-FixProcessTable
-  if ($null -eq $t) { return ((Get-FixSessionId) -eq 0) }   # cannot tell: session 0 (services, OpenSSH) is refused
-  foreach ($n in (Get-AncestorNames $t $PID)) { if ($n -match '^sshd') { return $true } }
-  return $false
+  # an elevated or runas child may lose the variables: look for sshd among the parent processes (once per process)
+  if ($null -eq $script:FixWalkCache) {
+    $t = Get-FixProcessTable
+    if ($null -eq $t) { $script:FixWalkCache = ((Get-FixSessionId) -eq 0) }   # cannot tell: session 0 (services, OpenSSH) is refused
+    else { $script:FixWalkCache = (@(Get-AncestorNames $t $PID | Where-Object { $_ -match '^sshd' }).Count -gt 0) }
+  }
+  return [bool]$script:FixWalkCache
 }
 
 function Test-FixFromFile($Inv) {
@@ -144,18 +153,24 @@ function Test-FixElevated {
   catch { return $false }
 }
 
-# Names of aliases that would run instead of this script's functions or the cmdlets the fixes use.
-function Get-FixAliasShadow {
-  $names = $FixFunctionNames + @('Set-Service', 'Start-Service', 'Stop-Service', 'Set-ItemProperty', 'Remove-ItemProperty', 'Set-Acl', 'Get-Acl', 'Get-Service', 'Get-Item', 'Get-ItemProperty', 'Get-Content')
-  return @(Get-Alias -ErrorAction SilentlyContinue | Where-Object { $names -contains $_.Name } | ForEach-Object { $_.Name })
+# Names that would not run what this script means: an alias over one of its functions, or a function or alias over a
+# cmdlet it uses (a profile, a module or an earlier command in this session could have defined one).
+function Get-FixCommandShadow {
+  $bad = @()
+  foreach ($n in $FixFunctionNames) { if (@(Microsoft.PowerShell.Utility\Get-Alias -Name $n -ErrorAction SilentlyContinue).Count -gt 0) { $bad += $n } }
+  foreach ($n in $FixCmdletNames) {
+    $c = @(Microsoft.PowerShell.Core\Get-Command -Name $n -ErrorAction SilentlyContinue)
+    if ($c.Count -eq 0 -or "$($c[0].CommandType)" -ne 'Cmdlet') { $bad += $n }
+  }
+  return $bad
 }
 
 # '' when the script may run in this mode, else the reason it refuses.
 function Get-FixRefusal([string]$Mode, [bool]$FromFile) {
   if (Test-FixOverSsh) { return 'refused: this session runs over SSH (SSH_CONNECTION, SSH_CLIENT or SSH_TTY is set, sshd started it, or the parent processes cannot be read in session 0). Fix mode is for the owner at the PC itself. Nothing was changed.' }
   if (-not $FromFile) { return 'refused: the script came from stdin or a string ([scriptblock]::Create, iex). Save it as a file, read it, and run that file at the PC. Nothing was changed.' }
-  $sh = @(Get-FixAliasShadow)
-  if ($sh.Count -gt 0) { return "refused: an alias would run instead of a command this script uses: $($sh -join ', '). Start PowerShell with -NoProfile. Nothing was changed." }
+  $sh = @(Get-FixCommandShadow)
+  if ($sh.Count -gt 0) { return "refused: a function or alias would run instead of a command this script uses: $($sh -join ', '). Start PowerShell with -NoProfile. Nothing was changed." }
   if (@('apply', 'undo') -contains $Mode -and -not (Test-FixConsole)) { return 'refused: no interactive console (stdin is redirected, the session is not interactive, or it is session 0 where services and OpenSSH sessions run). Every change needs your answer at the keyboard; -WhatIf and -List work without one. Nothing was changed.' }
   return ''
 }
@@ -197,6 +212,12 @@ function Find-Git {
   $ok = $false; foreach ($r in $roots) { if ($g.Source.StartsWith($r.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) { $ok = $true } }
   return @{ Path = $g.Source; Trusted = $ok }
 }
+# The git the scanner checks: the first one on PATH (outside WindowsApps), as lanq-makeready.ps1 finds it.
+function Get-PathGit {
+  $g = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $g -or $g.Source -match '\\WindowsApps\\') { return '' }
+  return "$($g.Source)"
+}
 
 function Test-OnlyAdminsSystem([string]$Dacl) {   # every ACE is for Administrators (BA) or SYSTEM (SY)
   foreach ($m in [regex]::Matches($Dacl, '\(([^)]*)\)')) {
@@ -230,11 +251,35 @@ function Test-SafeRestoreDacl([string]$Dacl) {
   return ''
 }
 
+# '' when undo may write back this saved DACL. What undo writes is the protection flag plus the explicit entries
+# (Get-RestoreDacl): when the DACL is protected that is the whole result and is checked on its own; when it is not, the
+# folder adds its inherited entries again, which the saved DACL shows, so the saved DACL is checked as well.
+function Test-SafeUndoDacl([string]$Dacl) {
+  $why = Test-SafeRestoreDacl $Dacl
+  if ($why) { return $why }
+  if ($Dacl -cmatch '^D:[A-Z]*P') { $why = Test-SafeRestoreDacl (Get-RestoreDacl $Dacl); if ($why) { return "what undo writes (the explicit entries): $why" } }
+  return ''
+}
+
+# Explicit (not inherited) entries for others than Administrators and SYSTEM: icacls /grant leaves them in place.
+function Get-ExplicitOthers([string]$Dacl) {
+  return @([regex]::Matches($Dacl, '\(([^)]*)\)') | Where-Object { $f = $_.Groups[1].Value.Split(';'); $f[1] -cnotmatch 'ID' -and @('BA', 'SY', $BaSid, $SySid) -notcontains $f[5] } | ForEach-Object { $_.Groups[1].Value.Split(';')[5] })
+}
+
+# An account name for a SID (SDDL alias or S-1-...), or the SID when it cannot be translated.
+function Get-AccountName([string]$Sid) {
+  try {
+    $sd = ConvertFrom-Sddl "O:$Sid"
+    $id = $sd.Owner
+    try { return $id.Translate([System.Security.Principal.NTAccount]).Value } catch { return "$id" }
+  } catch { return $Sid }
+}
+
 # What undo can put back of a DACL: its protection flag and its own (explicit) entries. Inherited entries come back
 # from the parent folder by themselves; Windows does not take them literally.
 function Get-DaclCore([string]$Dacl) {
   $flags = ''; if ($Dacl -cmatch '^D:([A-Z]*)') { $flags = $Matches[1] }
-  $own = @([regex]::Matches($Dacl, '\([^)]*\)') | Where-Object { $_.Value.Split(';')[1] -cnotmatch 'ID' } | ForEach-Object { $_.Value })
+  $own = @([regex]::Matches($Dacl, '\([^)]*\)') | Where-Object { $_.Value.Split(';')[1] -cnotmatch 'ID' } | ForEach-Object { $_.Value } | Sort-Object)
   return ("protected=$($flags -cmatch 'P') " + ($own -join ''))
 }
 function Get-RestoreDacl([string]$Dacl) {
@@ -264,11 +309,11 @@ function Format-Dacl([string]$Dacl) {
 function Test-TrustedSddl([string]$Sddl) {
   $sd = ConvertFrom-Sddl $Sddl
   if (-not $sd) { return 'its permissions cannot be read' }
-  if (@($BaSid, $SySid) -notcontains "$($sd.Owner)") { return "it is owned by $($sd.Owner), not Administrators or SYSTEM" }
+  if (@($BaSid, $SySid) -notcontains "$($sd.Owner)") { return "it is owned by $(Get-AccountName "$($sd.Owner)"), not Administrators or SYSTEM" }
   if ($null -eq $sd.DiscretionaryAcl) { return 'it has no DACL (everyone may change it)' }
   foreach ($a in $sd.DiscretionaryAcl) {
     if ("$($a.AceQualifier)" -eq 'AccessAllowed' -and @($BaSid, $SySid) -notcontains "$($a.SecurityIdentifier)" -and ($a.AccessMask -band $WriteMask) -ne 0) {
-      return "$($a.SecurityIdentifier) may change it"
+      return "$(Get-AccountName "$($a.SecurityIdentifier)") may change it"
     }
   }
   return ''
@@ -279,14 +324,21 @@ function Get-AuthKeySummary([string[]]$Lines) {
   $out = @()
   foreach ($l in @($Lines)) {
     $t = "$l".Trim(); if (-not $t -or $t.StartsWith('#')) { continue }
-    $w = @($t -split '\s+'); $i = 0
-    while ($i -lt $w.Count -and $w[$i] -notmatch '^(ssh-|ecdsa-|sk-)') { $i++ }   # options come before the key type
-    if ($i -ge $w.Count - 1) { $out += 'a line this script cannot read as a key (check it yourself)'; continue }
+    $opt = ''
+    if ($t -notmatch '^(ssh-|ecdsa-|sk-)') {   # options first: they end at the first blank outside double quotes (as sshd reads them)
+      $q = $false; $i = 0
+      for (; $i -lt $t.Length; $i++) {
+        $ch = $t[$i]
+        if ($q -and $ch -eq '\') { $i++ } elseif ($ch -eq '"') { $q = -not $q } elseif (-not $q -and ($ch -eq ' ' -or $ch -eq "`t")) { break }
+      }
+      $opt = ' (with options)'; $t = $t.Substring([math]::Min($i, $t.Length)).Trim()
+    }
+    $w = @($t -split '\s+')
+    if ($w.Count -lt 2 -or $w[0] -notmatch '^(ssh-|ecdsa-|sk-)') { $out += 'a line this script cannot read as a key (check it yourself)'; continue }
     $fp = 'fingerprint unreadable'
-    try { $sha = [System.Security.Cryptography.SHA256]::Create(); $fp = 'SHA256:' + [Convert]::ToBase64String($sha.ComputeHash([Convert]::FromBase64String($w[$i + 1]))).TrimEnd('='); $sha.Dispose() } catch { }
-    $c = ''; if ($w.Count -gt $i + 2) { $c = ' ' + ($w[($i + 2)..($w.Count - 1)] -join ' ') }
-    $opt = ''; if ($i -gt 0) { $opt = ' (with options)' }
-    $out += (("$($w[$i]) $fp$c$opt") -replace '[^\x20-\x7E]', '?')
+    try { $sha = [System.Security.Cryptography.SHA256]::Create(); $fp = 'SHA256:' + [Convert]::ToBase64String($sha.ComputeHash([Convert]::FromBase64String($w[1]))).TrimEnd('='); $sha.Dispose() } catch { }
+    $c = ''; if ($w.Count -gt 2) { $c = ' ' + ($w[2..($w.Count - 1)] -join ' ') }
+    $out += (("$($w[0]) $fp$c$opt") -replace '[^\x20-\x7E]', '?')
   }
   return , $out
 }
@@ -300,18 +352,19 @@ function Get-FixState([string]$Id) {
       return @{ Installed = $true; Status = "$($svc.Status)"; StartType = "$($svc.StartType)" }
     }
     'power.sleep' {
-      $s = @{ Standby = $null; Hibernate = $null }
+      $s = @{ Scheme = $null; Standby = $null; Hibernate = $null }
+      $r = Invoke-Native $PowercfgExe @('/getactivescheme'); if ($r.Code -eq 0 -and "$($r.Out)" -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') { $s.Scheme = $Matches[1].ToLowerInvariant() }
       $r = Invoke-Native $PowercfgExe @('/q', 'SCHEME_CURRENT', 'SUB_SLEEP', 'STANDBYIDLE'); if ($r.Code -eq 0) { $s.Standby = Get-PowercfgAcSeconds $r.Out }
       $r = Invoke-Native $PowercfgExe @('/q', 'SCHEME_CURRENT', 'SUB_SLEEP', 'HIBERNATEIDLE'); if ($r.Code -eq 0) { $s.Hibernate = Get-PowercfgAcSeconds $r.Out }
       return $s
     }
     'longpaths.on' {
-      $s = @{ Value = $null; Kind = 'none' }
+      $s = @{ Value = $null; Kind = 'none'; Raw = $null }
       try {
         $k = Get-Item -LiteralPath $FsKey -ErrorAction Stop
         if (@($k.GetValueNames()) -contains 'LongPathsEnabled') {
-          $s.Kind = "$($k.GetValueKind('LongPathsEnabled'))"
-          if ($s.Kind -eq 'DWord') { $s.Value = ([long]$k.GetValue('LongPathsEnabled')) -band 4294967295 }
+          $s.Kind = "$($k.GetValueKind('LongPathsEnabled'))"; $s.Raw = $k.GetValue('LongPathsEnabled')
+          if ($s.Kind -eq 'DWord') { $s.Value = ([long]$s.Raw) -band 4294967295 }
         }
       } catch { $s.Kind = 'unreadable' }
       return $s
@@ -319,7 +372,7 @@ function Get-FixState([string]$Id) {
     'git.longpaths' {
       $g = Find-Git
       if (-not $g) { return @{ Git = $null } }
-      $s = @{ Git = $g.Path; Trusted = $g.Trusted; System = $null; Effective = $null; SystemFile = '' }
+      $s = @{ Git = $g.Path; Trusted = $g.Trusted; System = $null; Effective = $null; SystemFile = ''; PathGit = (Get-PathGit) }
       if (-not $g.Trusted) { return $s }
       $git = $g.Path
       $r = Invoke-Native $git @('config', '--system', '--show-origin', '--get', 'core.longpaths')
@@ -332,8 +385,8 @@ function Get-FixState([string]$Id) {
       if (-not (Test-Path -LiteralPath $KeysFile -PathType Leaf)) { return @{ Exists = $false } }
       $s = @{ Exists = $true; Reparse = $true; Dacl = $null; Ok = $null; Owner = $null; Keys = @() }
       try {
-        $it = Get-Item -LiteralPath $KeysFile -Force -ErrorAction Stop
-        $s.Reparse = [bool]($it.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+        $fsItem = Get-Item -LiteralPath $KeysFile -Force -ErrorAction Stop
+        $s.Reparse = [bool]($fsItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
         $acl = Get-Acl -LiteralPath $KeysFile -ErrorAction Stop
         $s.Owner = "$($acl.GetOwner([System.Security.Principal.SecurityIdentifier]))"
         $s.Dacl = $acl.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access)
@@ -359,10 +412,10 @@ function ConvertFrom-StateText([string]$Id, [string]$Text) {
       return $null
     }
     'power.sleep' {
-      if ($Text -cmatch '^standby=([0-9]{1,10}) hibernate=([0-9]{1,10}|-)$') {
-        $sb = [long]$Matches[1]; $hb = $null; if ($Matches[2] -ne '-') { $hb = [long]$Matches[2] }
+      if ($Text -cmatch '^scheme=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) standby=([0-9]{1,10}) hibernate=([0-9]{1,10}|-)$') {
+        $sc = $Matches[1]; $sb = [long]$Matches[2]; $hb = $null; if ($Matches[3] -ne '-') { $hb = [long]$Matches[3] }
         if ($sb -gt 4294967295 -or $hb -gt 4294967295) { return $null }
-        return @{ Standby = $sb; Hibernate = $hb }
+        return @{ Scheme = $sc; Standby = $sb; Hibernate = $hb }
       }
       return $null
     }
@@ -388,7 +441,7 @@ function Get-StateText([string]$Id, $S) {
   $t = $null
   switch ($Id) {
     { @('ssh.start', 'ssh.auto') -contains $_ } { if ($S.Installed) { $t = "starttype=$($S.StartType) status=$($S.Status)" } }
-    'power.sleep' { if ($null -ne $S.Standby) { $h = '-'; if ($null -ne $S.Hibernate) { $h = "$($S.Hibernate)" }; $t = "standby=$($S.Standby) hibernate=$h" } }
+    'power.sleep' { if ($null -ne $S.Standby -and $S.Scheme) { $h = '-'; if ($null -ne $S.Hibernate) { $h = "$($S.Hibernate)" }; $t = "scheme=$($S.Scheme) standby=$($S.Standby) hibernate=$h" } }
     'longpaths.on' { if ($S.Kind -eq 'none') { $t = 'value=- type=none' } elseif ($S.Kind -eq 'DWord') { $t = "value=$($S.Value) type=dword" } }
     'git.longpaths' { if ($S.Git -and $S.Trusted) { $v = '-'; if ($null -ne $S.System) { $v = "$($S.System)" }; $t = "value=$v" } }
     'ssh.aclkeys' { if ($S.Exists -and -not $S.Reparse -and $S.Dacl) { $t = "dacl=$($S.Dacl)" } }
@@ -409,7 +462,10 @@ function Get-FixNote([string]$Id, $S) {
   switch ($Id) {
     'ssh.start' { if ($S.Installed -and @('Running', 'Stopped') -notcontains $S.Status) { return "sshd is $($S.Status) (changing state); run this script again in a moment" } }
     'ssh.auto' { if ($S.Installed -and $S.Status -eq 'Running' -and @('Automatic', 'Manual', 'Disabled') -notcontains $S.StartType) { return "sshd starts $($S.StartType); this script only sets Automatic, Manual or Disabled" } }
-    'longpaths.on' { if (@('none', 'DWord') -notcontains $S.Kind) { return "LongPathsEnabled is of type $($S.Kind), not DWORD; fix it yourself in the registry" } }
+    'longpaths.on' {   # the scanner reads the value as a number: a REG_SZ or REG_QWORD 1 counts as on there, so nothing to say
+      if (@('none', 'DWord') -notcontains $S.Kind -and -not ($S.Raw -eq 1)) { return "LongPathsEnabled is of type $($S.Kind), not DWORD; fix it yourself in the registry" }
+    }
+    'power.sleep' { if ($null -ne $S.Standby -and -not $S.Scheme) { return 'the active power scheme could not be read (powercfg /getactivescheme), so undo could not be tied to it' } }
     'git.longpaths' {
       if ($S.Git -and -not $S.Trusted) { return "git here is $($S.Git), outside Program Files (a folder users may change); this script runs git only from Program Files, so set it yourself" }
       if ($S.Git -and "$($S.Effective)" -notmatch '^(?i)true$' -and $null -ne $S.Effective -and "$($S.Effective)" -ne "$($S.System)") {
@@ -422,7 +478,15 @@ function Get-FixNote([string]$Id, $S) {
       if (-not $S.Dacl) { return "$KeysFile could not be read (run elevated)" }
       if ($S.Dacl -match 'NO_ACCESS_CONTROL') { return "not fixable here: $KeysFile has no DACL at all (everyone has full access); set its permissions yourself" }
       if (@($BaSid, $SySid, $TiSid) -notcontains $S.Owner) { return "not fixable here: $KeysFile is owned by $($S.Owner); sshd also requires the owner to be Administrators or SYSTEM and this fix does not change owners: icacls.exe `"$KeysFile`" /setowner *S-1-5-32-544" }
-      if ($S.Ok -eq $false) { $why = Test-SafeRestoreDacl $S.Dacl; if ($why) { return "not fixable here: -Undo could not safely put the current permissions back ($why); fix them yourself" } }
+      if ($S.Ok -eq $false) {
+        $why = Test-SafeUndoDacl $S.Dacl; if ($why) { return "not fixable here: -Undo could not safely put the current permissions back ($why); fix them yourself" }
+        $ex = @(Get-ExplicitOthers $S.Dacl)
+        if ($ex.Count -gt 0) {
+          $names = @($ex | ForEach-Object { Get-AccountName $_ }) -join ', '
+          $cmd = @($ex | ForEach-Object { "icacls.exe `"$KeysFile`" /remove:g *$(if ($_ -match '^S-1-') { $_ } else { "$((ConvertFrom-Sddl "O:$_").Owner)" })" }) -join ' ; '
+          return "not offered: $KeysFile has its own entries for $names, which icacls /grant leaves in place, so this fix could not make it Administrators and SYSTEM only. Remove them yourself after checking ($cmd), then run this script again"
+        }
+      }
     }
   }
   return ''
@@ -459,7 +523,7 @@ function Get-ExpectedAfter([string]$Id, $S) {
   switch ($Id) {
     'ssh.start' { return 'starttype=Automatic status=Running' }
     'ssh.auto' { return "starttype=Automatic status=$($S.Status)" }
-    'power.sleep' { $h = '-'; if ($null -ne $S.Hibernate) { $h = '0' }; return "standby=0 hibernate=$h" }
+    'power.sleep' { $h = '-'; if ($null -ne $S.Hibernate) { $h = '0' }; return "scheme=$($S.Scheme) standby=0 hibernate=$h" }
     'longpaths.on' { return 'value=1 type=dword' }
     'git.longpaths' { return 'value=true' }
     'ssh.aclkeys' { return "dacl=$TightDacl" }
@@ -470,7 +534,7 @@ function Get-ExpectedAfter([string]$Id, $S) {
 function Get-StateSummary([string]$Id, $S) {
   switch ($Id) {
     { @('ssh.start', 'ssh.auto') -contains $_ } { return "sshd is $($S.Status), start type $($S.StartType)" }
-    'power.sleep' { $h = 'unreadable'; if ($null -ne $S.Hibernate) { $h = "$([math]::Round($S.Hibernate / 60)) min" }; return "sleeps after $([math]::Round($S.Standby / 60)) min, hibernates after $h (0 = never)" }
+    'power.sleep' { $h = 'unreadable'; if ($null -ne $S.Hibernate) { $h = "$([math]::Round($S.Hibernate / 60)) min" }; return "power scheme $($S.Scheme): sleeps after $([math]::Round($S.Standby / 60)) min, hibernates after $h (0 = never)" }
     'longpaths.on' { if ($null -eq $S.Value) { return 'LongPathsEnabled is not set (off)' }; return "LongPathsEnabled = $($S.Value)" }
     'git.longpaths' {
       $v = 'not set'; if ($null -ne $S.System) { $v = $S.System }; $e = 'not set'; if ($S.Effective) { $e = $S.Effective }
@@ -552,17 +616,32 @@ function Get-FixRecordDir { return (Join-Path ([Environment]::GetFolderPath('Com
 function Get-UtcStamp { return [DateTime]::UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture) }
 function Get-SafeWord([string]$S) { return ($S -replace '[^A-Za-z0-9._-]', '_') }
 
-function Set-FixRecordAcl([string]$Path, [string]$Sddl) {
-  $a = Get-Acl -LiteralPath $Path -ErrorAction Stop
-  $a.SetSecurityDescriptorSddlForm($Sddl)
-  Set-Acl -LiteralPath $Path -AclObject $a -ErrorAction Stop
+# The folder is created with its owner and DACL in the same call (no window in which it has the parent's permissions),
+# and never re-permissioned afterwards: an existing folder is only checked. .NET Framework (PowerShell 5.1) has
+# Directory.CreateDirectory(path, security); .NET 5+ (PowerShell 7) has FileSystemAclExtensions.Create.
+function New-FixSecuredDir([string]$Dir) {
+  $ds = New-Object System.Security.AccessControl.DirectorySecurity
+  $ds.SetSecurityDescriptorSddlForm($RecordDirSddl)
+  if ('System.IO.FileSystemAclExtensions' -as [type]) { [void][System.IO.FileSystemAclExtensions]::Create((New-Object System.IO.DirectoryInfo($Dir)), $ds) }
+  else { [void][System.IO.Directory]::CreateDirectory($Dir, $ds) }
+}
+# A new file (CreateNew: refused if the name exists, as a leftover or a planted link) created with its owner and DACL.
+function New-FixSecuredFile([string]$Path, [byte[]]$Bytes) {
+  $fsec = New-Object System.Security.AccessControl.FileSecurity
+  $fsec.SetSecurityDescriptorSddlForm($RecordFileSddl)
+  if ('System.IO.FileSystemAclExtensions' -as [type]) {
+    $st = [System.IO.FileSystemAclExtensions]::Create((New-Object System.IO.FileInfo($Path)), [System.IO.FileMode]::CreateNew, [System.Security.AccessControl.FileSystemRights]::Write, [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::None, $fsec)
+  } else {
+    $st = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::CreateNew, [System.Security.AccessControl.FileSystemRights]::Write, [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::None, $fsec)
+  }
+  try { $st.Write($Bytes, 0, $Bytes.Length) } finally { $st.Dispose() }
 }
 
 # Full security descriptor of a path, or '' when it is a reparse point (link, junction) or cannot be read.
 function Get-PathSddl([string]$Path) {
   try {
-    $it = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-    if ($it.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return '' }
+    $fsItem = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($fsItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return '' }
     return "$((Get-Acl -LiteralPath $Path -ErrorAction Stop).Sddl)"
   } catch { return '' }
 }
@@ -578,14 +657,23 @@ function Test-FixRecordDirTrusted([string]$Dir) {
   return ''
 }
 
+# '' when the record folder is missing (it is created at the first change) or exactly as this script makes it; checked
+# before the first question, so an unsafe folder stops the run before anything is asked or changed.
+function Get-FixRecordDirProblem {
+  $dir = Get-FixRecordDir
+  if (-not (Test-Path -LiteralPath $dir)) { return '' }
+  $why = Test-FixRecordDirTrusted $dir
+  if (-not $why) { return '' }
+  return ("the record folder $dir is not safe ($why). Nothing was changed. Look at what is in it, then move it out of the way: " +
+    "Rename-Item -LiteralPath '$dir' -NewName lanq-makeready.untrusted   (if that is refused, take it over first: takeown.exe /a /r /d y /f `"$dir`"), and run this script again.")
+}
+
 function Initialize-FixRecordDir {
   $dir = Get-FixRecordDir
   if (-not (Test-Path -LiteralPath $dir)) {
-    try { [void][System.IO.Directory]::CreateDirectory($dir); Set-FixRecordAcl $dir $RecordDirSddl } catch { return "could not create $dir ($($_.Exception.Message))" }
+    try { New-FixSecuredDir $dir } catch { return "could not create $dir ($($_.Exception.Message))" }
   }
-  $why = Test-FixRecordDirTrusted $dir
-  if ($why) { return "the record folder $dir is not safe ($why); nothing is written there. Check it, remove it, and run this script again." }
-  return ''
+  return (Get-FixRecordDirProblem)
 }
 
 # '' when a record file and its folder could only have been written by Administrators or SYSTEM.
@@ -623,8 +711,8 @@ function ConvertTo-FixJson($Rec) {
   return (($l -join "`n") + "`n")
 }
 
-# Written to a new temp file next to the record (refused if that name exists: a leftover or a planted link), given the
-# record's owner and ACL, then moved over the record, so a crash leaves the old or the new record whole.
+# Written to a new temp file next to the record (refused if that name exists: a leftover or a planted link), created
+# with the record's owner and ACL, then moved over the record, so a crash leaves the old or the new record whole.
 function Save-FixRecord($Rec) {
   try {
     $why = Initialize-FixRecordDir
@@ -633,8 +721,7 @@ function Save-FixRecord($Rec) {
     if (@(Get-ChildItem -LiteralPath (Split-Path -Parent $tmp) -Force -Filter (Split-Path -Leaf $tmp) -ErrorAction SilentlyContinue).Count -gt 0) {
       Write-FixErr "lanq-makeready-fix: $tmp exists (left by a crash, or planted); look at it, remove it, and run this script again"; return $false
     }
-    [System.IO.File]::WriteAllText($tmp, (ConvertTo-FixJson $Rec), (New-Object System.Text.UTF8Encoding($false)))
-    Set-FixRecordAcl $tmp $RecordFileSddl
+    New-FixSecuredFile $tmp ((New-Object System.Text.UTF8Encoding($false)).GetBytes((ConvertTo-FixJson $Rec)))
     if ([System.IO.File]::Exists($Rec.Path)) { [System.IO.File]::Replace($tmp, $Rec.Path, [NullString]::Value) } else { [System.IO.File]::Move($tmp, $Rec.Path) }
     return $true
   } catch { Write-FixErr "lanq-makeready-fix: could not write the record $($Rec.Path): $($_.Exception.Message)"; return $false }
@@ -683,7 +770,7 @@ function Read-FixRecord([string]$Path) {
     if (-not (Test-Str $it.command '^[\x20-\x7E]{0,1024}$')) { return (New-RecordError 'bad command text') }
     if (-not ($it.before -is [string]) -or $null -eq (ConvertFrom-StateText $it.id $it.before)) { return (New-RecordError "before state of $($it.id) has an unexpected shape") }
     if (-not ($it.after -is [string]) -or ($it.after -cne 'unknown' -and $null -eq (ConvertFrom-StateText $it.id $it.after))) { return (New-RecordError "after state of $($it.id) has an unexpected shape") }
-    if ($it.id -eq 'ssh.aclkeys') { $why = Test-SafeRestoreDacl $it.before.Substring(5); if ($why) { return (New-RecordError "the saved ssh.aclkeys permissions are not safe to put back: $why") } }
+    if ($it.id -eq 'ssh.aclkeys') { $why = Test-SafeUndoDacl $it.before.Substring(5); if ($why) { return (New-RecordError "the saved ssh.aclkeys permissions are not safe to put back: $why") } }
     [void]$rec.Items.Add([ordered]@{ seq = [int]$it.seq; id = $it.id; status = $it.status; time = $tm; before = $it.before; command = $it.command; after = $it.after })
   }
   return @{ Rec = $rec; Error = '' }
@@ -699,6 +786,9 @@ function Show-Fix([string]$Id, $S) {
     Write-FixLine "  keys:    $(@($S.Keys).Count) line(s) in the file. Review them: after this fix sshd trusts every one of them for administrator logins."
     foreach ($k in @($S.Keys)) { Write-FixLine "    - $k" }
   }
+  if ($Id -eq 'git.longpaths' -and $S.PathGit -and $S.PathGit -ne $S.Git) {
+    Write-FixLine "  note:    the scanner checks the git first on PATH ($($S.PathGit)); this fix sets the system config of $($S.Git). If they are different installs, the scanner may still report git."
+  }
   foreach ($c in (Get-FixCommand $Id 'apply' $S $S)) { Write-FixLine "  command: $c" 'Cyan' }
   foreach ($c in (Get-FixCommand $Id 'undo' $S $S)) { Write-FixLine "  undo:    $c" }
 }
@@ -708,6 +798,7 @@ function Invoke-FixApply([bool]$Dry) {
   if ($Dry) { Write-FixLine "lanq-makeready-fix $ToolVersion dry run: shows each applicable fix and its undo; nothing is changed" }
   else { Write-FixLine "lanq-makeready-fix ${ToolVersion}: changes only what you confirm, one fix at a time (default no)" }
   $rec = $null; $failed = 0; $shown = 0
+  if ($elev -and -not $Dry) { $why = Get-FixRecordDirProblem; if ($why) { Write-FixErr "lanq-makeready-fix: $why"; return 1 } }
   foreach ($id in $FixIds) {
     $s = Get-FixState $id
     $note = Get-FixNote $id $s
@@ -747,8 +838,14 @@ function Invoke-FixUndo([string]$Path) {
   if (-not [System.IO.Path]::IsPathRooted($Path)) { $Path = Join-Path (Get-Location).ProviderPath $Path }
   if (-not (Test-FixElevated)) {
     Write-FixLine "lanq-makeready-fix ${ToolVersion}: -Undo needs an elevated PowerShell (Run as administrator): the records and every change need it. This script never elevates itself. Nothing was changed." 'DarkYellow'
-    return 0
+    return 1
   }
+  $dir = [System.IO.Path]::GetFullPath((Get-FixRecordDir)).TrimEnd('\')
+  $full = [System.IO.Path]::GetFullPath($Path)
+  if ((Split-Path -Parent $full) -ne $dir -or (Split-Path -Leaf $full) -notmatch '^fix-[0-9]{8}T[0-9]{6}Z(-[0-9]{1,4})?\.json$') {
+    Write-FixErr "lanq-makeready-fix: record rejected: -Undo reads only the records this script writes, fix-<time>.json in $dir. Nothing was changed."; return 2
+  }
+  $Path = $full
   $why = Test-FixRecordTrusted $Path
   if ($why -and [System.IO.File]::Exists($Path)) { Write-FixErr "lanq-makeready-fix: record rejected ($why; someone other than Administrators could have written it): $Path. Nothing was changed."; return 2 }
   $r = Read-FixRecord $Path
@@ -783,7 +880,16 @@ function Invoke-FixUndo([string]$Path) {
     if (-not $ct2 -or -not (Test-SameState $id $ct2 $it.after)) { Write-FixLine '  changed since; left alone' 'DarkYellow'; continue }
     $err = ''
     try { Invoke-FixChange $id 'undo' $b $cur2 } catch { $err = "$($_.Exception.Message)" }
-    $now = Get-StateText $id (Get-FixState $id)
+    $nowState = Get-FixState $id
+    $now = Get-StateText $id $nowState
+    if ($id -eq 'ssh.aclkeys' -and $nowState.Dacl) {
+      $lost = Test-SafeRestoreDacl $nowState.Dacl
+      if ($lost) {
+        $failed++
+        Write-FixLine "  FAILED: after the undo the keys file's permissions are not safe ($lost). Give Administrators and SYSTEM full control again now: icacls.exe `"$KeysFile`" /grant *S-1-5-32-544:F /grant *S-1-5-18:F" 'Red'
+        continue
+      }
+    }
     if (-not $err -and $now -and (Test-SameState $id $now $it.before)) {
       $it.status = 'undone'; $it.time = Get-UtcStamp
       if (Save-FixRecord $rec) { Write-FixLine '  undone and verified' 'Green' } else { $failed++ }

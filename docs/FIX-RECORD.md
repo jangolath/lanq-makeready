@@ -11,23 +11,25 @@ that does not have exactly the shape below, and it acts only when the PC's state
 
 | OS | Path | Permissions |
 |---|---|---|
-| Windows | `%ProgramData%\lanq-makeready\fix-<yyyyMMddTHHmmssZ>.json` | The folder is created by the script, owned by Administrators, protected (nothing inherited), and only Administrators and SYSTEM have access (`O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)`). Each record gets the same owner and DACL. Records are never kept in `%LOCALAPPDATA%`. |
-| Linux | `/var/lib/lanq-makeready/fix-<yyyyMMddTHHmmssZ>.json` | Created by root with umask 077: folder 700, files 600, owned by root. |
+| Windows | `%ProgramData%\lanq-makeready\fix-<yyyyMMddTHHmmssZ>.json` | The folder is created by the script with its permissions in the same call: owned by Administrators, protected (nothing inherited), and only Administrators and SYSTEM have access (`O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)`). Each record file is created the same way (`O:BAD:PAI(A;;FA;;;BA)(A;;FA;;;SY)`). An existing folder is never re-permissioned: if it is not exactly like this, the run stops before the first question. Records are never kept in `%LOCALAPPDATA%`. |
+| Linux | `/var/lib/lanq-makeready/fix-<yyyyMMddTHHmmssZ>.json` | Created by root with umask 077: folder 700, files 600, owned by root. An existing folder that is not root's with mode 700, or is a link, stops the run before the first question. |
 
-The time in the name is UTC. When a name is taken, `-2`, `-3`, ... is added. On Linux the script would use
-`${XDG_STATE_HOME:-~/.local/state}/lanq-makeready/` for a non-root user, but a non-root user can make no change, so
-records are written only as root. `--list` shows both folders.
+The time in the name is UTC. When a name is taken, `-2`, `-3`, ... is added. Every fix needs root, so on Linux
+records are written only to `/var/lib/lanq-makeready/`. `--list` also lists `${XDG_STATE_HOME:-~/.local/state}/lanq-makeready/`
+and marks any record there (or any record that is not root's alone) as not trusted.
 
 A record is saved by writing a temp file in the same folder and moving it over the record, so a crash leaves the old
 or the new version whole, never half a file. On Windows a leftover `fix-....json.tmp` stops the script until you remove it.
 
 ## Who may undo it
 
-- Windows: undo needs an elevated PowerShell. The record file and its folder must be owned by Administrators or
-  SYSTEM, and nobody else may have a right that changes them (write, append, delete, change permissions or owner).
-  Neither may be a link.
-- Linux: undo needs root. The record file and its folder must not be symlinks, must be owned by uid 0, and must not be
-  writable by group or others.
+- Undo reads only `fix-<time>.json` files directly in the record folder above (on Linux the path is resolved, links
+  followed, and its folder must be `/var/lib/lanq-makeready`). A record copied anywhere else is rejected.
+- Windows: undo needs an elevated PowerShell (without it: a note and exit 1). The record file and its folder must be
+  owned by Administrators or SYSTEM, and nobody else may have a right that changes them (write, append, delete, change
+  permissions or owner). Neither may be a link.
+- Linux: undo needs root (without it: a note and exit 1). The record file and its folder must not be symlinks, must
+  be owned by uid 0, and must not be writable by group or others.
 
 Otherwise the record is rejected with exit 2 and nothing is changed.
 
@@ -90,17 +92,17 @@ invalid.
 | OS : id | Shape | Notes |
 |---|---|---|
 | windows : `ssh.start`, `ssh.auto` | `starttype=(Automatic\|Manual\|Disabled) status=(Running\|Stopped)` | the sshd service |
-| windows : `power.sleep` | `standby=<seconds> hibernate=(<seconds>\|-)` | AC timeouts of the active power plan from `powercfg /q`; `-` = hibernate timeout unreadable (then it is not changed). 0 = never. |
+| windows : `power.sleep` | `scheme=<guid> standby=<seconds> hibernate=(<seconds>\|-)` | the active power plan (`powercfg /getactivescheme`, lower case) and its AC timeouts from `powercfg /q`; `-` = hibernate timeout unreadable (then it is not changed). 0 = never. Because the plan is part of the state, undo acts only while the same plan is active; after a plan switch it says "changed since; left alone". |
 | windows : `longpaths.on` | `value=<n> type=dword` or `value=- type=none` | `LongPathsEnabled` under `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem`; `none` = absent. A value of another type is never offered. |
 | windows : `git.longpaths` | `value=(<word>\|-)` | `git config --system core.longpaths`, 1-16 letters or digits; `-` = unset |
-| windows : `ssh.aclkeys` | `dacl=D:<flags>(<ace>)...` | the DACL of `%ProgramData%\ssh\administrators_authorized_keys` in SDDL: allow (`A`) and deny (`D`) entries only, at most 64. On undo a `before` DACL is also rejected unless it has entries, no deny entry, and full control for both Administrators and SYSTEM. |
+| windows : `ssh.aclkeys` | `dacl=D:<flags>(<ace>)...` | the DACL of `%ProgramData%\ssh\administrators_authorized_keys` in SDDL: allow (`A`) and deny (`D`) entries only, at most 64. On undo a `before` DACL is also rejected unless it has entries, no deny entry, and full control for both Administrators and SYSTEM; when it is protected, the same is required of its explicit entries alone, since that is what undo writes. After the undo the file's DACL is read again, and the undo fails loudly if Administrators or SYSTEM lost full control. |
 | linux : `ssh.start` | `unit=(ssh\|sshd) enabled=(enabled\|disabled) active=(active\|inactive)` | `systemctl is-enabled` / `is-active` of the unit (`failed` counts as inactive) |
 | linux : `power.sleep` | `sleep=<v> suspend=<v> hibernate=<v> hybrid-sleep=<v>` | `systemctl is-enabled` of the four targets, for example `static`, `masked`, `masked-runtime`, `none` (not found) |
 
 How the states are compared:
 
-- For `ssh.aclkeys`, two DACLs count as the same state when the protection flag and the explicit (not inherited)
-  entries are the same. Undo puts back exactly those. Inherited entries come back from the parent folder as it is when
+- For `ssh.aclkeys`, two DACLs count as the same state when the protection flag and the set of explicit (not
+  inherited) entries are the same, in any order. Undo puts back exactly those. Inherited entries come back from the parent folder as it is when
   you undo; Windows re-creates them and does not take them from the record.
 - Everything else is compared as exact text.
 
@@ -128,7 +130,7 @@ the record. The `command` field is never run. The `host` and `user` fields are f
   "user": "builder",
   "started": "2026-11-13T21:04:10Z",
   "items": [
-    {"seq": 1, "id": "power.sleep", "status": "applied", "time": "2026-11-13T21:04:31Z", "before": "standby=1800 hibernate=10800", "command": "powercfg /change standby-timeout-ac 0 ; powercfg /change hibernate-timeout-ac 0", "after": "standby=0 hibernate=0"},
+    {"seq": 1, "id": "power.sleep", "status": "applied", "time": "2026-11-13T21:04:31Z", "before": "scheme=381b4222-f694-41f0-9685-ff5bb260df2e standby=1800 hibernate=10800", "command": "powercfg /change standby-timeout-ac 0 ; powercfg /change hibernate-timeout-ac 0", "after": "scheme=381b4222-f694-41f0-9685-ff5bb260df2e standby=0 hibernate=0"},
     {"seq": 2, "id": "longpaths.on", "status": "applied", "time": "2026-11-13T21:04:40Z", "before": "value=0 type=dword", "command": "Set-ItemProperty -Path HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem -Name LongPathsEnabled -Value 1 -Type DWord", "after": "value=1 type=dword"},
     {"seq": 3, "id": "git.longpaths", "status": "pending", "time": "2026-11-13T21:04:52Z", "before": "value=-", "command": "\"C:\\Program Files\\Git\\cmd\\git.exe\" config --system core.longpaths true", "after": "value=true"}
   ]

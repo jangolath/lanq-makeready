@@ -32,6 +32,10 @@ The fix script changes the PC, but only what its owner confirms there, one item 
 
 - **Local only.** It refuses to run over SSH, from stdin or a string (`sh -s`, `sh -c`, a pipe,
   `[scriptblock]::Create`, `iex`), or without an interactive console (exit 3). LanQueue does not embed or run it.
+  The SSH check is a tripwire against accidental or naive remote use (see the residual risks below).
+- **Runs what it means.** On Windows it refuses to start (exit 3) when a function or alias would run instead of one of
+  its own functions or of a cmdlet it uses (for example one defined by a profile); start PowerShell with `-NoProfile`.
+  The sh script removes all aliases before it starts.
 - **Confirm each.** There is no `--yes`, `-Yes` or `-Force`. Each fix shows the check, the current state, the exact
   command and its undo, and asks `Apply? [y/N]`. The default is no.
 - **Short, fixed list.** Windows: start sshd, start it automatically, no sleep or hibernate on AC, long paths, git
@@ -42,13 +46,19 @@ The fix script changes the PC, but only what its owner confirms there, one item 
   usable record. `-Undo` / `--undo` puts the changes back, newest first, confirming each. It touches an item only
   when its current state is still the one the fix left ("changed since; left alone" otherwise).
 - **Records in admin-only or root-owned places.** Windows: `%ProgramData%\lanq-makeready`, owned by Administrators,
-  not inherited, only Administrators and SYSTEM. If the folder exists and is not like that, nothing is written. Linux:
-  `/var/lib/lanq-makeready`, folder 700 and files 600, owned by root.
-- **Tamper handling.** Undo rejects (exit 2, nothing changed) a record whose file or folder someone other than
-  Administrators/SYSTEM (Windows) or root (Linux) could have written, or a link. It also rejects a record with any
-  field outside its fixed shape. Undo never runs text from the record. It builds each command from the fix id and the
+  not inherited, only Administrators and SYSTEM. The folder and each record file are created with these permissions
+  in the same call; an existing folder is never re-permissioned, only checked. Linux: `/var/lib/lanq-makeready`,
+  folder 700 and files 600, owned by root. If the folder exists and is not like that (another owner, other
+  permissions, a link), the run stops before the first question and nothing is changed; the message names the owner
+  and how to move the folder out of the way.
+- **Tamper handling.** Undo reads only `fix-<time>.json` files directly in the record folder above; a record copied
+  anywhere else is rejected. It also rejects (exit 2, nothing changed) a record whose file or folder someone other than
+  Administrators/SYSTEM (Windows) or root (Linux) could have written, or a link, and a record with any field outside
+  its fixed shape. Undo never runs text from the record. It builds each command from the fix id and the
   parsed before state; service, registry key, file and unit names are fixed in the script. Undo of `ssh.aclkeys` puts
-  back only a DACL that keeps full control for Administrators and SYSTEM and has no deny entry.
+  back only a DACL that keeps full control for Administrators and SYSTEM and has no deny entry, checks that on what it
+  actually writes (the saved explicit entries, when the DACL was protected), and reads the file's DACL again afterwards:
+  if Administrators or SYSTEM lost full control it fails loudly and prints the command that gives it back.
 
 Residual risks, stated plainly:
 
@@ -58,8 +68,12 @@ Residual risks, stated plainly:
 - **The checks are not a sandbox.** The refusals (SSH, stdin, console, aliases) and the record checks stop mistakes
   and remote use. They do not protect against code that already runs as admin or root on the PC: such code can change
   the PC, or a record, directly.
-- **SSH detection is best effort.** It uses the SSH variables, the parent processes, and on Linux logind's session.
-  A session that hides all three is not recognized; the console check and the per-fix prompt still apply.
+- **SSH detection is a tripwire, not a barrier.** It uses the SSH variables, the parent processes (Windows: also
+  session 0), and on Linux logind's view of the login session. It stops accidental or naive remote use, such as an
+  agent or a script running the fix script through `ssh`. It does not stop a determined admin or root: for example
+  `systemd-run --pty`, `machinectl shell`, a scheduled task, or attaching at the console to a tmux or screen session
+  can give a session that looks local. Such a person can change the PC directly anyway; the console check and the
+  per-fix prompt still apply.
 - **Inherited permissions.** Undo of `ssh.aclkeys` restores the file's own entries. Inherited entries come from the
   parent folder as it is at undo time.
 

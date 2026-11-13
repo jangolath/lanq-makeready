@@ -104,7 +104,7 @@ cmd_words() {
       }
     }' | sort -u
 }
-allowed=" printf echo awk sed tr cut head wc grep cat command id uname date sort uniq read test shift exit return true false break continue umask unalias type set ls loginctl timeout gsettings mkdir mktemp mv rm fi done esac then else elif do in while for if case until [ ]] "
+allowed=" printf echo awk sed tr cut head wc grep cat command id uname date sort uniq read test shift exit return true false break continue umask unalias type set ls cd pwd loginctl timeout gsettings mkdir mktemp mv rm fi done esac then else elif do in while for if case until [ ]] "
 forbidden=" sudo su doas pkexec chmod chown ln cp tee curl wget nc ssh scp dd eval bash sh exec source apt apt-get dnf yum apk "
 mutating='systemctl[^|;&]*[[:space:]](enable|disable|start|stop|restart|reload|try-restart|reload-or-restart|mask|unmask|daemon-reload|set-default|edit|kill|isolate|link|preset|preset-all|revert|reboot|poweroff|halt|suspend|hibernate|hybrid-sleep|set-property|set-environment)([[:space:]]|$)'
 fix_guard() { # FILE -> one line per violation
@@ -224,6 +224,7 @@ has_console() { [ "$FAKE_CONSOLE" = 1 ]; }
 user_rec_dir() { echo "$RECDIR"; }
 root_rec_dir() { echo "$RECDIR"; }
 record_trusted() { [ -z "${FAKE_UNTRUSTED:-}" ]; }
+record_dir_problem() { if [ -n "${FAKE_DIRBAD:-}" ]; then echo "the record folder $RECDIR is not root's alone (test). Nothing was changed."; fi; return 0; }
 sleep_risk() { echo "${FAKE_RISK:-sleeps}"; }
 audit_session_id() { :; }
 latest_record() { for _r in "$RECDIR"/fix-*.json; do [ -e "$_r" ] && _last=$_r; done; [ -n "${_last:-}" ] && echo "$_last"; _last=""; }
@@ -250,7 +251,7 @@ reset_fake() { # everything fine: ssh enabled and active, sleep targets masked
   rm -rf "$FAKE"; mkdir -p "$FAKE"; : > "$FAKE/calls"; : > "$FAKE/snaps"; : > "$FAKE/reads"
   echo enabled > "$FAKE/u.ssh.service.en"; echo active > "$FAKE/u.ssh.service.act"; echo inactive > "$FAKE/u.ssh.socket.act"
   for t in sleep suspend hibernate hybrid-sleep; do echo masked > "$FAKE/u.$t.target.en"; done
-  FAKE_ROOT=1; FAKE_CONSOLE=1; FAKE_OS=Linux; ON_ANSWER=""; FAKE_RISK=sleeps; FAKE_UNTRUSTED=""
+  FAKE_ROOT=1; FAKE_CONSOLE=1; FAKE_OS=Linux; ON_ANSWER=""; FAKE_RISK=sleeps; FAKE_UNTRUSTED=""; FAKE_DIRBAD=""
 }
 setu() { echo "$2" > "$FAKE/u.$1"; } # setu ssh.service.en disabled
 unmask_all() { for _t in sleep suspend hibernate hybrid-sleep; do setu $_t.target.en static; done; }
@@ -375,7 +376,7 @@ if [ -z "$(calls)" ]; then ok "undo: default no leaves it"; else bad "undo no" "
 ON_ANSWER='setu suspend.target.en static'; runfix 'y\n' --undo "$rec"
 if [ -z "$(calls)" ]; then ok "undo: re-checks the state after the answer"; else bad "undo recheck" "$(calls)" none; fi
 setu suspend.target.en masked; FAKE_ROOT=0; runfix 'y\n' --undo "$rec"
-if [ "$RC" = 0 ] && [ -z "$(calls)" ] && [ ! -s "$FAKE/reads" ]; then ok "C7: undo when not root: nothing read or changed"; else bad "undo not root" "$RC $(calls)" "0, none"; fi
+if [ "$RC" = 1 ] && [ -z "$(calls)" ] && [ ! -s "$FAKE/reads" ]; then ok "C7/D5: undo when not root: exit 1, nothing read or changed"; else bad "undo not root" "$RC $(calls)" "1, none"; fi
 contains "$OUT" "--undo needs root" "C7: undo when not root: says so first"
 FAKE_ROOT=1; FAKE_UNTRUSTED=1; runfix 'y\n' --undo "$rec"
 if [ "$RC" = 2 ] && [ -z "$(calls)" ] && [ ! -s "$FAKE/reads" ]; then ok "L6: a record others could have written is refused as root"; else bad "L6 untrusted record" "$RC $(calls)" "2, none"; fi
@@ -404,6 +405,37 @@ mkdir -p "$FAKE/user"; chmod 000 "$FAKE/user" 2>/dev/null
 if [ ! -r "$FAKE/user" ]; then runfix '' --list; contains "$OUT" "cannot be read without root" "C8: a folder it cannot read: says so"; fi
 chmod 700 "$FAKE/user" 2>/dev/null
 user_rec_dir() { echo "$RECDIR"; }
+FAKE_UNTRUSTED=1; runfix '' --list
+contains "$OUT" "not trusted (only root-owned records in $RECDIR are used" "D3: --list marks a record --undo would refuse"
+FAKE_UNTRUSTED=""
+
+echo "R6 records only from the root record folder; D1 an unsafe folder stops the run before any question"
+for l in 'drwx------ 2 0 0 4096 Nov 13 10:00 d' 'drwx------+ 2 0 0 4096 Nov 13 10:00 d'; do
+  if dir_perm_ok "$l"; then ok "D1 dir_perm_ok: $l"; else bad "D1 dir_perm_ok: $l" refused ok; fi
+done
+for l in 'drwxr-xr-x 2 0 0 4096 Nov 13 10:00 d' 'drwx------ 2 1000 0 4096 Nov 13 10:00 d' '-rw------- 1 0 0 1 Nov 13 10:00 f' 'lrwxrwxrwx 1 0 0 1 Nov 13 10:00 l'; do
+  if dir_perm_ok "$l"; then bad "D1 dir_perm_ok refuses: $l" ok refused; else ok "D1 dir_perm_ok refuses: $l"; fi
+done
+reset_fake; mkdir -p "$RECDIR" "$FAKE/other"; : > "$RECDIR/fix-20990101T000000Z.json"; : > "$FAKE/other/fix-20990101T000000Z.json"; : > "$RECDIR/notes.json"
+if record_in_place "$RECDIR/fix-20990101T000000Z.json"; then ok "R6: a fix-<time>.json in the root record folder"; else bad "R6 in place" refused ok; fi
+if (cd "$RECDIR" && record_in_place fix-20990101T000000Z.json); then ok "R6: the same, given as a relative path"; else bad "R6 relative" refused ok; fi
+if record_in_place "$FAKE/other/fix-20990101T000000Z.json"; then bad "R6 other folder" ok refused; else ok "R6: a record in another folder is refused"; fi
+if record_in_place "$RECDIR/notes.json"; then bad "R6 other name" ok refused; else ok "R6: another file name is refused"; fi
+if record_in_place "$RECDIR/../rec/fix-20990101T000000Z.json"; then ok "R6: .. in the path is resolved"; else bad "R6 dotdot" refused ok; fi
+runfix 'y\n' --undo "$FAKE/other/fix-20990101T000000Z.json"
+if [ "$RC" = 2 ] && [ -z "$(calls)" ]; then ok "R6: --undo of a record outside the folder: exit 2"; else bad "R6 undo outside" "$RC" 2; fi
+contains "$OUT" "reads only the records this script writes" "R6: says why"
+reset_fake; unmask_all; FAKE_DIRBAD=1; runfix 'y\n'
+if [ "$RC" = 1 ] && [ -z "$(calls)" ] && [ -z "$(latest_record)" ]; then ok "D1: an unsafe record folder: exit 1, nothing changed"; else bad "D1 unsafe folder" "$RC $(calls)" "1, none"; fi
+lacks "$OUT" "Apply?" "D1: stopped before the first question"; contains "$OUT" "not root's alone" "D1: says why"
+
+echo "R7 notes where the scanner's view and this script's could differ"
+reset_fake; unmask_all; FAKE_RISK=desktop; runfix '' --dry-run
+contains "$OUT" "cannot be read from here (a root shell has no session bus)" "R7(a): a desktop whose power setting cannot be read: the prompt says so"
+reset_fake; setu ssh.service.en masked; setu ssh.service.act inactive; runfix '' --dry-run
+contains "$OUT" "ssh.service is masked; this script only enables a unit that is enabled or disabled" "R7(b): a masked ssh unit: a note says why it is not offered"
+reset_fake; rm -f "$FAKE/u.ssh.service.en"; setu sshd.service.en static; setu sshd.service.act inactive; runfix '' --dry-run
+contains "$OUT" "sshd.service is static" "R7(b): a static sshd unit: a note"
 
 echo "a failed change is recorded"
 reset_fake; unmask_all; : > "$FAKE/failnext"; runfix 'y\n'

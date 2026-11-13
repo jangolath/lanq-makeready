@@ -10,8 +10,9 @@
 #    anything but y or yes is no;
 #  - it never elevates itself: without root every fix is skipped with a note;
 #  - before each change it writes the undo record (schema lanq-makeready-fix/v1) to
-#    ${XDG_STATE_HOME:-~/.local/state}/lanq-makeready/fix-<UTC time>.json, or /var/lib/lanq-makeready/ as root, and
-#    --undo FILE puts the changes back, newest first, again confirming each.
+#    /var/lib/lanq-makeready/fix-<UTC time>.json (root only, folder 0700; every fix needs root, so records are only
+#    ever written there), and --undo FILE puts the changes back, newest first, again confirming each. --undo reads
+#    only records in that folder; --list also lists ${XDG_STATE_HOME:-~/.local/state}/lanq-makeready/.
 # Fixes (v1): ssh.start (enable and start the ssh/sshd unit), power.sleep (mask the four sleep targets).
 #
 # Usage: sh lanq-makeready-fix.sh [--dry-run | --undo FILE | --list]
@@ -187,7 +188,16 @@ needed() { # $1 id, $2 state
 }
 note_of() { # $1 id -> why a fix the scanner would report is not offered (empty: nothing to say)
   case "$1" in
-    ssh.start) _u=$(ssh_unit) || return 0
+    ssh.start)
+      if ! _u=$(ssh_unit); then
+        for _u in ssh sshd; do
+          case "$(unit_enabled "$_u.service")" in
+            none|not-found|alias) ;;
+            *) [ "$(unit_active "$_u.service")" = active ] || echo "$_u.service is $(unit_enabled "$_u.service"); this script only enables a unit that is enabled or disabled, so change it yourself if you want it (unmask or enable the unit)"; return 0 ;;
+          esac
+        done
+        return 0
+      fi
       [ "$(unit_active "$_u.service")" = other ] && echo "$_u.service is changing state (activating or deactivating); run this script again in a moment" ;;
   esac
   return 0
@@ -261,6 +271,32 @@ perm_ok() {
   case "$1" in ?????w*|????????w*) return 1 ;; esac
   return 0
 }
+# An `ls -ldn` line of the record folder as this script makes it: a directory, mode 0700, owned by uid 0.
+dir_perm_ok() {
+  # shellcheck disable=SC2086
+  set -- $1
+  [ "${3:-}" = 0 ] || return 1
+  case "$1" in drwx------*) return 0 ;; esac
+  return 1
+}
+# '' when the root record folder is missing (it is created at the first change) or root's alone; checked before the
+# first question, so an unsafe folder stops the run before anything is asked or changed.
+record_dir_problem() {
+  _rdir=$(root_rec_dir)
+  { [ -e "$_rdir" ] || [ -L "$_rdir" ]; } || return 0
+  if [ -L "$_rdir" ] || ! dir_perm_ok "$(ls -ldn -- "$_rdir" 2>/dev/null)"; then
+    echo "the record folder $_rdir is not root's alone (a link, not owned by root, or not mode 0700). Nothing was changed. Look at what is in it, then rename it (for example to $_rdir.untrusted) or make it root's with mode 700 (chown root:root, chmod 700), and run this script again."
+  fi
+  return 0
+}
+# --undo reads only fix-<time>.json files directly in the root record folder (both paths resolved, links followed).
+record_in_place() {
+  case "${1##*/}" in fix-[0-9]*T[0-9]*Z.json|fix-[0-9]*T[0-9]*Z-[0-9]*.json) ;; *) return 1 ;; esac
+  case "$1" in */*) _pd=${1%/*}; [ -n "$_pd" ] || _pd=/ ;; *) _pd=. ;; esac
+  _pd=$(cd -P -- "$_pd" 2>/dev/null && pwd -P) || return 1
+  _rd=$(cd -P -- "$(root_rec_dir)" 2>/dev/null && pwd -P) || return 1
+  [ "$_pd" = "$_rd" ]
+}
 # As root, a record is used only if it and its folder are root's alone (not links, owned by root, no group/other write).
 record_trusted() {
   _rf=$1; case "$_rf" in */*) _rd=${_rf%/*}; [ -n "$_rd" ] || _rd=/ ;; *) _rd=. ;; esac
@@ -295,6 +331,7 @@ save_record() {
   _d=${REC_PATH%/*}
   if [ -L "$_d" ]; then err "lanq-makeready-fix: $_d is a symlink; not writing the record there"; return 1; fi
   mkdir -p -- "$_d" 2>/dev/null || { err "lanq-makeready-fix: cannot create $_d"; return 1; }
+  _why=$(record_dir_problem); if [ -n "$_why" ]; then err "lanq-makeready-fix: $_why"; return 1; fi
   _t=$(mktemp "$_d/.fix.XXXXXX" 2>/dev/null) || { err "lanq-makeready-fix: cannot write in $_d"; return 1; }
   if render_record > "$_t" && mv -f -- "$_t" "$REC_PATH"; then return 0; fi
   rm -f -- "$_t"
@@ -357,6 +394,9 @@ show_fix() { # id state
   out ""
   out "$1  (check $(check_of "$1"))"
   out "  now:     $(summary "$1" "$2")"
+  if [ "$1" = power.sleep ] && [ "$(sleep_risk)" = desktop ]; then
+    out "  note:    a desktop is running and its own power setting (GNOME, per user) cannot be read from here (a root shell has no session bus), so this cannot tell whether it really sleeps; masking is harmless if it does not"
+  fi
   fix_command "$1" apply "$2" | while IFS= read -r _c; do out "  command: $_c"; done
   fix_command "$1" undo "$2" | while IFS= read -r _c; do out "  undo:    $_c"; done
 }
@@ -366,6 +406,7 @@ do_apply() { # $1 = 1 for a dry run
   _root=no; if is_root; then _root=yes; fi
   if [ "$_dry" = 1 ]; then out "lanq-makeready-fix $TOOL_VERSION dry run: shows each applicable fix and its undo; nothing is changed"
   else out "lanq-makeready-fix $TOOL_VERSION: changes only what you confirm, one fix at a time (default no)"; fi
+  if [ "$_root" = yes ] && [ "$_dry" != 1 ]; then _why=$(record_dir_problem); if [ -n "$_why" ]; then err "lanq-makeready-fix: $_why"; return 1; fi; fi
   for _id in $FIX_IDS; do
     _note=$(note_of "$_id")
     if [ -n "$_note" ]; then out ""; out "$_id  (check $(check_of "$_id")): not offered: $_note"; continue; fi
@@ -401,8 +442,9 @@ do_apply() { # $1 = 1 for a dry run
 do_undo() { # $1 record file
   if ! is_root; then
     out "lanq-makeready-fix $TOOL_VERSION: --undo needs root (run it yourself with sudo at this machine): every change it puts back needs it. This script never elevates itself. Nothing was changed."
-    return 0
+    return 1
   fi
+  if ! record_in_place "$1"; then err "lanq-makeready-fix: record rejected: --undo reads only the records this script writes, fix-<time>.json in $(root_rec_dir). Nothing was changed."; return 2; fi
   if [ -e "$1" ] && ! record_trusted "$1"; then err "lanq-makeready-fix: record rejected (it or its folder is a link, not owned by root, or writable by group or others, so someone else could have written it): $1. Nothing was changed."; return 2; fi
   if ! load_record "$1"; then err "lanq-makeready-fix: record rejected ($LOAD_ERR): $1. Nothing was changed."; return 2; fi
   _failed=0
@@ -447,6 +489,7 @@ list_dir() { # $1 folder: one line per record in it
   for _f in "$1"/fix-*.json; do
     [ -e "$_f" ] || continue
     _any=1
+    if ! record_in_place "$_f" || ! record_trusted "$_f"; then out "$_f: not trusted (only root-owned records in $(root_rec_dir) are used; --undo refuses this one)"; continue; fi
     if load_record "$_f"; then
       _its=$(printf '%s\n' "$REC_ITEMS" | grep '^[0-9]' | awk -F'|' '{ printf "%s%s %s", (NR == 1 ? "" : ", "), $2, $3 }')
       out "$_f: started $REC_STARTED on $REC_HOST: ${_its:-no changes}"

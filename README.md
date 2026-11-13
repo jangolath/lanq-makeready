@@ -303,7 +303,7 @@ Then read it. This matters more than for the scanner, because this script change
    lanq-makeready-fix 0.4.0: changes only what you confirm, one fix at a time (default no)
 
    power.sleep  (check power.sleep): the PC sleeps or hibernates on AC power
-     now:     sleeps after 30 min, hibernates after 180 min (0 = never)
+     now:     power scheme 381b4222-f694-41f0-9685-ff5bb260df2e: sleeps after 30 min, hibernates after 180 min (0 = never)
      command: powercfg /change standby-timeout-ac 0
      command: powercfg /change hibernate-timeout-ac 0
      undo:    powercfg /setacvalueindex SCHEME_CURRENT SUB_SLEEP STANDBYIDLE 1800
@@ -319,8 +319,8 @@ Then read it. This matters more than for the scanner, because this script change
 
 5. Run the scanner again. After `longpaths.on`, reboot so that every program sees the change.
 
-`-NoProfile` matters: the script refuses to run when an alias (for example from a profile) would stand in for one of
-its commands.
+`-NoProfile` matters: the script refuses to run when a function or alias (for example from a profile) would stand in
+for one of its functions or for a cmdlet it uses.
 
 ### Use it on Linux
 
@@ -351,7 +351,7 @@ change it checks the result and records `applied` or `failed`.
 | `ssh.start` | Windows | sshd is stopped: `Set-Service sshd -StartupType Automatic`, `Start-Service sshd` | the old start type; `Stop-Service sshd` | admin |
 | `ssh.start` | Linux | the `ssh` or `sshd` unit is inactive and not socket-activated: `systemctl enable --now <unit>.service` | `systemctl disable` (only if it was disabled), `systemctl stop` | root |
 | `ssh.auto` | Windows | sshd runs but starts Manual or Disabled: `Set-Service sshd -StartupType Automatic` | the old start type | admin |
-| `power.sleep` | Windows | AC sleep or hibernate timeout of the active power plan is not 0: `powercfg /change standby-timeout-ac 0` and/or `hibernate-timeout-ac 0` (battery values are not touched) | `powercfg /setacvalueindex SCHEME_CURRENT SUB_SLEEP ...` with the old seconds, then `/setactive SCHEME_CURRENT` | admin |
+| `power.sleep` | Windows | AC sleep or hibernate timeout of the active power plan is not 0: `powercfg /change standby-timeout-ac 0` and/or `hibernate-timeout-ac 0` (battery values are not touched). The record keeps which plan was active | `powercfg /setacvalueindex SCHEME_CURRENT SUB_SLEEP ...` with the old seconds, then `/setactive SCHEME_CURRENT`, only while the same plan is still active | admin |
 | `power.sleep` | Linux | the scanner finds a way to suspend and no sleep target is masked: `systemctl mask` of the sleep, suspend, hibernate and hybrid-sleep targets that are not masked yet | `systemctl unmask` of exactly those targets | root |
 | `longpaths.on` | Windows | `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem` `LongPathsEnabled` = 1 (DWORD) | the old value, or the value removed if it was absent | admin, then a reboot |
 | `git.longpaths` | Windows | `git config --system core.longpaths true`, with git from Program Files | the old value, or `--unset` | admin |
@@ -371,11 +371,13 @@ A refusal says why and "Nothing was changed". The SSH, stdin, console and alias 
   your answer at the keyboard. `-WhatIf` / `--dry-run` and `-List` / `--list` work without one.
 - **No `--yes`, `-Yes` or `-Force`.** There is no way to answer for you. An unknown argument exits 2.
 - **No self-elevation.** Without admin or root, each fix is skipped with a note (exit 0). Start it elevated yourself.
-- **Aliases (Windows).** It refuses when an alias would run instead of one of its functions or the cmdlets the fixes
-  use. Start PowerShell with `-NoProfile`. The sh script removes all aliases before it starts.
-- **An unsafe record folder (Windows).** If `%ProgramData%\lanq-makeready` exists but is a link, has another owner,
-  inherits permissions or lets anyone but Administrators and SYSTEM in, nothing is written there and no fix is made.
-  A leftover `.tmp` file next to the record also stops it. Look at it, remove it and run the script again.
+- **Functions or aliases in the way (Windows).** It refuses when an alias would run instead of one of its functions,
+  or a function or alias instead of a cmdlet it uses. Start PowerShell with `-NoProfile`. The sh script removes all
+  aliases before it starts.
+- **An unsafe record folder.** If `%ProgramData%\lanq-makeready` exists but is a link, has another owner, inherits
+  permissions or lets anyone but Administrators and SYSTEM in, or if `/var/lib/lanq-makeready` is not root's with mode
+  700 or is a link, the run stops before the first question (exit 1) and nothing is changed. The message names the
+  owner and how to move the folder out of the way. A leftover `.tmp` file next to a record also stops it.
 - **macOS.** No fixes. The script says so and exits 0.
 
 ### Undo
@@ -387,8 +389,11 @@ Records are kept per OS:
 | Windows | `%ProgramData%\lanq-makeready\fix-<UTC time>.json` (usually `C:\ProgramData\...`) | Administrators and SYSTEM only (owned by Administrators, nothing inherited) |
 | Linux (root) | `/var/lib/lanq-makeready/fix-<UTC time>.json` | root only (folder 700, files 600) |
 
-Fixes need admin or root, so records are always written to these folders. On Linux `--list` also looks in
-`${XDG_STATE_HOME:-~/.local/state}/lanq-makeready/`, but `--undo` uses only records owned by root.
+Fixes need admin or root, so records are always written to these folders. The Windows folder and each record are
+created with these permissions in the same call; an existing folder is only checked, never re-permissioned. On Linux
+`--list` also looks in `${XDG_STATE_HOME:-~/.local/state}/lanq-makeready/` and marks anything it would not undo as
+not trusted. `-Undo` / `--undo` reads only `fix-<time>.json` files directly in the folder above; a copy anywhere else
+is rejected.
 
 1. List the records (Windows needs an elevated PowerShell to read them):
 
@@ -428,33 +433,43 @@ The record format is in [docs/FIX-RECORD.md](docs/FIX-RECORD.md).
 
 | Code | Meaning |
 |---|---|
-| `0` | done, nothing to do, a dry run, a list, help, or every fix skipped (not elevated, macOS, no systemd) |
-| `1` | a change or an undo failed or did not verify, or the record could not be written or updated |
+| `0` | done, nothing to do, a dry run, a list (also without admin or root), help, or every fix skipped (not elevated, macOS, no systemd) |
+| `1` | a change or an undo failed or did not verify, the record could not be written or updated, the record folder is not safe, or `-Undo` / `--undo` without admin or root |
 | `2` | bad arguments, more than one of `-WhatIf`/`-Undo`/`-List`, or a record rejected by undo |
-| `3` | refused: over SSH, from stdin or a string, no interactive console, or (Windows) an alias in the way |
+| `3` | refused: over SSH, from stdin or a string, no interactive console, or (Windows) a function or alias in the way |
 
 ### Limits
 
 - Linux has no `ssh.auto`. `ssh.start` is offered only when the unit is inactive. A unit that runs but is disabled at
-  boot is not changed. A socket-activated sshd is left alone, since the scanner reports it as OK.
+  boot is not changed. A socket-activated sshd is left alone, since the scanner reports it as OK. A masked, static or
+  otherwise unusual unit gets a note saying why it is not offered.
+- Linux `power.sleep` under `sudo`: a root shell has no session bus, so it cannot read a desktop user's GNOME power
+  setting. When a display manager runs, the fix is offered with a note saying that it cannot tell whether the desktop
+  really sleeps (masking is harmless if it does not); the scanner run as that user may say OK.
 - On Windows `ssh.start` (sshd stopped) also sets the start type to Automatic. `ssh.auto` is for an sshd that already runs.
   Neither installs OpenSSH Server.
 - Linux `power.sleep`: a target masked only until the next boot (`masked-runtime`) is left alone, so undo can put back
   exactly what was there. If `sleep.target` or `suspend.target` is already masked, the scanner says OK and nothing is offered.
-- Windows `power.sleep` changes the active power plan's AC values only.
+- Windows `power.sleep` changes the active power plan's AC values only. Undo acts only while the same plan is active;
+  after a plan switch it says "changed since; left alone".
 - `git.longpaths` uses git only from Program Files (or the Windows folder). A git found elsewhere on PATH is not run,
   because users may be able to change that folder; the script says so and you set it yourself. A `core.longpaths`
-  in your global git config that overrides the system value is reported, not changed.
-- `longpaths.on` is not offered when `LongPathsEnabled` has a type other than DWORD.
+  in your global git config that overrides the system value is reported, not changed. The scanner checks the first git
+  on PATH; when that is a different install, the prompt says so, and the scanner may still report git after the fix.
+- `longpaths.on` is not offered when `LongPathsEnabled` has a type other than DWORD. A string or QWORD value of 1
+  already counts as on for the scanner, so then nothing is said.
 - `ssh.aclkeys` only removes inherited entries and grants Administrators and SYSTEM full control; it does not change
   the file's owner. It is not offered when the file is a link, has no DACL, has an owner other than Administrators,
-  SYSTEM or TrustedInstaller, or when undo could not safely put the current permissions back (a deny entry, or
-  Administrators or SYSTEM without full control). Undo restores the saved DACL's own (explicit) entries and its
+  SYSTEM or TrustedInstaller, has its own (explicit) entries for other accounts (which `icacls /grant` would leave in
+  place; the note lists them with the `icacls /remove:g` commands), or when undo could not safely put the current
+  permissions back (a deny entry, or Administrators or SYSTEM without full control). Undo restores the saved DACL's own (explicit) entries and its
   protection flag. Inherited entries come back from the parent folder as it is **now**, not as the record saw them.
 - Undo of `ssh.aclkeys` deliberately opens the file again to the accounts that could change it before. sshd then
   ignores the file again, so administrator key logins stop working. The prompt shows the permissions it will put back.
-- The checks that refuse SSH sessions, pipes and missing consoles guard against mistakes. They are not a sandbox:
-  code that already runs as admin or root on the PC can change it without this script.
+- The checks that refuse SSH sessions, pipes and missing consoles guard against mistakes and naive remote use. They
+  are a tripwire, not a barrier: a determined admin or root can get a session that looks local (for example
+  `systemd-run --pty`, `machinectl shell`, or attaching at the console to a tmux started over SSH), and code that
+  already runs as admin or root on the PC can change it without this script.
 
 ### For AI agents
 

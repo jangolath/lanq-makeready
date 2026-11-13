@@ -204,20 +204,25 @@ All code that changes the PC is in one `#region FIXES` (ps1) / `# region FIXES` 
 - `Invoke-FixChange` / `fix_change` makes the change.
 
 Everything outside the region follows read-only rules. The only other writes are the undo record and, on Windows, the
-ACL of the record folder and files.
+record folder; both are created with their owner and DACL in the same call, and nothing outside the region sets an ACL.
 
 The guards are tests, like the scanner's:
 
 - **ps1: an AST allow-list.** The mutating cmdlets (`Set-Service`, `Start-Service`, `Stop-Service`, `Set-ItemProperty`,
-  `Remove-ItemProperty`, `Set-Acl`) may appear only inside `Invoke-FixChange`. The one exception is `Set-Acl` in
-  `Set-FixRecordAcl`, which may only use one of the two fixed record SDDLs. `Invoke-Native` (the only process launcher)
-  may run outside the region only with five fixed read argument lists (`powercfg /q`, `git config --get`/`--list`).
+  `Remove-ItemProperty`, `Set-Acl`) may appear only inside `Invoke-FixChange`. The record folder and files are created
+  by `New-FixSecuredDir` / `New-FixSecuredFile`, which may only use the two fixed record SDDLs and are called only by
+  the record store. `Invoke-Native` (the only process launcher) may run outside the region only with six fixed read
+  argument lists (`powercfg /q`, `powercfg /getactivescheme`, `git config --get`/`--list`).
   Inside the region it may run only `powercfg`, `icacls` or the trusted git. The region holds exactly three functions,
   and only apply and undo may call `Invoke-FixChange`. The guard also rejects:
   - dynamic commands, `Invoke-Expression` and redirections;
   - `$env:` or drive assignments, and static calls through a variable;
   - `ForEach-Object` with a member name;
-  - member calls outside a fixed list (file writes are allowed only in `Save-FixRecord`).
+  - member or index assignments except on local hashtables (and the `ProcessStartInfo` of `Invoke-Native`); those
+    variables may never be filled from a cmdlet or a .NET call, so a `FileInfo` can never be changed through them;
+  - member calls outside a fixed list (file writes are allowed only in the record store).
+
+  A test also checks that every cmdlet the script runs is in `$FixCmdletNames`, the list the start-up shadow check uses.
 - **sh: a command-word guard.** Every command word must be on an allow-list. `sudo`, `su`, `chmod`, `chown`, `ln`, `cp`,
   `tee`, `curl`, `eval`, `sh`, `exec` and the like are forbidden. A mutating `systemctl` verb (`enable`, `stop`, `mask`,
   ...) may appear only inside the region.
@@ -230,7 +235,10 @@ are kept short enough to read.
 ### Each fix
 
 1. Read the state. When the scanner would report it but this script cannot fix it safely (for example git outside
-   Program Files, a `LongPathsEnabled` that is not a DWORD, or a keys file that is a link), skip the fix with a note.
+   Program Files, a `LongPathsEnabled` that is not a DWORD and not 1, a keys file that is a link or has its own entries
+   for other accounts, a masked or static ssh unit), skip the fix with a note. Where the scanner's view and the fix's
+   can differ, the prompt says so: the scanner checks the git first on PATH while the fix uses Program Files git, and
+   on Linux a root shell cannot read a desktop user's GNOME power setting.
 2. Turn the state into its fixed text shape (see `docs/FIX-RECORD.md`). If it does not fit a shape, the fix is not
    offered: a state that cannot be recorded cannot be undone.
 3. Show it, ask. On yes, read the state again (the precondition). If it is no longer needed, or differs from what was
@@ -255,13 +263,18 @@ otherwise it prints "changed since; left alone". It never overwrites a change it
 
 ### Record storage and validation
 
-- **Windows:** `%ProgramData%\lanq-makeready`. The script creates it owned by Administrators, protected, with only
-  Administrators and SYSTEM (`O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)`). If the folder exists but is not like
-  that (a link, another owner, inheriting, other accounts in the DACL), nothing is written. Records are not kept in
-  `%LOCALAPPDATA%`, because any non-elevated process of the same user can write there, and undo runs as admin. A record
-  is written to `<record>.tmp` (refused if that name exists) with the record SDDL set, then moved over the record.
-- **Linux:** `/var/lib/lanq-makeready` as root (umask 077: 700/600). Undo uses a record only when it and its folder are
-  owned by root, not symlinks, and not writable by group or others.
+- **Windows:** `%ProgramData%\lanq-makeready`. The script creates it with its security descriptor in the same call
+  (`Directory.CreateDirectory(path, security)` on PowerShell 5.1, `FileSystemAclExtensions.Create` on PowerShell 7):
+  owned by Administrators, protected, only Administrators and SYSTEM (`O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)`).
+  An existing folder is never re-permissioned. It is checked before the first question, and if it is not exactly like
+  that (a link, another owner, inheriting, other accounts in the DACL), the run stops; the message names the owner and
+  how to move the folder away. Records are not kept in `%LOCALAPPDATA%`, because any non-elevated process of the same
+  user can write there, and undo runs as admin. A record is written to a new `<record>.tmp` created with its owner and
+  DACL (`CreateNew`, so an existing name is refused), then moved over the record.
+- **Linux:** `/var/lib/lanq-makeready` as root (umask 077: 700/600). An existing folder that is not root's with mode
+  700, or is a link, stops the run before the first question.
+- **Only records in place.** Undo reads only `fix-<time>.json` files directly in the record folder (on Linux the path
+  is resolved with `cd -P`), owned by Administrators/SYSTEM or root, not links, and not writable by anyone else.
 - **Validation on undo.** One bad field rejects the record (exit 2). Undo checks:
   - a size limit and plain ASCII;
   - exactly the known fields, with none extra and none missing;
@@ -289,8 +302,15 @@ Windows). Before the prompt it lists every key in the file (type, SHA256 fingerp
 sshd trusts each of them for administrator logins.
 
 Undo puts back the saved DACL, but only when that DACL has entries, no deny entry, and full control for both
-Administrators and SYSTEM. So undo can never lock out the administrators or leave a NULL or empty DACL. The same rule
-decides whether the fix is offered at all: if the current DACL would not pass, the fix is not offered.
+Administrators and SYSTEM. When the saved DACL is protected, what undo writes is just its explicit entries, so those
+must pass on their own. After the undo the file's DACL is read again; if Administrators or SYSTEM lost full control the
+undo fails loudly and prints the `icacls` command that gives it back. So undo can never quietly lock out the
+administrators or leave a NULL or empty DACL. The same rule decides whether the fix is offered at all: if the current
+DACL would not pass, the fix is not offered.
+
+`icacls /grant` leaves explicit entries for other accounts in place, so the fix could not make such a file
+Administrators-and-SYSTEM-only. When the file has them, the fix is not offered; the note names the accounts and the
+`icacls /remove:g` commands to run after checking them.
 
 Undo restores the protection flag and the explicit entries. Inherited entries come back from the parent folder as it is
 at that time, and states are compared on the flag and explicit entries only. The fix does not change the owner; an
@@ -312,10 +332,13 @@ owner other than Administrators, SYSTEM or TrustedInstaller gets a note instead.
 - **Console.**
   - ps1 needs `[Environment]::UserInteractive`, stdin not redirected, and a session id above 0.
   - sh needs stdin to be a terminal (`[ -t 0 ]`).
-- **Aliases.** ps1 refuses when an alias shadows one of its functions or the cmdlets it uses; sh runs `unalias -a`.
+- **Shadowing.** ps1 refuses when an alias shadows one of its functions, or when one of the cmdlets it uses does not
+  resolve to that cmdlet (a function or alias of the same name); it asks with module-qualified `Get-Command` and
+  `Get-Alias`. sh runs `unalias -a`. The parent-process walk runs once per process.
 
-These checks stop mistakes and casual remote use. They are not a boundary against code that already runs as admin or
-root on the PC.
+These checks stop mistakes and casual or naive remote use. They are not a boundary against a determined admin or root
+(for example `systemd-run --pty`, `machinectl shell`, or attaching locally to a tmux started over SSH), nor against code
+that already runs as admin or root on the PC.
 
 ### Testing fix mode
 
