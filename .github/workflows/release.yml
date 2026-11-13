@@ -16,6 +16,8 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Tests
         run: sh tests/run.sh && sh tests/fix.sh
       - name: Collect files and checksums

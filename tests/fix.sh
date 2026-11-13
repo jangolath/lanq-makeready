@@ -39,9 +39,37 @@ for s in 'ssh.start|unit=ssh enabled=disabled active=inactive;reboot' 'ssh.start
 done
 eq "$(to_mask 'sleep=masked suspend=static hibernate=none hybrid-sleep=static')" "suspend.target hibernate.target hybrid-sleep.target" "to_mask: only targets not masked"
 eq "$(field 'unit=sshd enabled=disabled active=inactive' unit)" sshd "field reads a value"
+eq "$(to_mask 'sleep=masked-runtime suspend=static hibernate=masked hybrid-sleep=static')" "suspend.target hybrid-sleep.target" "C13: a target masked only until reboot (masked-runtime) is left alone"
+for l in '-rw------- 1 0 0 10 Nov 13 10:00 f' 'drwx------ 2 0 0 4096 Nov 13 10:00 d' 'drwxr-xr-x 2 0 0 4096 Nov 13 10:00 d' '-rw-r--r--+ 1 0 0 1 Nov 13 10:00 f'; do
+  if perm_ok "$l"; then ok "L6 perm_ok: $l"; else bad "L6 perm_ok: $l" refused ok; fi
+done
+for l in '-rw-rw---- 1 0 0 1 Nov 13 10:00 f' '-rw----rw- 1 0 0 1 Nov 13 10:00 f' '-rw------- 1 1000 0 1 Nov 13 10:00 f' 'drwxrwxrwt 2 0 0 1 Nov 13 10:00 d' ''; do
+  if perm_ok "$l"; then bad "L6 perm_ok refuses: $l" ok refused; else ok "L6 perm_ok refuses: '$l'"; fi
+done
+if [ "$(uname -s)" = Linux ] && [ -f /etc/hostname ] && [ "$(ls -ldn /etc | awk '{ print $3 }')" = 0 ]; then
+  if record_trusted /etc/hostname; then ok "L6 record_trusted: a root-owned file in a root-owned folder"; else bad "L6 record_trusted /etc/hostname" refused ok; fi
+fi
+tdir=${TMPDIR:-/tmp}/lanq-fixtrust.$$; mkdir -p "$tdir"; : > "$tdir/r.json"
+if [ "$(id -u)" != 0 ]; then if record_trusted "$tdir/r.json"; then bad "L6 record_trusted: a file owned by this user" ok refused; else ok "L6 record_trusted: a file not owned by root is refused"; fi; fi
+cp "$fix" "$tdir/other-name.sh"
+if (FIX_SELF=$tdir/other-name.sh; from_file); then bad "L3 from_file: a renamed copy" ok refused; else ok "L3 from_file: a file not named lanq-makeready-fix.sh is refused"; fi
+if (FIX_SELF=$fix; from_file); then ok "L3 from_file: the script itself"; else bad "L3 from_file: the script itself" refused ok; fi
+rm -rf "$tdir"
+if (audit_session_id() { echo 7; }; session_props() { printf 'Remote=yes\nService=gdm-password\n'; }; logind_remote); then ok "M2 logind: Remote=yes is remote"; else bad "M2 logind Remote=yes" local remote; fi
+if (audit_session_id() { echo 7; }; session_props() { printf 'Remote=no\nService=sshd\n'; }; logind_remote); then ok "M2 logind: Service=sshd is remote"; else bad "M2 logind Service=sshd" local remote; fi
+if (audit_session_id() { echo 7; }; session_props() { printf 'Remote=no\nService=gdm-password\n'; }; logind_remote); then bad "M2 logind local" remote local; else ok "M2 logind: a local session is local"; fi
+if (audit_session_id() { echo 4294967295; }; session_props() { printf 'Remote=yes\n'; }; logind_remote); then bad "M2 no session" remote nothing; else ok "M2 logind: no login session (containers, CI): says nothing"; fi
+if (audit_session_id() { echo 7; }; session_props() { :; }; logind_remote); then bad "M2 no loginctl" remote nothing; else ok "M2 logind: no loginctl: says nothing"; fi
+if (unset SSH_CONNECTION SSH_CLIENT SSH_TTY; audit_session_id() { echo 7; }; session_props() { printf 'Remote=yes\n'; }; over_ssh); then ok "M2 over_ssh: sudo dropped SSH_*, logind still says remote"; else bad "M2 over_ssh via logind" local remote; fi
+for fn in logind_values classify_sleep logind_auto_suspend; do
+  a=$(awk -v f="$fn() {" 'index($0, f) == 1 { p = 1 } p { print } p && /^}/ { exit }' "$root/lanq-makeready.sh")
+  b=$(awk -v f="$fn() {" 'index($0, f) == 1 { p = 1 } p { print } p && /^}/ { exit }' "$fix")
+  if [ -n "$a" ] && [ "$a" = "$b" ]; then ok "C1: $fn is the scanner's, unchanged"; else bad "C1: $fn copy" differs same; fi
+done
 
 echo "guard (command words; mutations only inside the FIXES region; a test-time tripwire, not a sandbox)"
-# same tokenizer as tests/run.sh (statement-start words, quotes and $() handled)
+# the tokenizer of tests/run.sh, stricter: a quoted string leaves a placeholder (Q or S), so a statement that starts
+# with one ("$cmd" args) shows up as an unknown command word, and so do words starting with $ ($cmd args)
 scan_awk='
 function scan(l,   i, c, n, out, d, sq, dq, len) {
   gsub(/\$\{[^}]*\}/, "X", l)
@@ -49,9 +77,9 @@ function scan(l,   i, c, n, out, d, sq, dq, len) {
   for (i = 1; i <= len; i++) {
     c = substr(l, i, 1); n = substr(l, i + 1, 1)
     if (sq) { if (c == "\047") sq = 0; continue }
-    if (c == "\047" && !dq[d]) { sq = 1; continue }
+    if (c == "\047" && !dq[d]) { sq = 1; if (d == 0) out = out "S"; continue }
     if (c == "\\") { i++; continue }
-    if (c == "\"") { dq[d] = !dq[d]; continue }
+    if (c == "\"") { if (!dq[d] && d == 0) out = out "Q"; dq[d] = !dq[d]; continue }
     if (c == "$" && n == "(") { d++; dq[d] = 0; out = out ";"; i++; continue }
     if (dq[d]) continue
     if (c == ")" && d > 0) { d--; out = out " "; continue }
@@ -72,11 +100,11 @@ cmd_words() {
         while (t ~ /^(if|then|elif|else|do|while|until|!)[ \t]/) sub(/^[^ \t]+[ \t]+/, "", t)
         if (t ~ /^(for|case)[ \t]/) continue
         split(t, w, /[ \t]/)
-        if (w[1] != "" && w[1] !~ /^[A-Za-z_][A-Za-z0-9_]*=/ && w[1] !~ /^[$<>0-9=-]/ && w[1] !~ /^\[/ && w[1] != "X" && w[2] !~ /^[-+*\/%]$/ && w[1] !~ /[*?\]:|]/) print w[1]
+        if (w[1] != "" && w[1] !~ /^[A-Za-z_][A-Za-z0-9_]*=/ && w[1] !~ /^[<>0-9=-]/ && w[1] !~ /^\[/ && w[1] != "X" && w[2] !~ /^[-+*\/%]$/ && w[1] !~ /[*?\]:|]/) print w[1]
       }
     }' | sort -u
 }
-allowed=" printf echo awk sed tr cut head wc grep cat command id uname date sort uniq read test shift exit return true false break continue umask type mkdir mktemp mv rm fi done esac then else elif do in while for if case until [ ]] "
+allowed=" printf echo awk sed tr cut head wc grep cat command id uname date sort uniq read test shift exit return true false break continue umask unalias type set ls loginctl timeout gsettings mkdir mktemp mv rm fi done esac then else elif do in while for if case until [ ]] "
 forbidden=" sudo su doas pkexec chmod chown ln cp tee curl wget nc ssh scp dd eval bash sh exec source apt apt-get dnf yum apk "
 mutating='systemctl[^|;&]*[[:space:]](enable|disable|start|stop|restart|reload|try-restart|reload-or-restart|mask|unmask|daemon-reload|set-default|edit|kill|isolate|link|preset|preset-all|revert|reboot|poweroff|halt|suspend|hibernate|hybrid-sleep|set-property|set-environment)([[:space:]]|$)'
 fix_guard() { # FILE -> one line per violation
@@ -95,9 +123,16 @@ fix_guard() { # FILE -> one line per violation
     case "$_w" in systemctl|echo|printf|return|field|to_mask|fix_command|fix_change|'esac'|'fi'|'done'|'then'|'else'|'elif') ;; *) echo "command word in FIXES other than systemctl and helpers: $_w" ;; esac
   done
   printf '%s\n' "$_outside" | grep -vE '^[[:space:]]*#' | grep -nE "$mutating" | sed 's/^/mutating systemctl outside FIXES: /'
-  printf '%s\n' "$_outside" | grep -vE '^[[:space:]]*#' | grep -nE 'systemctl' | grep -vE 'systemctl is-(enabled|active) "\$1"|command -v systemctl' | sed 's/^/systemctl other than is-enabled or is-active outside FIXES: /'
+  # per command, not per line: each command naming systemctl, loginctl, gsettings or timeout must be one of these reads
+  printf '%s\n' "$_outside" | grep -vE '^[[:space:]]*#' | awk '{ sub(/[ \t]#.*$/, ""); n = split($0, a, /;|&&|[|][|]|[|]/); for (i = 1; i <= n; i++) if (a[i] ~ /systemctl|loginctl|gsettings|timeout/) print a[i] }' |
+    grep -vE '^[^"]*("[$][(])?(systemctl is-(enabled|active) "[$]1" 2>/dev/null|command -v (systemctl|loginctl|timeout|gsettings) >/dev/null 2>&1|timeout 5 loginctl show-session "[$]1" -p Remote -p Service 2>/dev/null|loginctl show-session "[$]1" -p Remote -p Service 2>/dev/null|_gt=[$][(]gsettings get org[.]gnome[.]settings-daemon[.]plugins[.]power sleep-inactive-ac-type 2>/dev/null)' |
+    sed 's/^/a command outside FIXES that is not an allowed read: /'
+  # awk programs never write or pipe; sed scripts never write (w) or run (e) anything
+  printf '%s\n' "$_outside$nl$_inside" | grep -vE '^[[:space:]]*#' | grep 'awk' | awk -F"'" '{ for (i = 2; i <= NF; i += 2) { p = $i; gsub(/"[^"]*"/, "", p); if (length($i) > 1 && p ~ /[>|]|system|getline/) { print "awk program writes, pipes or runs: " $0; next } } }'
+  printf '%s\n' "$_outside$nl$_inside" | grep -vE '^[[:space:]]*#' | grep -E "sed[^|;]*(/[gpIiM0-9]*[we]([[:space:]};']|\$)|[;{][[:space:]]*[we][[:space:]]|'[0-9\$,]*[we][[:space:]])" | sed 's/^/sed write or execute: /'
   # (sudo is caught as a command word; messages may tell the owner to run the script with sudo themselves)
-  printf '%s\n' "$_outside$nl$_inside" | grep -nE 'sed[[:space:]]+(-[A-Za-z]*i|--in-place)|find[[:space:]]|system[[:space:]]*\(|getline|sh -c|bash -c|`' | sed 's/^/raw: /'
+  # (sh and bash are forbidden command words, so sh -c is caught there; message text may name it)
+  printf '%s\n' "$_outside$nl$_inside" | grep -vE '^[[:space:]]*#' | grep -nE 'sed[[:space:]]+(-[A-Za-z]*i|--in-place)|find[[:space:]]|system[[:space:]]*\(|getline|`' | sed 's/^/raw: /'
   printf '%s\n' "$_outside$nl$_inside" | grep -nE '(^|[^A-Za-z_])eval([^A-Za-z_]|$)' | sed 's/^/eval: /'
   # file changes: only the record's temp file, renamed over the record
   printf '%s\n' "$_outside$nl$_inside" | grep -nE '(^|[^A-Za-z_])(rm|mv|mkdir|mktemp)[[:space:]]' | grep -vxE '[0-9]+:  (mkdir -p -- "\$_d" 2>/dev/null \|\| \{ err "lanq-makeready-fix: cannot create \$_d"; return 1; \}|_t=\$\(mktemp "\$_d/\.fix\.XXXXXX" 2>/dev/null\) \|\| \{ err "lanq-makeready-fix: cannot write in \$_d"; return 1; \}|if render_record > "\$_t" && mv -f -- "\$_t" "\$REC_PATH"; then return 0; fi|rm -f -- "\$_t")' | sed 's/^/file change other than the record: /'
@@ -131,6 +166,17 @@ mutant "mv of something else" 'bad12() { mv /etc/a /etc/b; }'
 mutant "redirect to a file" 'bad13() { echo x > /etc/x; }'
 mutant "unknown command" 'bad14() { chattr +i /etc/x; }'
 mutant "ln" 'bad15() { ln -s /dev/null /etc/systemd/system/x.target; }'
+mutant "L4: awk program writes a file" "bad16() { awk 'BEGIN { print 1 > \"/tmp/x\" }'; }"
+mutant "L4: awk program pipes to a command" "bad17() { awk 'BEGIN { print \"id\" | \"sh\" }'; }"
+mutant "L4: awk system()" "bad17b() { awk 'BEGIN { system(\"id\") }'; }"
+mutant "L4: sed w (write a file)" "bad18() { sed 's/a/b/w /etc/x' /etc/y; }"
+mutant "L4: sed e (run a command)" "bad19() { sed -n '1e id' /etc/y; }"
+mutant "L4: a command word from a variable" 'bad20() { $1 arg; }'
+mutant "L4: a command word from a quoted variable" 'bad21() { "$1" arg; }'
+mutant "L4: systemctl allow-rule per command, not per line" 'bad22() { systemctl is-enabled "$1" 2>/dev/null; systemctl show x; }'
+mutant "L4: loginctl other than show-session" 'bad23() { loginctl terminate-session 1; }'
+mutant "L4: gsettings set" 'bad24() { gsettings set org.x y z; }'
+mutant "L4: timeout running something else" 'bad25() { timeout 5 reboot; }'
 awk '/^# region FIXES$/ { print; print "fix_x() { reboot; }"; next } { print }' "$fix" > "$mut_dir/m.sh"
 if [ -n "$(fix_guard "$mut_dir/m.sh")" ]; then ok "guard: a non-systemctl command inside FIXES is flagged"; else bad "guard inside FIXES" "not flagged" flagged; fi
 awk '/^# endregion FIXES$/ { print "# endregion FIXES" } { print }' "$fix" > "$mut_dir/m.sh"
@@ -154,6 +200,9 @@ o=$(SSH_TTY=/dev/pts/3 LANQ_MAKEREADY_FIX_LIB=1 sh "$fix" --list </dev/null 2>&1
 o=$(LANQ_MAKEREADY_FIX_LIB=1 sh -s -- --dry-run < "$fix" 2>&1); rc=$?
 eq "$rc" 3 "RefusesFromStdin (real process, sh -s < file): exit 3"; contains "$o" "from stdin" "RefusesFromStdin: says why"
 o=$(cat "$fix" | LANQ_MAKEREADY_FIX_LIB=1 sh 2>&1); eq "$?" 3 "RefusesFromStdin (real process, piped into sh): exit 3"
+o=$(LANQ_MAKEREADY_FIX_LIB=1 sh -c "$(cat "$fix")" "$fix" --dry-run </dev/null 2>&1); eq "$?" 3 "L3: RefusesFromStdin (real process, sh -c with \$0 set to the real path): exit 3"
+rdir=${TMPDIR:-/tmp}/lanq-fixren.$$; mkdir -p "$rdir"; cp "$fix" "$rdir/fix-copy.sh"
+o=$(LANQ_MAKEREADY_FIX_LIB=1 sh "$rdir/fix-copy.sh" --dry-run </dev/null 2>&1); eq "$?" 3 "L3: a renamed copy is refused (real process): exit 3"; rm -rf "$rdir"
 o=$(child); rc=$?
 eq "$rc" 3 "RefusesWithoutConsole (real process, stdin not a terminal, apply): exit 3"; contains "$o" "no interactive console" "RefusesWithoutConsole: says why"
 o=$(child --undo /nonexistent.json); eq "$?" 3 "RefusesWithoutConsole (real process, --undo): exit 3"
@@ -172,7 +221,11 @@ fx_os() { echo "${FAKE_OS:-Linux}"; }
 have_systemd() { return 0; }
 is_root() { [ "$FAKE_ROOT" = 1 ]; }
 has_console() { [ "$FAKE_CONSOLE" = 1 ]; }
-rec_dir() { echo "$RECDIR"; }
+user_rec_dir() { echo "$RECDIR"; }
+root_rec_dir() { echo "$RECDIR"; }
+record_trusted() { [ -z "${FAKE_UNTRUSTED:-}" ]; }
+sleep_risk() { echo "${FAKE_RISK:-sleeps}"; }
+audit_session_id() { :; }
 latest_record() { for _r in "$RECDIR"/fix-*.json; do [ -e "$_r" ] && _last=$_r; done; [ -n "${_last:-}" ] && echo "$_last"; _last=""; }
 systemctl() {
   case "$1" in
@@ -197,9 +250,10 @@ reset_fake() { # everything fine: ssh enabled and active, sleep targets masked
   rm -rf "$FAKE"; mkdir -p "$FAKE"; : > "$FAKE/calls"; : > "$FAKE/snaps"; : > "$FAKE/reads"
   echo enabled > "$FAKE/u.ssh.service.en"; echo active > "$FAKE/u.ssh.service.act"; echo inactive > "$FAKE/u.ssh.socket.act"
   for t in sleep suspend hibernate hybrid-sleep; do echo masked > "$FAKE/u.$t.target.en"; done
-  FAKE_ROOT=1; FAKE_CONSOLE=1; FAKE_OS=Linux; ON_ANSWER=""
+  FAKE_ROOT=1; FAKE_CONSOLE=1; FAKE_OS=Linux; ON_ANSWER=""; FAKE_RISK=sleeps; FAKE_UNTRUSTED=""
 }
 setu() { echo "$2" > "$FAKE/u.$1"; } # setu ssh.service.en disabled
+unmask_all() { for _t in sleep suspend hibernate hybrid-sleep; do setu $_t.target.en static; done; }
 states() { echo "$(state_of ssh.start) / $(state_of power.sleep)"; }
 calls() { awk '{ printf "%s%s", (NR > 1 ? "|" : ""), $0 }' "$FAKE/calls"; }
 runfix() { # answers (printf %b), args...
@@ -234,8 +288,10 @@ case_fix "ssh.start (sshd unit)" 'rm -f "$FAKE/u.ssh.service.en"; setu sshd.serv
   "systemctl enable --now sshd.service" "systemctl disable sshd.service|systemctl stop sshd.service"
 case_fix "power.sleep (none masked)" 'for t in sleep suspend hibernate hybrid-sleep; do setu $t.target.en static; done' \
   "systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target" "systemctl unmask sleep.target suspend.target hibernate.target hybrid-sleep.target"
-case_fix "power.sleep (sleep already masked)" 'for t in suspend hibernate hybrid-sleep; do setu $t.target.en static; done' \
-  "systemctl mask suspend.target hibernate.target hybrid-sleep.target" "systemctl unmask suspend.target hibernate.target hybrid-sleep.target"
+case_fix "power.sleep (hibernate already masked)" 'for t in sleep suspend hybrid-sleep; do setu $t.target.en static; done' \
+  "systemctl mask sleep.target suspend.target hybrid-sleep.target" "systemctl unmask sleep.target suspend.target hybrid-sleep.target"
+case_fix "power.sleep (hibernate masked until reboot)" 'for t in sleep suspend hybrid-sleep; do setu $t.target.en static; done; setu hibernate.target.en masked-runtime' \
+  "systemctl mask sleep.target suspend.target hybrid-sleep.target" "systemctl unmask sleep.target suspend.target hybrid-sleep.target"
 rec=$(latest_record)
 eq "$(sed -n 2p "$rec")" '  "schema": "lanq-makeready-fix/v1",' "record layout: schema line"
 contains "$(sed -n 9p "$rec")" '    {"seq": 1, "id": "power.sleep", "status": "undone"' "record layout: one item per line"
@@ -251,17 +307,27 @@ reset_fake; setu ssh.service.act inactive; setu ssh.socket.act active; runfix ''
 lacks "$OUT" "ssh.start  (" "socket-activated sshd (scanner OK): ssh.start not offered"
 reset_fake; rm -f "$FAKE/u.ssh.service.en"; runfix '' --dry-run
 lacks "$OUT" "ssh.start  (" "no ssh unit: ssh.start not offered"
+reset_fake; setu ssh.service.act activating; runfix '' --dry-run
+contains "$OUT" "ssh.service is changing state" "C13: a unit that is activating: says so"
+for m in sleep suspend; do
+  reset_fake; unmask_all; setu $m.target.en masked; runfix '' --dry-run
+  lacks "$OUT" "power.sleep  (" "C1: $m.target masked (the scanner says OK): power.sleep not offered"
+done
+reset_fake; unmask_all; FAKE_RISK=unmasked; runfix '' --dry-run
+lacks "$OUT" "power.sleep  (" "C1: nothing found that would suspend (the scanner says OK): not offered"
+reset_fake; unmask_all; FAKE_RISK=desktop; runfix '' --dry-run
+contains "$OUT" "power.sleep  (" "C1: a desktop whose power settings cannot be read (the scanner WARNs): offered"
 
 echo "DefaultIsNo"
 for a in '\n' 'n\n' 'N\n' 'no\n' 'x\n' 'yes please\n' ''; do
-  reset_fake; setu sleep.target.en static
+  reset_fake; unmask_all
   runfix "$a"
   if [ "$RC" = 0 ] && [ -z "$(calls)" ] && [ -z "$(latest_record)" ]; then ok "DefaultIsNo: answer '$a' -> nothing changed, no record"; else bad "DefaultIsNo '$a'" "$RC $(calls)" "0, none"; fi
   contains "$OUT" "Apply? [y/N]" "DefaultIsNo: '$a' was asked"
 done
 
 echo "SkipsAdminItemsWhenNotElevated"
-reset_fake; setu ssh.service.act inactive; setu sleep.target.en static; FAKE_ROOT=0
+reset_fake; setu ssh.service.act inactive; unmask_all; FAKE_ROOT=0
 runfix 'y\ny\n'
 if [ "$RC" = 0 ] && [ -z "$(calls)" ] && [ -z "$(latest_record)" ]; then ok "SkipsAdminItemsWhenNotElevated: nothing changed"; else bad "not root" "$(calls)" none; fi
 eq "$(printf '%s\n' "$OUT" | grep -c 'needs root')" 2 "SkipsAdminItemsWhenNotElevated: a note per fix"
@@ -269,7 +335,7 @@ lacks "$OUT" "Apply?" "not root: nothing asked"
 contains "$OUT" "never elevates itself" "not root: says it never elevates itself"
 
 echo "WhatIfChangesNothing"
-reset_fake; setu ssh.service.en disabled; setu ssh.service.act inactive; setu sleep.target.en static; FAKE_CONSOLE=0
+reset_fake; setu ssh.service.en disabled; setu ssh.service.act inactive; unmask_all; FAKE_CONSOLE=0
 before=$(states); runfix 'y\ny\n' --dry-run
 if [ "$RC" = 0 ] && [ -z "$(calls)" ] && [ -z "$(latest_record)" ] && [ "$(states)" = "$before" ]; then ok "WhatIfChangesNothing: no command, no record, no console needed"; else bad "dry run" "$RC $(calls)" "0, none"; fi
 contains "$OUT" "ssh.start  (" "dry run shows ssh.start"; contains "$OUT" "power.sleep  (" "dry run shows power.sleep"
@@ -283,42 +349,69 @@ echo "EachFixRechecksPreconditionFirst"
 reset_fake; setu ssh.service.act inactive; ON_ANSWER='setu ssh.service.act active'; runfix 'y\n'
 if [ -z "$(calls)" ]; then ok "EachFixRechecksPreconditionFirst: ssh.start fixed meanwhile -> nothing done"; else bad "recheck ssh" "$(calls)" none; fi
 contains "$OUT" "no longer needed" "recheck ssh: says so"
-reset_fake; setu sleep.target.en static; ON_ANSWER='setu sleep.target.en masked'; runfix 'y\n'
+reset_fake; unmask_all; ON_ANSWER='setu sleep.target.en masked'; runfix 'y\n'
 if [ -z "$(calls)" ]; then ok "EachFixRechecksPreconditionFirst: power.sleep fixed meanwhile -> nothing done"; else bad "recheck power" "$(calls)" none; fi
-reset_fake; setu sleep.target.en static; ON_ANSWER='setu suspend.target.en static'; runfix 'y\n'
+reset_fake; unmask_all; ON_ANSWER='setu hibernate.target.en masked'; runfix 'y\n'
 if [ -z "$(calls)" ]; then ok "state changed to another value after it was shown: nothing done"; else bad "recheck changed" "$(calls)" none; fi
 contains "$OUT" "changed since it was shown" "recheck changed: says so"
 
 echo "UndoInReverseOrder and UndoSkipsChangedSince"
-reset_fake; setu ssh.service.en disabled; setu ssh.service.act inactive; setu sleep.target.en static
+reset_fake; setu ssh.service.en disabled; setu ssh.service.act inactive; unmask_all
 start=$(states); runfix 'y\ny\n'; rec=$(latest_record)
-eq "$(calls)" "systemctl enable --now ssh.service|systemctl mask sleep.target" "applied in list order"
+eq "$(calls)" "systemctl enable --now ssh.service|systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target" "applied in list order"
 runfix 'y\ny\n' --undo "$rec"
-eq "$(calls)" "systemctl unmask sleep.target|systemctl disable ssh.service|systemctl stop ssh.service" "UndoInReverseOrder: newest change first"
+eq "$(calls)" "systemctl unmask sleep.target suspend.target hibernate.target hybrid-sleep.target|systemctl disable ssh.service|systemctl stop ssh.service" "UndoInReverseOrder: newest change first"
 eq "$(states)" "$start" "UndoInReverseOrder: everything restored"
-reset_fake; setu ssh.service.en disabled; setu ssh.service.act inactive; setu sleep.target.en static
+reset_fake; setu ssh.service.en disabled; setu ssh.service.act inactive; unmask_all
 runfix 'y\ny\n'; rec=$(latest_record)
-setu sleep.target.en static
+unmask_all
 runfix 'y\ny\n' --undo "$rec"
 contains "$OUT" "changed since; left alone" "UndoSkipsChangedSince: power.sleep unmasked by hand, left alone"
 eq "$(calls)" "systemctl disable ssh.service|systemctl stop ssh.service" "UndoSkipsChangedSince: the other fix is still undone"
 contains "$(cat "$rec")" '"id": "power.sleep", "status": "applied"' "UndoSkipsChangedSince: record keeps the skipped item as applied"
-reset_fake; setu sleep.target.en static; runfix 'y\n'; rec=$(latest_record)
+reset_fake; unmask_all; runfix 'y\n'; rec=$(latest_record)
 runfix 'n\n' --undo "$rec"
 if [ -z "$(calls)" ]; then ok "undo: default no leaves it"; else bad "undo no" "$(calls)" none; fi
 ON_ANSWER='setu suspend.target.en static'; runfix 'y\n' --undo "$rec"
 if [ -z "$(calls)" ]; then ok "undo: re-checks the state after the answer"; else bad "undo recheck" "$(calls)" none; fi
 setu suspend.target.en masked; FAKE_ROOT=0; runfix 'y\n' --undo "$rec"
-if [ -z "$(calls)" ]; then ok "undo when not root: skipped"; else bad "undo not root" "$(calls)" none; fi
-contains "$OUT" "needs root" "undo when not root: says so"
+if [ "$RC" = 0 ] && [ -z "$(calls)" ] && [ ! -s "$FAKE/reads" ]; then ok "C7: undo when not root: nothing read or changed"; else bad "undo not root" "$RC $(calls)" "0, none"; fi
+contains "$OUT" "--undo needs root" "C7: undo when not root: says so first"
+FAKE_ROOT=1; FAKE_UNTRUSTED=1; runfix 'y\n' --undo "$rec"
+if [ "$RC" = 2 ] && [ -z "$(calls)" ] && [ ! -s "$FAKE/reads" ]; then ok "L6: a record others could have written is refused as root"; else bad "L6 untrusted record" "$RC $(calls)" "2, none"; fi
+contains "$OUT" "not owned by root, or writable by group or others" "L6: says why"
+FAKE_UNTRUSTED=""
+
+echo "C5 pending items"
+reset_fake; unmask_all; runfix 'y\n'; rec=$(latest_record)
+sed 's/"status": "applied"/"status": "pending"/' "$rec" > "$rec.x" && mv "$rec.x" "$rec"
+unmask_all   # the crash happened before the change
+runfix 'y\n' --undo "$rec"
+if [ "$RC" = 0 ] && [ -z "$(calls)" ]; then ok "C5: pending and still as before: nothing run"; else bad "C5 never applied" "$RC $(calls)" "0, none"; fi
+contains "$OUT" "never applied" "C5: says never applied"; contains "$(cat "$rec")" '"status": "skipped"' "C5: marked skipped"
+sed 's/"status": "skipped"/"status": "pending"/' "$rec" > "$rec.x" && mv "$rec.x" "$rec"
+for t in sleep suspend hibernate hybrid-sleep; do setu $t.target.en masked; done   # the crash happened after the change
+runfix 'y\n' --undo "$rec"
+eq "$(calls)" "systemctl unmask sleep.target suspend.target hibernate.target hybrid-sleep.target" "C5: pending and changed as predicted: undone"
+contains "$(cat "$rec")" '"status": "undone"' "C5: marked undone"
+
+echo "C8 --list shows both places"
+reset_fake; unmask_all; runfix 'y\n'
+user_rec_dir() { echo "$FAKE/user"; }
+runfix '' --list
+contains "$OUT" "No undo records in $FAKE/user" "C8: this user's folder (none there)"; contains "$OUT" "power.sleep applied" "C8: and root's folder"
+mkdir -p "$FAKE/user"; chmod 000 "$FAKE/user" 2>/dev/null
+if [ ! -r "$FAKE/user" ]; then runfix '' --list; contains "$OUT" "cannot be read without root" "C8: a folder it cannot read: says so"; fi
+chmod 700 "$FAKE/user" 2>/dev/null
+user_rec_dir() { echo "$RECDIR"; }
 
 echo "a failed change is recorded"
-reset_fake; setu sleep.target.en static; : > "$FAKE/failnext"; runfix 'y\n'
+reset_fake; unmask_all; : > "$FAKE/failnext"; runfix 'y\n'
 eq "$RC" 1 "failed change: exit 1"; contains "$(cat "$(latest_record)")" '"status": "failed"' "failed change: item failed"
 
 echo "refusals (in process: the driver seam cannot skip SSH or stdin)"
 for m in "" --dry-run --list "--undo /nonexistent.json"; do
-  reset_fake; setu sleep.target.en static
+  reset_fake; unmask_all
   # shellcheck disable=SC2086
   SSH_CLIENT="10.20.30.5 50000 22"; export SSH_CLIENT; runfix 'y\n' $m; unset SSH_CLIENT
   if [ "$RC" = 3 ] && [ -z "$(calls)" ] && [ ! -s "$FAKE/reads" ]; then ok "RefusesOverSsh (${m:-apply}): exit 3 before any read"; else bad "RefusesOverSsh ${m:-apply}" "$RC" 3; fi
@@ -329,7 +422,7 @@ for m in "" --dry-run --list "--undo /nonexistent.json"; do
   contains "$OUT" "from stdin" "RefusesFromStdin (${m:-apply}): says why"
 done
 for m in "" "--undo /nonexistent.json"; do
-  reset_fake; setu sleep.target.en static; FAKE_CONSOLE=0
+  reset_fake; unmask_all; FAKE_CONSOLE=0
   # shellcheck disable=SC2086
   runfix 'y\n' $m
   if [ "$RC" = 3 ] && [ -z "$(calls)" ] && [ ! -s "$FAKE/reads" ]; then ok "RefusesWithoutConsole (${m:-apply}): exit 3"; else bad "RefusesWithoutConsole ${m:-apply}" "$RC" 3; fi
@@ -338,7 +431,7 @@ reset_fake; FAKE_CONSOLE=0; runfix '' --list; eq "$RC" 0 "--list needs no consol
 reset_fake; FAKE_OS=Darwin; runfix '' --dry-run; eq "$RC" 0 "macOS: exit 0"; contains "$OUT" "no fixes for macOS" "macOS: no fixes"
 
 echo "TamperedRecordRejected"
-reset_fake; setu ssh.service.en disabled; setu ssh.service.act inactive; setu sleep.target.en static
+reset_fake; setu ssh.service.en disabled; setu ssh.service.act inactive; unmask_all
 runfix 'y\ny\n'; rec=$(latest_record); cp "$rec" "$FAKE/good.json"
 tamper() { # name, sed expression (or a command with $3 = cmd)
   if [ "${3:-}" = cmd ]; then eval "$2" < "$FAKE/good.json" > "$rec"; else sed "$2" "$FAKE/good.json" > "$rec"; fi

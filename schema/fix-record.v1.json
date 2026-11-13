@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "lanq-makeready-fix/v1",
   "title": "lanq-makeready-fix undo record v1",
-  "description": "One file per fix session, written by lanq-makeready-fix.ps1 (%LOCALAPPDATA%\\lanq-makeready\\fix-<UTC>.json) or lanq-makeready-fix.sh (${XDG_STATE_HOME:-~/.local/state}/lanq-makeready/, or /var/lib/lanq-makeready/ as root). Each item is written as pending BEFORE its change and updated after it. The scripts write one item per line in this exact layout, pure ASCII, and reject on undo any file that does not have exactly these fields and shapes. Undo commands are derived from the fix id and the before state; no text from the file is ever run.",
+  "description": "One file per fix session, written by lanq-makeready-fix.ps1 (%ProgramData%\\lanq-makeready\\fix-<UTC>.json, a folder owned by Administrators that only Administrators and SYSTEM may use) or lanq-makeready-fix.sh (${XDG_STATE_HOME:-~/.local/state}/lanq-makeready/, or /var/lib/lanq-makeready/ as root). Each item is written as pending BEFORE its change and updated after it. The scripts write one item per line in this exact layout, pure ASCII, and reject on undo any file that does not have exactly these fields and shapes. Undo commands are derived from the fix id and the before state; no text from the file is ever run.",
   "type": "object",
   "required": ["schema", "tool", "os", "host", "user", "started", "items"],
   "additionalProperties": false,
@@ -34,7 +34,7 @@
         "id": { "enum": ["ssh.start", "ssh.auto", "power.sleep", "longpaths.on", "git.longpaths", "ssh.aclkeys"], "description": "Windows: all six; Linux: ssh.start and power.sleep." },
         "status": {
           "enum": ["pending", "applied", "failed", "undone", "skipped"],
-          "description": "pending: written before the change (a crash leaves this); applied: changed and verified; failed: the change or its check failed (after holds what was found); undone: put back and verified. skipped is reserved (0.4.0 does not write it)."
+          "description": "pending: written before the change (a crash leaves this); applied: changed and verified; failed: the change or its check failed (after holds what was found); undone: put back and verified; skipped: a pending item whose change was never made (undo found the before state)."
         },
         "time": { "$ref": "#/$defs/time" },
         "before": { "type": "string", "description": "State before the change, in the fixed shape for the id (see stateShapes). Undo restores this." },
@@ -48,9 +48,9 @@
       "properties": {
         "windows:ssh.start, windows:ssh.auto": { "type": "string", "pattern": "^starttype=(Automatic|Manual|Disabled) status=(Running|Stopped)$" },
         "windows:power.sleep": { "type": "string", "pattern": "^standby=[0-9]{1,10} hibernate=([0-9]{1,10}|-)$", "description": "AC timeouts in seconds from powercfg /q; - = unreadable." },
-        "windows:longpaths.on": { "type": "string", "pattern": "^value=([0-9]{1,10}|-)$", "description": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem LongPathsEnabled; - = absent." },
+        "windows:longpaths.on": { "type": "string", "pattern": "^(value=[0-9]{1,10} type=dword|value=- type=none)$", "description": "HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem LongPathsEnabled and its registry type; - = absent. A value of any other type is never changed." },
         "windows:git.longpaths": { "type": "string", "pattern": "^value=([A-Za-z0-9]{1,16}|-)$", "description": "git config --system core.longpaths; - = unset." },
-        "windows:ssh.aclkeys": { "type": "string", "pattern": "^dacl=D:[A-Z]{0,8}(\\((A|D);[A-Z]{0,16};(0x[0-9a-fA-F]{1,8}|[A-Z]{2,24});;;([A-Z]{2}|S-1(-[0-9]{1,10}){1,14})\\)){0,64}$", "description": "DACL of administrators_authorized_keys in SDDL (allow/deny entries only)." },
+        "windows:ssh.aclkeys": { "type": "string", "pattern": "^dacl=D:[A-Z]{0,8}(\\((A|D);[A-Z]{0,16};(0x[0-9a-fA-F]{1,8}|[A-Z]{2,24});;;([A-Z]{2}|S-1(-[0-9]{1,10}){1,14})\\)){0,64}$", "description": "DACL of administrators_authorized_keys in SDDL (allow/deny entries only). A before DACL is also refused on undo unless it has entries, no deny entry, and full control for Administrators and SYSTEM. Undo restores its protection flag and explicit entries; inherited (ID) entries come back from the parent folder." },
         "linux:ssh.start": { "type": "string", "pattern": "^unit=(ssh|sshd) enabled=(enabled|disabled) active=(active|inactive)$" },
         "linux:power.sleep": { "type": "string", "pattern": "^sleep=[a-z-]{1,20} suspend=[a-z-]{1,20} hibernate=[a-z-]{1,20} hybrid-sleep=[a-z-]{1,20}$", "description": "systemctl is-enabled of the four sleep targets (none = not found). Undo unmasks only the targets this fix masked." }
       }

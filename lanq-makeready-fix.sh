@@ -36,8 +36,23 @@ err() { printf '%s\n' "$*" >&2; }
 # which could change the machine directly anyway, so the seam widens nothing. A direct run with
 # LANQ_MAKEREADY_FIX_LIB=1 still applies every refusal and then exits 2. main checks SSH and stdin itself.
 
+audit_session_id() { cat "/proc/$$/sessionid" 2>/dev/null; }
+session_props() { # $1 logind session id -> "Remote=..." and "Service=..." lines (nothing without loginctl)
+  command -v loginctl >/dev/null 2>&1 || return 0
+  if command -v timeout >/dev/null 2>&1; then timeout 5 loginctl show-session "$1" -p Remote -p Service 2>/dev/null
+  else loginctl show-session "$1" -p Remote -p Service 2>/dev/null; fi
+}
+# The login session this process belongs to survives sudo, su and tmux/screen; logind knows whether it came over SSH.
+# No session id or no loginctl (containers, CI): this check says nothing and the others decide.
+logind_remote() {
+  _sid=$(audit_session_id)
+  case "$_sid" in ''|*[!0-9]*|4294967295) return 1 ;; esac
+  case "$(session_props "$_sid")" in *Remote=yes*|*Service=sshd*) return 0 ;; esac
+  return 1
+}
 over_ssh() {
   [ -n "${SSH_CONNECTION:-}${SSH_CLIENT:-}${SSH_TTY:-}" ] && return 0
+  logind_remote && return 0
   # a root shell started from an SSH session may have lost the variables: look for sshd among the parent processes too
   _p=$$; _i=0
   while [ "$_i" -lt 32 ] && [ "$_p" -gt 1 ]; do
@@ -50,7 +65,11 @@ over_ssh() {
   done
   return 1
 }
-from_file() { [ -f "$FIX_SELF" ] && grep -q 'lanq-makeready-fix-marker' "$FIX_SELF" 2>/dev/null; }
+# Started from this file: not sh -c or sh -s (a pipe), $0 is lanq-makeready-fix.sh and holds the marker line.
+from_file() {
+  case "$-" in *c*|*s*) return 1 ;; esac
+  [ "${FIX_SELF##*/}" = lanq-makeready-fix.sh ] && [ -f "$FIX_SELF" ] && grep -q 'lanq-makeready-fix-marker' "$FIX_SELF" 2>/dev/null
+}
 has_console() { [ -t 0 ]; }
 is_root() { [ "$(id -u 2>/dev/null)" = 0 ]; }
 fx_os() { uname -s 2>/dev/null; }
@@ -64,8 +83,8 @@ confirm() {
 }
 
 refusal() { # $1 = mode; prints the reason and returns 0 when the script must not run
-  if over_ssh; then echo "refused: this session runs over SSH (SSH_CONNECTION, SSH_CLIENT or SSH_TTY is set, or sshd started it). Fix mode is for the owner at the machine itself. Nothing was changed."; return 0; fi
-  if ! from_file; then echo "refused: the script came from stdin (sh -s, a pipe). Save it as a file, read it, and run that file at the machine. Nothing was changed."; return 0; fi
+  if over_ssh; then echo "refused: this session runs over SSH (SSH_CONNECTION, SSH_CLIENT or SSH_TTY is set, logind says the login session is remote, or sshd started it). Fix mode is for the owner at the machine itself. Nothing was changed."; return 0; fi
+  if ! from_file; then echo "refused: the script came from stdin or a string (sh -s, sh -c, a pipe), or the file is not named lanq-makeready-fix.sh. Save it as lanq-makeready-fix.sh, read it, and run that file at the machine. Nothing was changed."; return 0; fi
   case "$1" in
     apply|undo) if ! has_console; then echo "refused: no interactive console (stdin is not a terminal). Every change needs your answer at the keyboard; --dry-run and --list work without one. Nothing was changed."; return 0; fi ;;
   esac
@@ -98,18 +117,74 @@ state_of() { # $1 id -> state text, empty when it cannot be recorded
   if valid_state "$1" "$_t"; then printf '%s' "$_t"; fi
 }
 field() { printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p"; }
-to_mask() { # $1 power.sleep state -> the targets that are not masked
-  _m=""; for _k in $SLEEP_KEYS; do [ "$(field "$1" "$_k")" = masked ] || _m="$_m $_k.target"; done
+# $1 power.sleep state -> the targets this fix would mask. A target masked only until the next boot (masked-runtime)
+# is left alone: masking it as well would make undo unable to put back exactly what was there.
+to_mask() {
+  _m=""; for _k in $SLEEP_KEYS; do case "$(field "$1" "$_k")" in masked|masked-runtime) ;; *) _m="$_m $_k.target" ;; esac; done
   printf '%s' "${_m# }"
 }
+
+# The scanner's sleep logic (lanq-makeready.sh: logind_values, logind_auto_suspend, classify_sleep), copied unchanged
+# so that power.sleep is offered only when the scanner would WARN; tests/fix.sh checks that the copies match.
+logind_values() { # logind.conf text (main file, then drop-ins) on stdin -> "IdleAction HandleLidSwitch HandleLidSwitchExternalPower", "-" when unset; the last value wins
+  awk '/^[ \t]*[#;]/ { next } { gsub(/[ \t]/, "") } /^IdleAction=/ { i = substr($0, 12) } /^HandleLidSwitch=/ { l = substr($0, 17) } /^HandleLidSwitchExternalPower=/ { e = substr($0, 30) } END { print (i == "" ? "-" : i) " " (l == "" ? "-" : l) " " (e == "" ? "-" : e) }'
+}
+
+classify_sleep() { # $1 logind finding, $2 GNOME sleep-inactive-ac-type ("" = not read), $3 display manager active, $4 session bus (yes|no) -> "state|detail"
+  if [ -n "$1" ]; then echo "sleeps|$1"; return 0; fi
+  if [ "$4" = yes ] && [ -n "$2" ]; then
+    case "$2" in *nothing*) echo "unmasked|logind idle and lid, this user's GNOME setting" ;; *) echo "sleeps|GNOME idle action $2 on AC (this user)" ;; esac
+    return 0
+  fi
+  if [ "$3" = yes ]; then echo "desktop|"; return 0; fi
+  echo "unmasked|logind idle and lid"
+}
+
+logind_auto_suspend() { # $1 idle $2 lid $3 lid-on-AC $4 laptop(yes|no) -> what would suspend this PC, empty = nothing found
+  case "$1" in suspend|hibernate|hybrid-sleep|suspend-then-hibernate|sleep) echo "logind IdleAction=$1"; return 0 ;; esac
+  [ "$4" = yes ] || return 0
+  _la=$3; [ "$_la" = - ] && _la=$2
+  case "$_la" in
+    -) echo "laptop lid: HandleLidSwitch default (suspend)" ;;
+    suspend|hibernate|hybrid-sleep|suspend-then-hibernate|sleep) echo "laptop lid: HandleLidSwitch=$_la" ;;
+  esac
+  return 0
+}
+# end of the copied scanner functions
+
+sleep_risk() { # what the scanner concludes when the sleep targets are not masked: sleeps | desktop | unmasked
+  _lap=no; for _x in /proc/acpi/button/lid/*; do [ -e "$_x" ] && _lap=yes; done
+  _lv=$(for _x in /etc/systemd/logind.conf /usr/lib/systemd/logind.conf.d/*.conf /run/systemd/logind.conf.d/*.conf /etc/systemd/logind.conf.d/*.conf; do [ -r "$_x" ] && cat "$_x"; done | logind_values)
+  # shellcheck disable=SC2086
+  _ld=$(logind_auto_suspend $_lv "$_lap")
+  _gt=""; _bus=no; _dm=no
+  if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then _bus=yes; fi
+  if [ -z "$_ld" ] && [ "$_bus" = yes ] && command -v gsettings >/dev/null 2>&1; then _gt=$(gsettings get org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 2>/dev/null); fi
+  if [ -z "$_ld" ] && [ -z "$_gt" ] && [ "$(unit_active display-manager.service)" = active ]; then _dm=yes; fi
+  _cs=$(classify_sleep "$_ld" "$_gt" "$_dm" "$_bus")
+  echo "${_cs%%|*}"
+}
+
 needed() { # $1 id, $2 state
   case "$1" in
     ssh.start) [ "$(field "$2" active)" = inactive ] || return 1
       [ "$(unit_active "$(field "$2" unit).socket")" = active ] && return 1   # socket-activated: the scanner says OK
       return 0 ;;
-    power.sleep) [ -n "$(to_mask "$2")" ] ;;
+    power.sleep) # like the scanner: sleep.target or suspend.target masked is OK; otherwise only when it finds a way to sleep
+      [ "$(field "$2" sleep)" = masked ] && return 1
+      [ "$(field "$2" suspend)" = masked ] && return 1
+      [ -n "$(to_mask "$2")" ] || return 1
+      case "$(sleep_risk)" in sleeps|desktop) return 0 ;; esac
+      return 1 ;;
     *) return 1 ;;
   esac
+}
+note_of() { # $1 id -> why a fix the scanner would report is not offered (empty: nothing to say)
+  case "$1" in
+    ssh.start) _u=$(ssh_unit) || return 0
+      [ "$(unit_active "$_u.service")" = other ] && echo "$_u.service is changing state (activating or deactivating); run this script again in a moment" ;;
+  esac
+  return 0
 }
 done_ok() { # $1 id, $2 state after the change
   case "$1" in
@@ -165,11 +240,29 @@ fix_change() { # $1 id, $2 apply|undo, $3 before
 
 # ---------- undo record (the only file this script writes) ----------
 
-rec_dir() {
-  if is_root; then echo /var/lib/lanq-makeready; return; fi
+user_rec_dir() {
   _b=${XDG_STATE_HOME:-}
   case "$_b" in /*) ;; *) _b=${HOME:-/nonexistent}/.local/state ;; esac
   echo "$_b/lanq-makeready"
+}
+root_rec_dir() { echo /var/lib/lanq-makeready; }
+rec_dir() { if is_root; then root_rec_dir; else user_rec_dir; fi; }
+# An `ls -ldn` line: owned by uid 0 and not writable by group or others.
+perm_ok() {
+  # shellcheck disable=SC2086
+  set -- $1
+  [ "${3:-}" = 0 ] || return 1
+  case "$1" in ?????w*|????????w*) return 1 ;; esac
+  return 0
+}
+# As root, a record is used only if it and its folder are root's alone (not links, owned by root, no group/other write).
+record_trusted() {
+  _rf=$1; case "$_rf" in */*) _rd=${_rf%/*}; [ -n "$_rd" ] || _rd=/ ;; *) _rd=. ;; esac
+  for _x in "$_rf" "$_rd"; do
+    [ -L "$_x" ] && return 1
+    perm_ok "$(ls -ldn -- "$_x" 2>/dev/null)" || return 1
+  done
+  return 0
 }
 safe_word() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-64; }
 item_count() { printf '%s\n' "$REC_ITEMS" | grep -c '^[0-9]'; }
@@ -268,6 +361,8 @@ do_apply() { # $1 = 1 for a dry run
   if [ "$_dry" = 1 ]; then out "lanq-makeready-fix $TOOL_VERSION dry run: shows each applicable fix and its undo; nothing is changed"
   else out "lanq-makeready-fix $TOOL_VERSION: changes only what you confirm, one fix at a time (default no)"; fi
   for _id in $FIX_IDS; do
+    _note=$(note_of "$_id")
+    if [ -n "$_note" ]; then out ""; out "$_id  (check $(check_of "$_id")): not offered: $_note"; continue; fi
     _s=$(state_of "$_id")
     { [ -n "$_s" ] && needed "$_id" "$_s"; } || continue
     _shown=$((_shown + 1))
@@ -281,7 +376,7 @@ do_apply() { # $1 = 1 for a dry run
     if [ "$_s2" != "$_s" ]; then out "  the state changed since it was shown; nothing done (run the script again)"; continue; fi
     [ -n "$REC_PATH" ] || new_record
     _seq=$(($(item_count) + 1))
-    _cmd=$(fix_command "$_id" apply "$_s2" | awk 'NR > 1 { printf " ; " } { printf "%s", $0 }')
+    _cmd=$(fix_command "$_id" apply "$_s2" | awk 'NR != 1 { printf " ; " } { printf "%s", $0 }')
     REC_ITEMS=$(printf '%s\n%s|%s|pending|%s|%s|%s|%s' "$REC_ITEMS" "$_seq" "$_id" "$(now_utc)" "$_s2" "$_cmd" "$(expected_after "$_id" "$_s2")" | grep '^[0-9]')
     if ! save_record; then err "  nothing changed: the undo record could not be written"; return 1; fi
     fix_change "$_id" apply "$_s2"; _rc=$?
@@ -298,8 +393,13 @@ do_apply() { # $1 = 1 for a dry run
 }
 
 do_undo() { # $1 record file
+  if ! is_root; then
+    out "lanq-makeready-fix $TOOL_VERSION: --undo needs root (run it yourself with sudo at this machine): every change it puts back needs it. This script never elevates itself. Nothing was changed."
+    return 0
+  fi
+  if [ -e "$1" ] && ! record_trusted "$1"; then err "lanq-makeready-fix: record rejected (it or its folder is a link, not owned by root, or writable by group or others, so someone else could have written it): $1. Nothing was changed."; return 2; fi
   if ! load_record "$1"; then err "lanq-makeready-fix: record rejected ($LOAD_ERR): $1. Nothing was changed."; return 2; fi
-  _failed=0; _root=no; if is_root; then _root=yes; fi
+  _failed=0
   out "lanq-makeready-fix $TOOL_VERSION undo: $1 (newest change first; each needs your answer)"
   _todo=$(printf '%s\n' "$REC_ITEMS" | grep -E '^[0-9]+[|][a-z.]+[|](applied|failed|pending)[|]' | cut -d'|' -f1 | sort -nr)
   if [ -z "$_todo" ]; then out "Nothing to undo in this record."; return 0; fi
@@ -313,9 +413,13 @@ do_undo() { # $1 record file
     out "  before the fix: $_b"
     out "  after the fix:  $_a"
     out "  now:            $_cur"
+    if [ "$_st" = pending ] && [ -n "$_cur" ] && [ "$_cur" = "$_b" ]; then
+      set_item "$_s" skipped "$(now_utc)" "$_a"
+      if save_record; then out "  never applied (the record was written, the change was not made); marked skipped"; else _failed=$((_failed + 1)); fi
+      continue
+    fi
     fix_command "$_id" undo "$_b" | while IFS= read -r _c; do out "  command: $_c"; done
-    if [ "$_cur" != "$_a" ]; then out "  changed since; left alone"; continue; fi
-    if [ "$_root" = no ]; then out "  skipped: needs root (run it yourself with sudo at this machine); this script never elevates itself"; continue; fi
+    if [ -z "$_cur" ] || [ "$_cur" != "$_a" ]; then out "  changed since; left alone"; continue; fi
     if ! confirm; then out ""; out "  left as it is"; continue; fi
     out ""
     if [ "$(state_of "$_id")" != "$_a" ]; then out "  changed since; left alone"; continue; fi
@@ -330,23 +434,31 @@ do_undo() { # $1 record file
   return 0
 }
 
-do_list() {
-  _d=$(rec_dir); _any=0
-  for _f in "$_d"/fix-*.json; do
+list_dir() { # $1 folder: one line per record in it
+  if [ ! -e "$1" ]; then out "No undo records in $1"; return 0; fi
+  if [ ! -r "$1" ] || [ ! -x "$1" ]; then out "$1: cannot be read without root (run --list with sudo to see it)"; return 0; fi
+  _any=0
+  for _f in "$1"/fix-*.json; do
     [ -e "$_f" ] || continue
     _any=1
     if load_record "$_f"; then
-      _its=$(printf '%s\n' "$REC_ITEMS" | grep '^[0-9]' | awk -F'|' '{ printf "%s%s %s", (NR > 1 ? ", " : ""), $2, $3 }')
+      _its=$(printf '%s\n' "$REC_ITEMS" | grep '^[0-9]' | awk -F'|' '{ printf "%s%s %s", (NR == 1 ? "" : ", "), $2, $3 }')
       out "$_f: started $REC_STARTED on $REC_HOST: ${_its:-no changes}"
     else out "$_f: not a valid record ($LOAD_ERR)"; fi
   done
-  [ "$_any" = 1 ] || out "No undo records in $_d"
+  [ "$_any" = 1 ] || out "No undo records in $1"
+  return 0
+}
+do_list() { # both places: this user's records and root's
+  list_dir "$(user_rec_dir)"
+  [ "$(root_rec_dir)" = "$(user_rec_dir)" ] || list_dir "$(root_rec_dir)"
   return 0
 }
 
 # ---------- main ----------
 
 main() {
+  unalias -a 2>/dev/null   # an alias must never stand in for a command this script runs
   MODE=apply; UNDO_FILE=""; _modes=0
   while [ $# -gt 0 ]; do
     case "$1" in
