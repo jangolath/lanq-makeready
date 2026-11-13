@@ -86,4 +86,4 @@ jobs:
           sudo systemctl disable --now ssh.service
           for t in sleep suspend hibernate hybrid-sleep; do sudo systemctl unmask "$t.target"; echo "$t.target: $(systemctl is-enabled "$t.target")"; done
       - name: Real apply + undo (systemd, root)
-        run: sudo -E sh tests/real-fix.sh
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" LANQ_REAL_FIX_OK="$LANQ_REAL_FIX_OK" sh tests/real-fix.sh

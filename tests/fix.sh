@@ -18,6 +18,7 @@ unset SSH_CONNECTION SSH_CLIENT SSH_TTY
 LANQ_MAKEREADY_FIX_LIB=1
 export LANQ_MAKEREADY_FIX_LIB
 __lanq_makeready_fix_test_harness() { :; }
+# shellcheck source=lanq-makeready-fix.sh
 . "$fix"
 
 echo "pure helpers"
@@ -91,7 +92,7 @@ fix_guard() { # FILE -> one line per violation
   done
   for _w in $(printf '%s\n' "$_outside$nl$_inside" | cmd_words); do case "$forbidden" in *" $_w "*) echo "forbidden command word: $_w" ;; esac; done
   for _w in $(printf '%s\n' "$_inside" | cmd_words); do
-    case " systemctl echo printf return field to_mask fix_command fix_change esac fi done then else elif " in *" $_w "*) ;; *) echo "command word in FIXES other than systemctl and helpers: $_w" ;; esac
+    case "$_w" in systemctl|echo|printf|return|field|to_mask|fix_command|fix_change|esac|fi|done|then|else|elif) ;; *) echo "command word in FIXES other than systemctl and helpers: $_w" ;; esac
   done
   printf '%s\n' "$_outside" | grep -vE '^[[:space:]]*#' | grep -nE "$mutating" | sed 's/^/mutating systemctl outside FIXES: /'
   printf '%s\n' "$_outside" | grep -vE '^[[:space:]]*#' | grep -nE 'systemctl' | grep -vE 'systemctl is-(enabled|active) "\$1"|command -v systemctl' | sed 's/^/systemctl other than is-enabled or is-active outside FIXES: /'
@@ -159,7 +160,7 @@ o=$(child --undo /nonexistent.json); eq "$?" 3 "RefusesWithoutConsole (real proc
 o=$(child --list); rc=$?
 eq "$rc" 2 "a direct run with LANQ_MAKEREADY_FIX_LIB=1 passes the refusals, then exits 2"; contains "$o" "only for the test runner" "lib mode message"
 if [ "$(uname -s)" = Darwin ]; then
-  o=$(sh "$fix" --dry-run </dev/null 2>&1); rc=$?
+  o=$(unset LANQ_MAKEREADY_FIX_LIB; sh "$fix" --dry-run </dev/null 2>&1); rc=$?
   eq "$rc" 0 "macOS: exit 0"; contains "$o" "no fixes for macOS" "macOS: says there are no fixes"
 fi
 
