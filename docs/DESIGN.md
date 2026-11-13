@@ -1,10 +1,11 @@
-# lanq-makeready — design (v0.2)
+# lanq-makeready — design (v0.4)
 
 Name approved by the owner 2026-11-08 (formerly the working name lanq-ready).
 
 ## What it is
 
-A single script the owner of an old PC downloads and runs **on that PC**. Read-only. It answers, in plain language:
+A single script (the scanner) the owner of an old PC downloads and runs **on that PC**. Read-only. It answers, in plain
+language:
 
 1. Can this machine be a LanQueue worker (git mode / archive mode)? What is missing?
 2. Can it run the common toolchains: .NET 10 SDK, Docker, Node, Python, git? Supported / "not supported but may run" / will not work.
@@ -15,9 +16,9 @@ Then it prints a ready-to-paste `machines.yml` entry for LanQueue, and optionall
 
 ## Hard rules (safety is the product)
 
-- **Read-only.** The script never installs, uninstalls, updates, changes settings, disables services, edits the registry,
+- **Read-only.** The scanner never installs, uninstalls, updates, changes settings, disables services, edits the registry,
   or touches drivers. Every fix is printed as advice (often an exact command the user may choose to run themselves).
-  No `--fix` flag in v0.1.
+  The scanner has no `--fix` flag. Fixes live in separate scripts with their own rules (see "Fix mode (0.4)").
 - **No admin required.** Checks that need admin print `skipped (needs admin)`. Running elevated is allowed and just
   fills in those rows.
 - **No network calls.** No telemetry, no update check, no downloads. (Exception: none.) It does not resolve or ping anything.
@@ -40,9 +41,13 @@ Then it prints a ready-to-paste `machines.yml` entry for LanQueue, and optionall
 lanq-makeready/
   lanq-makeready.ps1          # Windows (PowerShell 5.1+, also runs on pwsh 7)
   lanq-makeready.sh           # Linux + macOS (POSIX sh)
+  lanq-makeready-fix.ps1      # fix mode, Windows (0.4)
+  lanq-makeready-fix.sh       # fix mode, Linux with systemd (0.4)
   schema/report.v1.json   # JSON Schema for --json output
+  schema/fix-record.v1.json   # JSON Schema for the fix undo record
   tests/                  # see Testing
   docs/DESIGN.md          # this file
+  docs/FIX-RECORD.md      # the undo record, explained
   README.md               # how to download, verify (SHA256 + gh attestation verify), run; never irm|iex
   LICENSE                 # MIT (same as LanQueue)
 ```
@@ -168,12 +173,183 @@ With `--redact`: hostname, user and any absolute user-profile paths replaced by 
   `Stop-Service`, `Set-Service`, `reg add`, `powercfg /change`, `pnputil /add`, `rm `, `sudo`, `systemctl (enable|disable|stop|start)`, `apt`, `Invoke-WebRequest`, `curl`, `wget`, ...)
   outside of advice strings — the advice strings live in a single table so the guard can exclude them.
 
+## Fix mode (0.4)
+
+### Shape
+
+- **Separate scripts.** `lanq-makeready-fix.ps1` (PowerShell 5.1 and 7) and `lanq-makeready-fix.sh` (POSIX sh, Linux
+  with systemd; on macOS it says "no fixes for macOS" and exits 0). A `-Fix` switch in the scanner would break the
+  scanner's read-only promise and its guard, so the scanner is unchanged and still has no fix table. A test
+  (`ScannerUnchangedAndStillReadOnly`) checks that the scanners do not mention the fix script, keep their parameters,
+  and report the same version.
+- **Released together.** Same tag, listed in `SHA256SUMS`, attested. Not embedded in LanQueue: `lanq` never copies or
+  runs the fix script.
+- **Local only, confirm each.** It refuses to run over SSH, from stdin or a string, or without an interactive console
+  (exit 3). There is no `--yes`. Each fix is shown as check, current state, exact command and undo, then
+  `Apply? [y/N]`; the default is no. It never elevates itself: without admin or root each fix is skipped with a note.
+- **Short, reversible fix list (v1).** Windows: `ssh.start`, `ssh.auto`, `power.sleep`, `longpaths.on`,
+  `git.longpaths`, `ssh.aclkeys`. Linux: `ssh.start`, `power.sleep`. Left out on purpose: installing OpenSSH, firewall
+  rules, `ssh.password` (lockout risk), Wake-on-LAN, swap, Docker, and anything that installs, deletes, upgrades or
+  touches firmware.
+- **Only what the scanner reports.** A fix is offered only for a condition the scanner would WARN or FAIL. The sh
+  script carries the scanner's sleep functions unchanged (`logind_values`, `logind_auto_suspend`, `classify_sleep`),
+  and a test checks that the copies match.
+
+### One FIXES region
+
+All code that changes the PC is in one `#region FIXES` (ps1) / `# region FIXES` (sh) block, keyed by fix id and mode
+(apply or undo):
+
+- `Get-FixCommand` / `fix_command` returns the exact text shown to the user and stored in the record.
+- `Invoke-FixChange` / `fix_change` makes the change.
+
+Everything outside the region follows read-only rules. The only other writes are the undo record and, on Windows, the
+ACL of the record folder and files.
+
+The guards are tests, like the scanner's:
+
+- **ps1: an AST allow-list.** The mutating cmdlets (`Set-Service`, `Start-Service`, `Stop-Service`, `Set-ItemProperty`,
+  `Remove-ItemProperty`, `Set-Acl`) may appear only inside `Invoke-FixChange`. The one exception is `Set-Acl` in
+  `Set-FixRecordAcl`, which may only use one of the two fixed record SDDLs. `Invoke-Native` (the only process launcher)
+  may run outside the region only with five fixed read argument lists (`powercfg /q`, `git config --get`/`--list`).
+  Inside the region it may run only `powercfg`, `icacls` or the trusted git. The region holds exactly three functions,
+  and only apply and undo may call `Invoke-FixChange`. The guard also rejects:
+  - dynamic commands, `Invoke-Expression` and redirections;
+  - `$env:` or drive assignments, and static calls through a variable;
+  - `ForEach-Object` with a member name;
+  - member calls outside a fixed list (file writes are allowed only in `Save-FixRecord`).
+- **sh: a command-word guard.** Every command word must be on an allow-list. `sudo`, `su`, `chmod`, `chown`, `ln`, `cp`,
+  `tee`, `curl`, `eval`, `sh`, `exec` and the like are forbidden. A mutating `systemctl` verb (`enable`, `stop`, `mask`,
+  ...) may appear only inside the region.
+- Injected-mutation tests (`GuardRejectsMutationOutsideFixTable`) add forbidden code to a copy of the script and check
+  that the guard catches it.
+
+As for the scanner, the guards are a test-time tripwire against accidental mutating code, not a sandbox. The scripts
+are kept short enough to read.
+
+### Each fix
+
+1. Read the state. When the scanner would report it but this script cannot fix it safely (for example git outside
+   Program Files, a `LongPathsEnabled` that is not a DWORD, or a keys file that is a link), skip the fix with a note.
+2. Turn the state into its fixed text shape (see `docs/FIX-RECORD.md`). If it does not fit a shape, the fix is not
+   offered: a state that cannot be recorded cannot be undone.
+3. Show it, ask. On yes, read the state again (the precondition). If it is no longer needed, or differs from what was
+   shown, do nothing.
+4. Write the record item as `pending`, with the before state and the expected after state, **before** the change.
+   If the record cannot be written, stop with exit 1 and change nothing.
+5. Make the change. Read the state again and verify it. Mark the item `applied` or `failed` with the after state found,
+   and save the record again.
+
+### Record lifecycle
+
+On apply, an item goes from `pending` to `applied` or `failed`. On undo:
+
+- `applied`, `failed` or `pending` becomes `undone` once the before state is back and verified;
+- `pending` becomes `skipped` when undo finds the before state (the change was never made).
+
+A crash between writing the record and making the change leaves `pending` with a usable expected after state. Undo
+handles both cases: the change was never made, or it was made but not recorded.
+
+Undo goes newest first and confirms each item. It acts only when the current state equals the recorded after state;
+otherwise it prints "changed since; left alone". It never overwrites a change it did not make.
+
+### Record storage and validation
+
+- **Windows:** `%ProgramData%\lanq-makeready`. The script creates it owned by Administrators, protected, with only
+  Administrators and SYSTEM (`O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)`). If the folder exists but is not like
+  that (a link, another owner, inheriting, other accounts in the DACL), nothing is written. Records are not kept in
+  `%LOCALAPPDATA%`, because any non-elevated process of the same user can write there, and undo runs as admin. A record
+  is written to `<record>.tmp` (refused if that name exists) with the record SDDL set, then moved over the record.
+- **Linux:** `/var/lib/lanq-makeready` as root (umask 077: 700/600). Undo uses a record only when it and its folder are
+  owned by root, not symlinks, and not writable by group or others.
+- **Validation on undo.** One bad field rejects the record (exit 2). Undo checks:
+  - a size limit and plain ASCII;
+  - exactly the known fields, with none extra and none missing;
+  - a known schema and OS, known fix ids, a unique `seq`, the fixed status set and UTC times;
+  - every before and after state in the exact shape for its id;
+  - on Linux, the exact line layout the script writes;
+  - for `ssh.aclkeys`, a saved DACL that is safe to put back (see below).
+- **Undo never executes text from the record.** The undo command comes from the FIXES table, keyed by the fix id.
+  Only values parsed from the before state go in:
+  - a start type from a fixed set;
+  - a number, or a DWORD;
+  - a short alphanumeric git value;
+  - target names from the fixed list of four;
+  - a DACL that matches a strict SDDL pattern.
+
+  Service, registry, file and unit names are constants in the script. The `command` field is for people and is never
+  run. So a forged record can at most ask to restore a state of the same kind, and only an admin or root could have
+  written it.
+
+### The safe-DACL rule (`ssh.aclkeys`)
+
+sshd on Windows ignores `administrators_authorized_keys` when anyone but Administrators and SYSTEM may change it. The
+fix runs `icacls ... /inheritance:r /grant *S-1-5-32-544:F /grant *S-1-5-18:F` (SIDs, so it works on non-English
+Windows). Before the prompt it lists every key in the file (type, SHA256 fingerprint, comment), because after the fix
+sshd trusts each of them for administrator logins.
+
+Undo puts back the saved DACL, but only when that DACL has entries, no deny entry, and full control for both
+Administrators and SYSTEM. So undo can never lock out the administrators or leave a NULL or empty DACL. The same rule
+decides whether the fix is offered at all: if the current DACL would not pass, the fix is not offered.
+
+Undo restores the protection flag and the explicit entries. Inherited entries come back from the parent folder as it is
+at that time, and states are compared on the flag and explicit entries only. The fix does not change the owner; an
+owner other than Administrators, SYSTEM or TrustedInstaller gets a note instead.
+
+### Detecting SSH and the console
+
+- **SSH.** First `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY`. Since `sudo` or Run as administrator can drop those
+  variables, it then walks the parent processes and refuses when one is named `sshd*` (on Linux also `dropbear*`).
+  - Windows reads the process table in a separate runspace with a 15 s deadline. The walk stops at a parent that
+    started after its child (a reused PID). When the table cannot be read, it refuses in session 0.
+  - Linux also asks logind about the audit session (`/proc/$$/sessionid`, then
+    `loginctl show-session -p Remote -p Service`). That session survives `sudo`, `su` and tmux.
+- **From a file.**
+  - ps1 requires an `ExternalScript` invocation whose file contains the marker line, so `[scriptblock]::Create` and
+    `iex` are refused.
+  - sh refuses when `$-` has `c` or `s`, or (on Linux) when the shell's own command line in `/proc` shows `-c` or `-s`.
+    It also requires `$0` to be a file named `lanq-makeready-fix.sh` that contains the marker.
+- **Console.**
+  - ps1 needs `[Environment]::UserInteractive`, stdin not redirected, and a session id above 0.
+  - sh needs stdin to be a terminal (`[ -t 0 ]`).
+- **Aliases.** ps1 refuses when an alias shadows one of its functions or the cmdlets it uses; sh runs `unalias -a`.
+
+These checks stop mistakes and casual remote use. They are not a boundary against code that already runs as admin or
+root on the PC.
+
+### Testing fix mode
+
+- **Injected runner, every OS.** `tests/fix.ps1` and `tests/fix.sh` dot-source the script (with
+  `LANQ_MAKEREADY_FIX_LIB=1`). They replace the state readers, the commands (`Invoke-Native` or `systemctl`) and the
+  record store with fakes that record each call. The run stops before any scenario if a fake is missing. The named
+  tests are:
+  - refusals: `RefusesOverSsh`, `RefusesFromStdin`, `RefusesWithoutConsole`, `NoYesFlag`;
+  - prompts and elevation: `DefaultIsNo`, `SkipsAdminItemsWhenNotElevated`, `EachFixRechecksPreconditionFirst`;
+  - apply: the exact mutating commands per fix, and the record written before the change;
+  - undo: each fix restored, `UndoInReverseOrder`, `UndoSkipsChangedSince`, pending items;
+  - `WhatIfChangesNothing`, `TamperedRecordRejected`, `GuardRejectsMutationOutsideFixTable`,
+    `ScannerUnchangedAndStillReadOnly`.
+- **The test seam.** A direct run with `LANQ_MAKEREADY_FIX_LIB=1` still applies every refusal and then exits 2. On sh
+  the seam also needs a function named `__lanq_makeready_fix_test_harness`, so the variable alone does nothing. Using
+  the seam needs code already running in that shell, which could change the PC anyway, so it widens nothing.
+- **Real apply and undo, disposable machines only.** Two CI jobs, both on GitHub-hosted runners:
+  - `real-fix-windows`, on a Windows runner with PowerShell 5.1 and 7: powercfg, `LongPathsEnabled` (set to 0, and
+    absent), git `--system`, sshd when the image has it, and the keys-file ACL;
+  - `real-fix-linux`, on an Ubuntu runner with systemd, as root: `ssh.service` and the four sleep targets.
+
+  The setup step makes each fix necessary. The driver applies everything, checks the record folder and file
+  permissions, undoes everything, and compares before and after snapshots. The drivers (`tests/real-fix.ps1`,
+  `tests/real-fix.sh`) replace only the console check and the answer. They refuse to run unless `GITHUB_ACTIONS=true`,
+  `RUNNER_ENVIRONMENT=github-hosted` and `LANQ_REAL_FIX_OK=disposable-runner`; that gate guards against accidents and is
+  not a security boundary. On a runner image without sshd, Windows `ssh.start` and `ssh.auto` are covered by the fake
+  tests only.
+
 ## Later (not v0.1)
 
 - `lanq inspect <machine>`: LanQueue pipes this read-only script over its existing SSH to a worker and imports the
   JSON (capabilities, transfer mode, health hints). Keeps lanq tiny: the script is data, not a dependency.
-- Opt-in, per-item, confirm-each `--fix` for a short list of safe, reversible items (sleep-on-AC off, start sshd,
-  enable long paths) — only after v0.1 is proven on real old machines.
+- (Done in 0.4 as separate scripts, not a scanner flag: see "Fix mode (0.4)".) Opt-in, per-item, confirm-each fixes
+  for a short list of safe, reversible items.
 - Signed releases (GitHub artifact attestations first; Authenticode later if worth the cost).
 
 ## Note on the guard tests
