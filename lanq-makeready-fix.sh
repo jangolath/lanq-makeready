@@ -193,7 +193,8 @@ note_of() { # $1 id -> why a fix the scanner would report is not offered (empty:
         for _u in ssh sshd; do
           case "$(unit_enabled "$_u.service")" in
             none|not-found|alias) ;;
-            *) [ "$(unit_active "$_u.service")" = active ] || echo "$_u.service is $(unit_enabled "$_u.service"); this script only enables a unit that is enabled or disabled, so change it yourself if you want it (unmask or enable the unit)"; return 0 ;;
+            *) [ "$(unit_active "$_u.socket")" = active ] && return 0   # socket-activated: the scanner says OK
+               [ "$(unit_active "$_u.service")" = active ] || echo "$_u.service is $(unit_enabled "$_u.service"); this script only enables a unit that is enabled or disabled, so change it yourself if you want it (unmask or enable the unit)"; return 0 ;;
           esac
         done
         return 0

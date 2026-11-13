@@ -49,8 +49,8 @@ The fix script changes the PC, but only what its owner confirms there, one item 
   not inherited, only Administrators and SYSTEM. The folder and each record file are created with these permissions
   in the same call; an existing folder is never re-permissioned, only checked. Linux: `/var/lib/lanq-makeready`,
   folder 700 and files 600, owned by root. If the folder exists and is not like that (another owner, other
-  permissions, a link), the run stops before the first question and nothing is changed; the message names the owner
-  and how to move the folder out of the way.
+  permissions, a link), the run stops before the first question and nothing is changed; the message says what is
+  wrong and how to move the folder out of the way.
 - **Tamper handling.** Undo reads only `fix-<time>.json` files directly in the record folder above; a record copied
   anywhere else is rejected. It also rejects (exit 2, nothing changed) a record whose file or folder someone other than
   Administrators/SYSTEM (Windows) or root (Linux) could have written, or a link, and a record with any field outside

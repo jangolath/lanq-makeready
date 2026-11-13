@@ -434,6 +434,8 @@ reset_fake; unmask_all; FAKE_RISK=desktop; runfix '' --dry-run
 contains "$OUT" "cannot be read from here (a root shell has no session bus)" "R7(a): a desktop whose power setting cannot be read: the prompt says so"
 reset_fake; setu ssh.service.en masked; setu ssh.service.act inactive; runfix '' --dry-run
 contains "$OUT" "ssh.service is masked; this script only enables a unit that is enabled or disabled" "R7(b): a masked ssh unit: a note says why it is not offered"
+reset_fake; setu ssh.service.en masked; setu ssh.service.act inactive; setu ssh.socket.act active; runfix '' --dry-run
+lacks "$OUT" "ssh.service is masked" "R7(b): a masked ssh.service with an active ssh.socket (the scanner says OK): no note"
 reset_fake; rm -f "$FAKE/u.ssh.service.en"; setu sshd.service.en static; setu sshd.service.act inactive; runfix '' --dry-run
 contains "$OUT" "sshd.service is static" "R7(b): a static sshd unit: a note"
 

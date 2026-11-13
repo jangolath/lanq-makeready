@@ -11,7 +11,7 @@ that does not have exactly the shape below, and it acts only when the PC's state
 
 | OS | Path | Permissions |
 |---|---|---|
-| Windows | `%ProgramData%\lanq-makeready\fix-<yyyyMMddTHHmmssZ>.json` | The folder is created by the script with its permissions in the same call: owned by Administrators, protected (nothing inherited), and only Administrators and SYSTEM have access (`O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)`). Each record file is created the same way (`O:BAD:PAI(A;;FA;;;BA)(A;;FA;;;SY)`). An existing folder is never re-permissioned: if it is not exactly like this, the run stops before the first question. Records are never kept in `%LOCALAPPDATA%`. |
+| Windows | `%ProgramData%\lanq-makeready\fix-<yyyyMMddTHHmmssZ>.json` | The folder is created by the script with its permissions in the same call: owned by Administrators, protected (nothing inherited), and only Administrators and SYSTEM have access (`O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)`). Each record file is created the same way (`O:BAD:PAI(A;;FA;;;BA)(A;;FA;;;SY)`). An existing folder is never re-permissioned, only checked: if it is not owned by Administrators or SYSTEM, protected (nothing inherited), not a link, and with only Administrators and SYSTEM in its DACL, the run stops before the first question. Records are never kept in `%LOCALAPPDATA%`. |
 | Linux | `/var/lib/lanq-makeready/fix-<yyyyMMddTHHmmssZ>.json` | Created by root with umask 077: folder 700, files 600, owned by root. An existing folder that is not root's with mode 700, or is a link, stops the run before the first question. |
 
 The time in the name is UTC. When a name is taken, `-2`, `-3`, ... is added. Every fix needs root, so on Linux

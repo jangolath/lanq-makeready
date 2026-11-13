@@ -278,7 +278,7 @@ gh attestation verify lanq-makeready-fix.sh -R jangolath/lanq-makeready
 ```
 
 Then read it. This matters more than for the scanner, because this script changes the PC. The Windows script is about
-850 lines and the sh script about 500; every change is in one block marked `FIXES`. Keep the file name
+950 lines and the sh script about 550; every change is in one block marked `FIXES`. Keep the file name
 `lanq-makeready-fix.sh`: the sh script checks it.
 
 ### Use it on Windows
@@ -359,7 +359,7 @@ change it checks the result and records `applied` or `failed`.
 
 ### What it refuses, and why
 
-A refusal says why and "Nothing was changed". The SSH, stdin, console and alias refusals exit 3.
+A refusal says why and "Nothing was changed". The SSH, stdin, console and function/alias refusals exit 3.
 
 - **Over SSH.** `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` is set, or `sshd` is among the parent processes (also after
   `sudo` or Run as administrator). On Linux also when logind says the login session is remote. On Windows also when
@@ -374,10 +374,10 @@ A refusal says why and "Nothing was changed". The SSH, stdin, console and alias 
 - **Functions or aliases in the way (Windows).** It refuses when an alias would run instead of one of its functions,
   or a function or alias instead of a cmdlet it uses. Start PowerShell with `-NoProfile`. The sh script removes all
   aliases before it starts.
-- **An unsafe record folder.** If `%ProgramData%\lanq-makeready` exists but is a link, has another owner, inherits
-  permissions or lets anyone but Administrators and SYSTEM in, or if `/var/lib/lanq-makeready` is not root's with mode
-  700 or is a link, the run stops before the first question (exit 1) and nothing is changed. The message names the
-  owner and how to move the folder out of the way. A leftover `.tmp` file next to a record also stops it.
+- **An unsafe record folder.** If `%ProgramData%\lanq-makeready` exists but is not owned by Administrators or SYSTEM, protected (nothing inherited), not a link, and with only Administrators and SYSTEM in its DACL,
+  or if `/var/lib/lanq-makeready` is not root's with mode 700 or is a link, the run stops before the first question
+  (exit 1) and nothing is changed. The message says what is wrong (on Windows naming the owner when the owner is the
+  problem) and how to move the folder out of the way. A leftover `.tmp` file next to a record also stops it.
 - **macOS.** No fixes. The script says so and exits 0.
 
 ### Undo

@@ -73,8 +73,13 @@ jobs:
       - name: "Pass 1: real apply + undo (Windows PowerShell 5.1)"
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/real-fix.ps1
+      - name: "Remove the record folder, so PowerShell 7 creates it (FileSystemAclExtensions.Create)"
+        shell: pwsh
+        run: Remove-Item -LiteralPath (Join-Path $env:ProgramData 'lanq-makeready') -Recurse -Force
       - name: "Pass 1: real apply + undo (PowerShell 7)"
         shell: pwsh
+        env:
+          LANQ_REAL_FIX_NEW_DIR: '1'
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests/real-fix.ps1
       - name: "Pass 2: LongPathsEnabled absent, git --system unset, sshd running but Manual"
         shell: pwsh

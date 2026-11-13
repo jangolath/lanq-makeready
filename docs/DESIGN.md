@@ -266,9 +266,9 @@ otherwise it prints "changed since; left alone". It never overwrites a change it
 - **Windows:** `%ProgramData%\lanq-makeready`. The script creates it with its security descriptor in the same call
   (`Directory.CreateDirectory(path, security)` on PowerShell 5.1, `FileSystemAclExtensions.Create` on PowerShell 7):
   owned by Administrators, protected, only Administrators and SYSTEM (`O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)`).
-  An existing folder is never re-permissioned. It is checked before the first question, and if it is not exactly like
-  that (a link, another owner, inheriting, other accounts in the DACL), the run stops; the message names the owner and
-  how to move the folder away. Records are not kept in `%LOCALAPPDATA%`, because any non-elevated process of the same
+  An existing folder is never re-permissioned. It is checked before the first question: it must be owned by Administrators or SYSTEM, protected (nothing inherited), not a link, and with only Administrators and SYSTEM in its DACL.
+  Otherwise the run stops; the message says what is wrong (naming the owner when that is the problem) and how to move
+  the folder away. Records are not kept in `%LOCALAPPDATA%`, because any non-elevated process of the same
   user can write there, and undo runs as admin. A record is written to a new `<record>.tmp` created with its owner and
   DACL (`CreateNew`, so an existing name is refused), then moved over the record.
 - **Linux:** `/var/lib/lanq-makeready` as root (umask 077: 700/600). An existing folder that is not root's with mode

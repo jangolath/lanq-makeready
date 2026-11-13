@@ -25,12 +25,16 @@ Write-Host "needed: $($need -join ', ')"
 foreach ($id in $FixIds) { $n = Get-FixNote $id (Get-FixState $id); if ($n) { Write-Host "  note $id : $n" } }
 foreach ($r in @("$env:LANQ_REAL_FIX_REQUIRE".Split(',') | Where-Object { $_ })) { Check ($need -contains $r) "setup made $r necessary" }
 
+$dirBefore = Test-Path -LiteralPath (Get-FixRecordDir)
+Write-Host "record folder exists before apply: $dirBefore; FileSystemAclExtensions available: $([bool]('System.IO.FileSystemAclExtensions' -as [type]))"
+if ($env:LANQ_REAL_FIX_NEW_DIR -eq '1') { Check (-not $dirBefore) 'the record folder is absent, so this run creates it' }
 $rc = Invoke-FixMain -Mode apply -FromFile $true
 Check ($rc -eq 0) "apply: exit 0 (got $rc)"
 $after = Snap; Show 'after apply' $after
 foreach ($id in $need) { Check (Test-FixDone $id (Get-FixState $id)) "applied for real: $id" }
 $dir = Get-FixRecordDir
 $dsd = "$((Get-Acl -LiteralPath $dir).Sddl)"; Write-Host "record folder $dir : $dsd"
+if (-not $dirBefore) { Check ($dsd -cmatch '^O:BA' -and $dsd -cmatch 'D:PAI' -and (Test-OnlyAdminsSystem ($dsd -replace '^.*?D:', 'D:'))) 'R1: the folder this run created is owned by Administrators, protected, Administrators and SYSTEM only' }
 Check ((Test-FixRecordDirTrusted $dir) -eq '') 'M1(a): the record folder is owned by Administrators, protected, Administrators and SYSTEM only'
 $rec = @(Get-ChildItem -LiteralPath $dir -Filter 'fix-*.json' | Sort-Object -Property LastWriteTimeUtc)[-1].FullName
 Write-Host "record: $rec  $((Get-Acl -LiteralPath $rec).Sddl)"; Get-Content -LiteralPath $rec | ForEach-Object { Write-Host "  $_" }
