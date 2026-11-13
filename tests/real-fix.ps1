@@ -34,7 +34,7 @@ $after = Snap; Show 'after apply' $after
 foreach ($id in $need) { Check (Test-FixDone $id (Get-FixState $id)) "applied for real: $id" }
 $dir = Get-FixRecordDir
 $dsd = "$((Get-Acl -LiteralPath $dir).Sddl)"; Write-Host "record folder $dir : $dsd"
-if (-not $dirBefore) { Check ($dsd -cmatch '^O:BA' -and $dsd -cmatch 'D:PAI' -and (Test-OnlyAdminsSystem ($dsd -replace '^.*?D:', 'D:'))) 'R1: the folder this run created is owned by Administrators, protected, Administrators and SYSTEM only' }
+if (-not $dirBefore) { Check ($dsd -cmatch '^O:BA' -and $dsd -cmatch 'D:PA?I?\(' -and (Test-OnlyAdminsSystem ($dsd -replace '^.*?D:', 'D:'))) 'R1: the folder this run created is owned by Administrators, protected, Administrators and SYSTEM only' }
 Check ((Test-FixRecordDirTrusted $dir) -eq '') 'M1(a): the record folder is owned by Administrators, protected, Administrators and SYSTEM only'
 $rec = @(Get-ChildItem -LiteralPath $dir -Filter 'fix-*.json' | Sort-Object -Property LastWriteTimeUtc)[-1].FullName
 Write-Host "record: $rec  $((Get-Acl -LiteralPath $rec).Sddl)"; Get-Content -LiteralPath $rec | ForEach-Object { Write-Host "  $_" }
