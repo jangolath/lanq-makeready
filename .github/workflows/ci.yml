@@ -8,12 +8,18 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Tests (Windows PowerShell 5.1)
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/run.ps1
+      - name: Fix-script tests, fakes only (Windows PowerShell 5.1)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/fix.ps1
+      - name: Fix-script tests, fakes only (PowerShell 7)
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests/fix.ps1
   posix:
     strategy:
       fail-fast: false
@@ -25,9 +31,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: shellcheck
         if: runner.os == 'Linux'
-        run: shellcheck --severity=warning lanq-makeready.sh tests/run.sh
+        run: shellcheck --severity=warning lanq-makeready.sh lanq-makeready-fix.sh tests/run.sh tests/fix.sh tests/real-fix.sh
       - name: Tests
         run: sh tests/run.sh
+      - name: Fix-script tests, fakes only
+        run: sh tests/fix.sh
   alpine:
     runs-on: ubuntu-latest
     container: alpine:3.21
@@ -36,3 +44,71 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Tests (busybox sh)
         run: sh tests/run.sh
+      - name: Fix-script tests, fakes only (busybox sh)
+        run: sh tests/fix.sh
+  # Real apply and undo on disposable GitHub-hosted runners only. The drivers refuse to run without LANQ_REAL_FIX_OK
+  # and RUNNER_ENVIRONMENT=github-hosted (an accident guard, not a security boundary).
+  real-fix-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      LANQ_REAL_FIX_OK: disposable-runner
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: "Pass 1: make the fixes necessary (this runner is thrown away)"
+        shell: pwsh
+        run: |
+          $req = 'power.sleep,longpaths.on,git.longpaths,ssh.aclkeys'
+          powercfg /change standby-timeout-ac 30
+          Set-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem -Name LongPathsEnabled -Value 0 -Type DWord
+          git config --global --unset-all core.longpaths; git config --system core.longpaths false
+          $d = Join-Path $env:ProgramData 'ssh'; if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d | Out-Null }
+          icacls.exe $d /grant '*S-1-5-32-545:(OI)(CI)(RX)'   # the keys file inherits Users: read, so sshd would ignore it
+          $k = Join-Path $d 'administrators_authorized_keys'
+          if (-not (Test-Path $k)) { Set-Content -LiteralPath $k -Value 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample ci@build-01' }
+          icacls.exe $k /reset; icacls.exe $k /setowner '*S-1-5-32-544'; icacls.exe $k
+          if (Get-Service sshd -ErrorAction SilentlyContinue) { Stop-Service sshd -ErrorAction SilentlyContinue; Set-Service sshd -StartupType Manual; $req += ',ssh.start' }
+          else { 'sshd is not installed on this runner image: ssh.start and ssh.auto are covered by the fake tests only' }
+          "LANQ_REAL_FIX_REQUIRE=$req" >> $env:GITHUB_ENV
+      - name: "Pass 1: real apply + undo (Windows PowerShell 5.1)"
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/real-fix.ps1
+      - name: "Remove the record folder, so PowerShell 7 creates it (FileSystemAclExtensions.Create)"
+        shell: pwsh
+        run: Remove-Item -LiteralPath (Join-Path $env:ProgramData 'lanq-makeready') -Recurse -Force
+      - name: "Pass 1: real apply + undo (PowerShell 7)"
+        shell: pwsh
+        env:
+          LANQ_REAL_FIX_NEW_DIR: '1'
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests/real-fix.ps1
+      - name: "Pass 2: LongPathsEnabled absent, git --system unset, sshd running but Manual"
+        shell: pwsh
+        run: |
+          $req = 'longpaths.on,git.longpaths'
+          Remove-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem -Name LongPathsEnabled -ErrorAction SilentlyContinue
+          git config --system --unset-all core.longpaths; git config --global --unset-all core.longpaths
+          if (Get-Service sshd -ErrorAction SilentlyContinue) { Set-Service sshd -StartupType Manual; Start-Service sshd; $req += ',ssh.auto' }
+          "LANQ_REAL_FIX_REQUIRE=$req" >> $env:GITHUB_ENV
+          exit 0
+      - name: "Pass 2: real apply + undo (Windows PowerShell 5.1)"
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/real-fix.ps1
+  real-fix-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      LANQ_REAL_FIX_OK: disposable-runner
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Make the fixes necessary (this runner is thrown away)
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server
+          sudo systemctl disable --now ssh.socket || true
+          sudo systemctl disable --now ssh.service
+          for t in sleep suspend hibernate hybrid-sleep; do sudo systemctl unmask "$t.target"; echo "$t.target: $(systemctl is-enabled "$t.target")"; done
+          # what the scanner reports as "may sleep": logind idle suspend (logind is not restarted; the script reads the files)
+          sudo mkdir -p /etc/systemd/logind.conf.d
+          printf '[Login]\nIdleAction=suspend\n' | sudo tee /etc/systemd/logind.conf.d/90-lanq-ci.conf
+      - name: Real apply + undo (systemd, root)
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" LANQ_REAL_FIX_OK="$LANQ_REAL_FIX_OK" sh tests/real-fix.sh

@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.4.0 (2026-11-13)
+
+- **Fix mode**, in new, separate scripts: `lanq-makeready-fix.ps1` (Windows PowerShell 5.1 and PowerShell 7) and
+  `lanq-makeready-fix.sh` (POSIX sh, Linux with systemd; on macOS it says there are no fixes and changes nothing).
+  The scanner never changes anything; the fix script changes only what you confirm, one item at a time, at the PC.
+  LanQueue does not embed or run it. See README "Fix mode".
+- Fixes (v1), each offered only when the scanner would report the problem. Each one re-reads its state just before the
+  change and verifies the result after it.
+  - Windows: `ssh.start`, `ssh.auto`, `power.sleep` (AC timeouts of the active plan), `longpaths.on`, `git.longpaths`
+    (git from Program Files only) and `ssh.aclkeys`. Before you confirm `ssh.aclkeys`, it lists every key in
+    `administrators_authorized_keys`.
+  - Linux: `ssh.start` (`systemctl enable --now` of the ssh or sshd unit) and `power.sleep` (`systemctl mask` of
+    the sleep targets that are not masked yet).
+- Refusals (exit 3, nothing changed): over SSH (the SSH variables, an `sshd` parent process, logind's remote session
+  on Linux, session 0 on Windows when the parent processes cannot be read), from stdin or a string (`sh -s`, `sh -c`,
+  a pipe, `[scriptblock]::Create`, `iex`), without an interactive console, and on Windows when a function or alias
+  shadows a function or cmdlet the script uses. The SSH check is a tripwire against accidental or naive remote use,
+  not a barrier against a determined admin. There is no `--yes`, and the script never elevates itself. Without admin or root, each fix
+  is skipped with a note.
+- `-WhatIf` / `--dry-run` shows every fix that applies and its undo, and changes nothing. `-List` / `--list` shows the
+  undo records.
+- Undo record (schema `lanq-makeready-fix/v1`, [schema/fix-record.v1.json](schema/fix-record.v1.json),
+  [docs/FIX-RECORD.md](docs/FIX-RECORD.md)). Each item is written as `pending` before the change and updated to
+  `applied` or `failed` after it. Records are kept in `%ProgramData%\lanq-makeready` (created with its permissions in
+  one step: owned by Administrators, only Administrators and SYSTEM) or `/var/lib/lanq-makeready` (root, 700/600). An
+  existing record folder that is not like that stops the run before the first question. The Windows `power.sleep`
+  record keeps the active power plan, and undo acts only while that plan is still active.
+- `-Undo FILE` / `--undo FILE` goes newest first and confirms each item. It acts only when the state is still what the
+  fix left ("changed since; left alone" otherwise), and marks a `pending` item whose change was never made as `skipped`.
+  It reads only `fix-<time>.json` records directly in the record folder, and rejects (exit 2) a record that someone
+  other than an admin or root could have written, or one with any field outside its fixed shape. It never runs text
+  from the record, puts back a keys-file DACL only when Administrators and SYSTEM keep full control (checked on what it
+  writes), and checks the file's DACL again afterwards. `ssh.aclkeys` is not offered when the file has explicit entries
+  for other accounts, which `icacls /grant` would leave.
+- Exit codes: 0 done or nothing to do, 1 a change or undo failed, an unsafe record folder, or undo without admin or
+  root, 2 bad arguments or a rejected record, 3 refused.
+- Tests: `tests/fix.ps1` and `tests/fix.sh` run every apply and undo against fakes. A guard (AST allow-list for
+  PowerShell, command words for sh) allows changes only inside one `FIXES` block, and injected mutations prove it. The
+  tests also cover the refusals, a tampered record, and a check that the scanner is unchanged and still read-only.
+- CI: real apply and undo on throwaway GitHub-hosted runners only: Windows (PowerShell 5.1 and 7: powercfg, long paths,
+  git `--system`, the sshd service when the image has it, the keys-file ACL) and Ubuntu with systemd (ssh unit, sleep
+  targets). The drivers refuse to run anywhere else. shellcheck also covers the fix scripts.
+- Release: `lanq-makeready-fix.ps1`, `lanq-makeready-fix.sh` and `fix-record.v1.json` are new release assets, listed
+  in `SHA256SUMS` with build attestations. Release tests also run `tests/fix.sh`.
+- Scanner: reports version 0.4.0. No behaviour change; it stays read-only.
+- `tests/run.ps1`: removed stray control bytes (a vertical tab, BEL and backspaces where `\v`, `\7` and `\b` were meant
+  in three paths).
+
 ## 0.3.0 (2026-11-10)
 
 - Windows: works for a build account that is denied WMI/CIM (a non-admin user on a PC tuned as a server), where

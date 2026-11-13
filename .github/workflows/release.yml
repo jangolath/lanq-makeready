@@ -1,5 +1,5 @@
 name: release
-# Tag-only: pushing vX.Y.Z publishes the two scripts, the schema and SHA256SUMS as a GitHub Release,
+# Tag-only: pushing vX.Y.Z publishes the scanner and fix scripts, both schemas and SHA256SUMS as a GitHub Release,
 # with a signed build-provenance attestation (verify with `gh attestation verify`).
 on:
   push:
@@ -16,16 +16,18 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Tests
-        run: sh tests/run.sh
+        run: sh tests/run.sh && sh tests/fix.sh
       - name: Collect files and checksums
         run: |
           mkdir dist
-          cp lanq-makeready.ps1 lanq-makeready.sh schema/report.v1.json dist/
-          cd dist && sha256sum lanq-makeready.ps1 lanq-makeready.sh report.v1.json > SHA256SUMS && cat SHA256SUMS
+          cp lanq-makeready.ps1 lanq-makeready.sh lanq-makeready-fix.ps1 lanq-makeready-fix.sh schema/report.v1.json schema/fix-record.v1.json dist/
+          cd dist && sha256sum lanq-makeready.ps1 lanq-makeready.sh lanq-makeready-fix.ps1 lanq-makeready-fix.sh report.v1.json fix-record.v1.json > SHA256SUMS && cat SHA256SUMS
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: 'dist/lanq-makeready.ps1, dist/lanq-makeready.sh, dist/report.v1.json'
+          subject-path: 'dist/lanq-makeready.ps1, dist/lanq-makeready.sh, dist/lanq-makeready-fix.ps1, dist/lanq-makeready-fix.sh, dist/report.v1.json, dist/fix-record.v1.json'
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

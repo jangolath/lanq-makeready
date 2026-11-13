@@ -16,10 +16,17 @@ It starts and ends with one verdict line (`READY`, `READY WITH WARNINGS (n)` or 
 numbered next steps with the exact command or settings path for that OS, and prints a ready-to-paste `machines.yml`
 entry sized for the machine. It can also write a JSON report.
 
-Status: v0.2 (unreleased). Files: `lanq-makeready.ps1` (Windows PowerShell 5.1 and PowerShell 7), `lanq-makeready.sh`
+Status: 0.4.0. Files: `lanq-makeready.ps1` (Windows PowerShell 5.1 and PowerShell 7), `lanq-makeready.sh`
 (POSIX `sh`, Linux and macOS), `schema/report.v1.json`, `tests/`.
 
-## The read-only promise
+Since 0.4.0 there is also a separate, optional **fix script** (`lanq-makeready-fix.ps1` / `lanq-makeready-fix.sh`)
+for a short list of reversible fixes. The scanner never changes anything; the fix script changes only what you
+confirm, one item at a time, at the PC itself, and keeps an undo record. See [Fix mode](#fix-mode).
+
+## The read-only promise (the scanner)
+
+This section is about the scanner, `lanq-makeready.ps1` / `lanq-makeready.sh`. The fix script has its own rules
+([Fix mode](#fix-mode)).
 
 - It never installs, updates, removes or configures anything. No registry writes, no service changes, no
   driver actions, no firewall changes, no file deletion. Every fix is **printed as advice** for you to run
@@ -50,8 +57,9 @@ For a few PCs (say four small 4 GB boxes and two big dev machines), on each PC:
 2. **Read the verdict** on the first (and last) line: `READY`, `READY WITH WARNINGS (n)` or `NOT READY (n blockers)`.
    The `Suited for:` line says what kind of jobs fit the PC (light, medium or heavy).
 3. **Follow the next steps** in order. `MUST FIX` steps come first; each step prints the exact command or settings
-   path and says whether it needs admin (elevated PowerShell) or root (`sudo`). Nothing is run for you. Re-run the
-   check afterwards.
+   path and says whether it needs admin (elevated PowerShell) or root (`sudo`). Nothing is run for you. Some steps
+   (start sshd, no sleep on AC, long paths) can also be applied with the fix script at the PC ([Fix mode](#fix-mode)).
+   Re-run the check afterwards.
 4. **Paste the snippet** into your `machines.yml`, then confirm the placeholders (`ssh`, the `wake.mac` under
    `-Redact`). `max_jobs` and `min_free_mem_gb` are sized from RAM and CPUs; a `wake:` block is active only when
    Wake-on-LAN looks ready; `allowed_hours` is a commented example. Run `lanq doctor --remote` and `lanq health` to finish.
@@ -236,18 +244,262 @@ What else is checked, per OS:
 - **Low RAM and disk**: swap / page file size (WARN under 8 GB RAM with less than 1 GB), and low disk says the free
   space and the recommended minimum (20 GB; under 10 GB is refused).
 
+## Fix mode
+
+The scanner never changes anything. The separate fix script changes only what you confirm.
+
+`lanq-makeready-fix.ps1` (Windows PowerShell 5.1 and PowerShell 7) and `lanq-makeready-fix.sh` (POSIX `sh`, Linux
+with systemd) fix a short list of things the scanner reports, one at a time. For each fix it shows the check, the
+current state, the exact command and its undo, then asks `Apply? [y/N]`. Anything but `y` or `yes` is no. Before each
+change it writes an undo record, and `-Undo` / `--undo` puts the changes back.
+
+What it is not:
+
+- It is not part of the scanner. The scanner has no fix switch and still passes its read-only guard.
+- It is not a remote tool. It refuses to run over SSH, from a pipe or without a person at the keyboard.
+- It is not an installer. It does not install, upgrade or delete anything, and leaves out risky fixes: installing
+  OpenSSH, firewall rules, turning off password logins (you could lock yourself out), Wake-on-LAN, swap and Docker.
+- LanQueue (`lanq`) does not embed, copy or run the fix script. It runs only on the PC, started by its owner.
+
+### Download and verify the fix script
+
+The same steps as for the scanner ([Download and verify](#download-and-verify)). The release has
+`lanq-makeready-fix.ps1`, `lanq-makeready-fix.sh` and the record schema `fix-record.v1.json`. All are listed in
+`SHA256SUMS` and have a build attestation.
+
+```powershell
+(Get-FileHash .\lanq-makeready-fix.ps1 -Algorithm SHA256).Hash.ToLower()   # compare with SHA256SUMS
+gh attestation verify lanq-makeready-fix.ps1 -R jangolath/lanq-makeready
+```
+
+```sh
+sha256sum -c SHA256SUMS --ignore-missing
+gh attestation verify lanq-makeready-fix.sh -R jangolath/lanq-makeready
+```
+
+Then read it. This matters more than for the scanner, because this script changes the PC. The Windows script is about
+950 lines and the sh script about 550; every change is in one block marked `FIXES`. Keep the file name
+`lanq-makeready-fix.sh`: the sh script checks it.
+
+### Use it on Windows
+
+1. Run the scanner first, so you know what it reports.
+2. Open PowerShell **as administrator** at the PC itself (Start, type PowerShell, "Run as administrator"). The script
+   never elevates itself. Without admin it shows the fixes and skips each one with a note.
+3. Unblock the file once, and do a dry run. It shows every fix that applies and its undo, and changes nothing:
+
+   ```powershell
+   Unblock-File .\lanq-makeready-fix.ps1
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\lanq-makeready-fix.ps1 -WhatIf
+   ```
+
+4. Apply. Answer each prompt yourself:
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\lanq-makeready-fix.ps1
+   ```
+
+   ```text
+   lanq-makeready-fix 0.4.0: changes only what you confirm, one fix at a time (default no)
+
+   power.sleep  (check power.sleep): the PC sleeps or hibernates on AC power
+     now:     power scheme 381b4222-f694-41f0-9685-ff5bb260df2e: sleeps after 30 min, hibernates after 180 min (0 = never)
+     command: powercfg /change standby-timeout-ac 0
+     command: powercfg /change hibernate-timeout-ac 0
+     undo:    powercfg /setacvalueindex SCHEME_CURRENT SUB_SLEEP STANDBYIDLE 1800
+     undo:    powercfg /setacvalueindex SCHEME_CURRENT SUB_SLEEP HIBERNATEIDLE 10800
+     undo:    powercfg /setactive SCHEME_CURRENT
+     Apply? [y/N] y
+
+     applied and verified
+
+   Undo record: C:\ProgramData\lanq-makeready\fix-20261113T210410Z.json
+   To undo:     lanq-makeready-fix.ps1 -Undo "C:\ProgramData\lanq-makeready\fix-20261113T210410Z.json"
+   ```
+
+5. Run the scanner again. After `longpaths.on`, reboot so that every program sees the change.
+
+`-NoProfile` matters: the script refuses to run when a function or alias (for example from a profile) would stand in
+for one of its functions or for a cmdlet it uses.
+
+### Use it on Linux
+
+```sh
+sh ./lanq-makeready-fix.sh --dry-run          # no root needed; shows what applies, changes nothing
+sudo sh ./lanq-makeready-fix.sh               # at the machine itself; answer each prompt
+```
+
+```text
+ssh.start  (check ssh.server: sshd is installed but not running)
+  now:     ssh.service is inactive, disabled at boot
+  command: systemctl enable --now ssh.service
+  undo:    systemctl disable ssh.service
+  undo:    systemctl stop ssh.service
+  Apply? [y/N]
+```
+
+On macOS the sh script says "no fixes for macOS" and changes nothing. On Linux without systemd it says no fix applies.
+
+### The fixes
+
+A fix is offered only when the scanner would report that problem and the script can record the state exactly.
+Just before the change it reads the state again. If the state changed since it was shown, nothing is done. After the
+change it checks the result and records `applied` or `failed`.
+
+| id | OS | What it changes | Its undo | Needs |
+|---|---|---|---|---|
+| `ssh.start` | Windows | sshd is stopped: `Set-Service sshd -StartupType Automatic`, `Start-Service sshd` | the old start type; `Stop-Service sshd` | admin |
+| `ssh.start` | Linux | the `ssh` or `sshd` unit is inactive and not socket-activated: `systemctl enable --now <unit>.service` | `systemctl disable` (only if it was disabled), `systemctl stop` | root |
+| `ssh.auto` | Windows | sshd runs but starts Manual or Disabled: `Set-Service sshd -StartupType Automatic` | the old start type | admin |
+| `power.sleep` | Windows | AC sleep or hibernate timeout of the active power plan is not 0: `powercfg /change standby-timeout-ac 0` and/or `hibernate-timeout-ac 0` (battery values are not touched). The record keeps which plan was active | `powercfg /setacvalueindex SCHEME_CURRENT SUB_SLEEP ...` with the old seconds, then `/setactive SCHEME_CURRENT`, only while the same plan is still active | admin |
+| `power.sleep` | Linux | the scanner finds a way to suspend and no sleep target is masked: `systemctl mask` of the sleep, suspend, hibernate and hybrid-sleep targets that are not masked yet | `systemctl unmask` of exactly those targets | root |
+| `longpaths.on` | Windows | `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem` `LongPathsEnabled` = 1 (DWORD) | the old value, or the value removed if it was absent | admin, then a reboot |
+| `git.longpaths` | Windows | `git config --system core.longpaths true`, with git from Program Files | the old value, or `--unset` | admin |
+| `ssh.aclkeys` | Windows | `icacls administrators_authorized_keys /inheritance:r /grant *S-1-5-32-544:F /grant *S-1-5-18:F`. The prompt first lists every key in the file (type, fingerprint, comment), since sshd will trust them all for administrator logins | `Set-Acl` with the saved DACL's own entries and protection flag | admin |
+
+### What it refuses, and why
+
+A refusal says why and "Nothing was changed". The SSH, stdin, console and function/alias refusals exit 3.
+
+- **Over SSH.** `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` is set, or `sshd` is among the parent processes (also after
+  `sudo` or Run as administrator). On Linux also when logind says the login session is remote. On Windows also when
+  the parent processes cannot be read in session 0, where services and OpenSSH sessions run. Fix mode is for the
+  owner at the PC; nobody should change a PC remotely through it. This applies to `-WhatIf` and `-List` too.
+- **From stdin or a string.** `sh -s`, `sh -c`, a pipe, `[scriptblock]::Create` or `iex`. The script must run from a
+  file you saved and read. On Linux the file must be named `lanq-makeready-fix.sh`.
+- **No interactive console.** Redirected stdin, a non-interactive session or Windows session 0. Every change needs
+  your answer at the keyboard. `-WhatIf` / `--dry-run` and `-List` / `--list` work without one.
+- **No `--yes`, `-Yes` or `-Force`.** There is no way to answer for you. An unknown argument exits 2.
+- **No self-elevation.** Without admin or root, each fix is skipped with a note (exit 0). Start it elevated yourself.
+- **Functions or aliases in the way (Windows).** It refuses when an alias would run instead of one of its functions,
+  or a function or alias instead of a cmdlet it uses. Start PowerShell with `-NoProfile`. The sh script removes all
+  aliases before it starts.
+- **An unsafe record folder.** If `%ProgramData%\lanq-makeready` exists but is not owned by Administrators or SYSTEM, protected (nothing inherited), not a link, and with only Administrators and SYSTEM in its DACL,
+  or if `/var/lib/lanq-makeready` is not root's with mode 700 or is a link, the run stops before the first question
+  (exit 1) and nothing is changed. The message says what is wrong (on Windows naming the owner when the owner is the
+  problem) and how to move the folder out of the way. A leftover `.tmp` file next to a record also stops it.
+- **macOS.** No fixes. The script says so and exits 0.
+
+### Undo
+
+Records are kept per OS:
+
+| OS | Folder | Who may read and change it |
+|---|---|---|
+| Windows | `%ProgramData%\lanq-makeready\fix-<UTC time>.json` (usually `C:\ProgramData\...`) | Administrators and SYSTEM only (owned by Administrators, nothing inherited) |
+| Linux (root) | `/var/lib/lanq-makeready/fix-<UTC time>.json` | root only (folder 700, files 600) |
+
+Fixes need admin or root, so records are always written to these folders. The Windows folder and each record are
+created with these permissions in the same call; an existing folder is only checked, never re-permissioned. On Linux
+`--list` also looks in `${XDG_STATE_HOME:-~/.local/state}/lanq-makeready/` and marks anything it would not undo as
+not trusted. `-Undo` / `--undo` reads only `fix-<time>.json` files directly in the folder above; a copy anywhere else
+is rejected.
+
+1. List the records (Windows needs an elevated PowerShell to read them):
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\lanq-makeready-fix.ps1 -List
+   ```
+
+   ```sh
+   sudo sh ./lanq-makeready-fix.sh --list
+   ```
+
+2. Undo one record, as admin or root, at the PC:
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\lanq-makeready-fix.ps1 -Undo "C:\ProgramData\lanq-makeready\fix-20261113T210410Z.json"
+   ```
+
+   ```sh
+   sudo sh ./lanq-makeready-fix.sh --undo /var/lib/lanq-makeready/fix-20261113T210410Z.json
+   ```
+
+3. It goes through the changes newest first. For each one it shows the state before the fix, after the fix, and now,
+   plus the undo command, then asks `Apply? [y/N]`:
+   - **now = after the fix**: it asks, puts the old state back, checks it, and marks the item `undone`.
+   - **"changed since; left alone"**: the state is no longer what the fix left. Someone or something changed it, so
+     undo does not touch it. Undo never overwrites a change it did not make.
+   - **"never applied"**: the record says `pending` (it is written before the change) but the state is still the old
+     one, for example after a crash or power cut before the change. It is marked `skipped`.
+   - Answering no leaves the item as it is; you can run `-Undo` again later.
+
+Before it does anything, undo checks the record. It is rejected (exit 2) when it or its folder could have been
+written by someone other than Administrators/SYSTEM (Windows) or root (Linux), or when any field does not have its
+exact shape. Undo never runs text from the record: it builds the commands from the fix id and the recorded state.
+The record format is in [docs/FIX-RECORD.md](docs/FIX-RECORD.md).
+
+### Exit codes (fix script)
+
+| Code | Meaning |
+|---|---|
+| `0` | done, nothing to do, a dry run, a list (also without admin or root), help, or every fix skipped (not elevated, macOS, no systemd) |
+| `1` | a change or an undo failed or did not verify, the record could not be written or updated, the record folder is not safe, or `-Undo` / `--undo` without admin or root |
+| `2` | bad arguments, more than one of `-WhatIf`/`-Undo`/`-List`, or a record rejected by undo |
+| `3` | refused: over SSH, from stdin or a string, no interactive console, or (Windows) a function or alias in the way |
+
+### Limits
+
+- Linux has no `ssh.auto`. `ssh.start` is offered only when the unit is inactive. A unit that runs but is disabled at
+  boot is not changed. A socket-activated sshd is left alone, since the scanner reports it as OK. A masked, static or
+  otherwise unusual unit gets a note saying why it is not offered.
+- Linux `power.sleep` under `sudo`: a root shell has no session bus, so it cannot read a desktop user's GNOME power
+  setting. When a display manager runs, the fix is offered with a note saying that it cannot tell whether the desktop
+  really sleeps (masking is harmless if it does not); the scanner run as that user may say OK.
+- On Windows `ssh.start` (sshd stopped) also sets the start type to Automatic. `ssh.auto` is for an sshd that already runs.
+  Neither installs OpenSSH Server.
+- Linux `power.sleep`: a target masked only until the next boot (`masked-runtime`) is left alone, so undo can put back
+  exactly what was there. If `sleep.target` or `suspend.target` is already masked, the scanner says OK and nothing is offered.
+- Windows `power.sleep` changes the active power plan's AC values only. Undo acts only while the same plan is active;
+  after a plan switch it says "changed since; left alone".
+- `git.longpaths` uses git only from Program Files (or the Windows folder). A git found elsewhere on PATH is not run,
+  because users may be able to change that folder; the script says so and you set it yourself. A `core.longpaths`
+  in your global git config that overrides the system value is reported, not changed. The scanner checks the first git
+  on PATH; when that is a different install, the prompt says so, and the scanner may still report git after the fix.
+- `longpaths.on` is not offered when `LongPathsEnabled` has a type other than DWORD. A string or QWORD value of 1
+  already counts as on for the scanner, so then nothing is said.
+- `ssh.aclkeys` only removes inherited entries and grants Administrators and SYSTEM full control; it does not change
+  the file's owner. It is not offered when the file is a link, has no DACL, has an owner other than Administrators,
+  SYSTEM or TrustedInstaller, has its own (explicit) entries for other accounts (which `icacls /grant` would leave in
+  place; the note lists them with the `icacls /remove:g` commands), or when undo could not safely put the current
+  permissions back (a deny entry, or Administrators or SYSTEM without full control). Undo restores the saved DACL's own (explicit) entries and its
+  protection flag. Inherited entries come back from the parent folder as it is **now**, not as the record saw them.
+- Undo of `ssh.aclkeys` deliberately opens the file again to the accounts that could change it before. sshd then
+  ignores the file again, so administrator key logins stop working. The prompt shows the permissions it will put back.
+- The checks that refuse SSH sessions, pipes and missing consoles guard against mistakes and naive remote use. They
+  are a tripwire, not a barrier: a determined admin or root can get a session that looks local (for example
+  `systemd-run --pty`, `machinectl shell`, or attaching at the console to a tmux started over SSH), and code that
+  already runs as admin or root on the PC can change it without this script.
+
+### For AI agents
+
+AI coding agents (and other automation) may run the **scanner**, read its report, and recommend fixes to the PC's owner,
+including pointing at the fix script. They must **never run the fix script**, not even with `-WhatIf`/`--dry-run`
+over SSH or in a pipe. It belongs to the PC's owner and runs only locally and interactively; its refusals are there to
+stop exactly that. Agents must never create, edit or forge undo records, and never change the record folders or their
+permissions. To get a fix applied, tell the owner which fix id to confirm and that they should run the dry run first.
+
 ## Tests
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run.ps1      # fixtures + read-only guard + real smoke run
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\fix.ps1      # fix script, fakes only (nothing on this PC changes)
 ```
+
 ```sh
 sh tests/run.sh                                                          # same for the sh script
+sh tests/fix.sh                                                          # fix script, fake systemctl only
 docker run --rm -v "$PWD:/w:ro" ubuntu:24.04 sh /w/tests/run.sh         # also try alpine:3.21 (busybox)
 ```
 
 The verdict logic is in pure functions fed by a facts object (variables in `sh`), so the tests use fixtures such
 as "Windows 10 22H2, 4 GB, HDD, no sshd" or "glibc 2.26" without needing that machine.
+
+The fix tests run every apply and undo against fakes (state, commands, record store) and check the exact commands
+of each fix, that the record is written before the change, the reverse-order undo, "changed since", the refusals,
+tampered records, and a guard that allows changes only inside the `FIXES` block. Real apply and undo run only in CI
+on throwaway GitHub-hosted runners (`tests/real-fix.ps1`, `tests/real-fix.sh`), which refuse to run anywhere else.
+Never run those on a PC you care about.
 
 ## Safety details
 
@@ -267,7 +519,7 @@ as "Windows 10 22H2, 4 GB, HDD, no sshd" or "glibc 2.26" without needing that ma
 - AVX2 is only reported on PowerShell 7 (Windows PowerShell 5.1 would need a compiled helper, which writes temp files).
 - SSD/HDD detection inside VMs and containers is a heuristic and can be wrong.
 - Defender exclusions and Windows Update contents are deliberately not read.
-- There is no `--fix`; that may come later, per item and with confirmation.
+- The scanner has no `--fix` and never will; fixes live in the separate fix script ([Fix mode](#fix-mode)).
 - Wake-on-LAN readiness cannot see the BIOS/UEFI setting, and on Windows the adapter's power settings may need admin
   to read (the row is then `SKIP`). Test with `lanq wake <machine> --wait`.
 - The distribution end-of-life table is embedded and dated; a release it does not know is not judged.

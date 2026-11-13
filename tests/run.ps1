@@ -138,9 +138,9 @@ Assert-Equal (St (Run (New-Facts @{ SshdStartType = 'Manual'; SshFwRule = 'disab
 $fa = $Advice['ssh.fw']
 Assert-True ($fa -match 'Get-NetConnectionProfile' -and $fa -match 'Set-NetConnectionProfile' -and $fa -match '-NetworkCategory Private' -and $fa -match 'Set-NetFirewallRule -Name OpenSSH-Server-In-TCP -Profile Private -RemoteAddress LocalSubnet') 'ssh.fw hint: Private network, LocalSubnet, like the LanQueue quickstart'
 Assert-Equal (St (Run (New-Facts @{ DefaultShell = $null })) 'ssh.shell') 'OK' 'default shell unset (cmd.exe): OK'
-Assert-Equal (St (Run (New-Facts @{ DefaultShell = 'C:\Windows\System32\WindowsPowerShell1.0\powershell.exe' })) 'ssh.shell') 'OK' 'powershell.exe default shell: OK'
-Assert-Equal (St (Run (New-Facts @{ DefaultShell = 'C:\Program Files\PowerShell\pwsh.exe' })) 'ssh.shell') 'OK' 'pwsh.exe default shell: OK'
-$r = Run (New-Facts @{ DefaultShell = 'C:\Program Files\Gitinash.exe' })
+Assert-Equal (St (Run (New-Facts @{ DefaultShell = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' })) 'ssh.shell') 'OK' 'powershell.exe default shell: OK'
+Assert-Equal (St (Run (New-Facts @{ DefaultShell = 'C:\Program Files\PowerShell\7\pwsh.exe' })) 'ssh.shell') 'OK' 'pwsh.exe default shell: OK'
+$r = Run (New-Facts @{ DefaultShell = 'C:\Program Files\Git\bin\bash.exe' })
 Assert-Equal (St $r 'ssh.shell') 'WARN' 'bash.exe default shell: WARN'
 Assert-True ((Ck $r 'ssh.shell').advice -match [regex]::Escape('Remove-ItemProperty -Path HKLM:\SOFTWARE\OpenSSH -Name DefaultShell')) 'shell advice: exact command'
 
