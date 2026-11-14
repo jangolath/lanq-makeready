@@ -38,6 +38,13 @@
     - Drift treats an unknown bus or Dev Drive state as drift.
     - `tests/pool-defender.ps1` undoes only the record its own apply wrote and is interrupt-safe. It refuses a checkout
       others could change, and checks scanning through a junction (L2).
+  - Review round 3:
+    - Every self-test folder gets its own random name.
+    - A Dev Drive run that finds lanq-work made first removes its staging holder.
+    - `tests/pool-defender.ps1` checks its folder, the folders above it and both scripts before it loads anything
+      (inherit-only entries do not count). docs/TUNE.md gives the copy and `icacls` steps that pass.
+    - The L2 junction sits in an admin-only folder of the script's own and is removed even on interrupt.
+    - Clean-up compares lanq-work with the file id seen at the start.
   - **Not offered** (report only, exit 0) on any doubt: Defender not active, real-time protection off or one-way,
     exclusions hidden, managed by policy or MDM, Defender for Endpoint onboarded, an existing exclusion that covers
     lanq-work (reported, never recorded or undone) or a variant of it, a drive that is not fixed, internal and NTFS,

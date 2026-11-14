@@ -391,13 +391,22 @@ after the apply it prints `INTERRUPTED ... -Undo <record>`: run that. It also pr
 questions: the exact form Defender stores `C:\lanq-work\` in, and whether `fsutil devdrv query` shows WdFilter
 attached right after the format.
 
-1. Copy the release candidate to a folder only Administrators may change (for example under `C:\ProgramData`; the
-   script refuses to run elevated from a folder others could change, such as a user's checkout). Then, at build-02
-   itself (not over SSH), in an elevated PowerShell, from that copy:
+1. At build-02 itself (not over SSH), in an elevated PowerShell, make a copy of the release candidate that only
+   Administrators and SYSTEM may change, and run it from there. The script refuses to run elevated when its folder,
+   any folder above it, or the two scripts it loads could be changed by others (a user's checkout, for example), and it
+   checks that before it loads anything:
 
    ```powershell
+   New-Item -ItemType Directory C:\ProgramData\lanq-rc
+   cmd /c "icacls C:\ProgramData\lanq-rc /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F"
+   Copy-Item -Recurse <the release candidate>\* C:\ProgramData\lanq-rc\
+   cd C:\ProgramData\lanq-rc
    powershell -NoProfile -ExecutionPolicy Bypass -File tests\pool-defender.ps1 -BuildUser <the build account>
    ```
+
+   (`icacls` runs through `cmd /c "..."` because PowerShell would read `(OI)` in a bare argument as a command.) If `C:\ProgramData\lanq-rc` exists already, remove it first: a folder someone else made is refused.
+   The check passes the default `C:\` and `C:\ProgramData`; a `C:\ProgramData` that lets Users or Everyone delete or
+   change what is in it is refused (fix that first).
 
    It needs `C:\lanq-work\` not yet excluded. lanq-work itself stays afterwards (the fix never deletes it).
 2. For the Dev Drive (optional; it leaves the Dev Drive in place):

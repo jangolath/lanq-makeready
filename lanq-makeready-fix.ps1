@@ -92,7 +92,7 @@ $FixFunctionNames = @('Write-FixLine', 'Write-FixErr', 'Get-FixSessionId', 'Get-
   'Get-DotnetState', 'Get-DoState', 'Get-FixTargets', 'Get-StateTarget', 'Get-UndoRefusal', 'Get-TargetLabel', 'Get-ScanTarget', 'Get-SvcNorm', 'Get-FixApplyNote', 'Get-TuneArgError', 'Get-CleanName',
   'Get-SystemDriveLetter', 'Get-DriveRoot', 'Get-LanqWorkPath', 'Get-LanqWorkEntry', 'Get-WorkDirSddl', 'Get-SdCanon', 'Get-SdHash', 'Test-WorkDirSd', 'Test-RootSddl', 'Get-BuildUser',
   'Get-BuildUserProblem', 'Get-ExclusionStatus', 'Get-DevDrvInfo', 'Test-DevDriveBuild', 'Get-DefenderFacts', 'Get-VolumeFacts', 'Get-WorkDirFacts', 'Get-DevVhdFacts', 'Get-WorkDirRecords',
-  'Get-WorkDirState', 'Get-WorkDirProblem', 'Test-WorkDirSame', 'Test-MpResource', 'Get-RecordSortKey', 'Get-CaseSens', 'Test-SelfTestDir', 'Get-EicarBytes', 'Test-VirusError', 'Wait-MpDetection', 'Get-MpExclusions', 'Get-SiblingTests', 'Confirm-FixFor')
+  'Get-WorkDirState', 'Get-WorkDirProblem', 'Test-WorkDirSame', 'Test-MpResource', 'Get-RecordSortKey', 'Get-CaseSens', 'Test-SelfTestDir', 'Get-EicarBytes', 'Test-VirusError', 'Wait-MpDetection', 'Get-MpExclusions', 'Get-SiblingTests', 'New-TestTag', 'Confirm-FixFor')
 # Every cmdlet this file runs. A function or alias with one of these names would run instead of the cmdlet, so the
 # script refuses to start when any of them does not resolve to the cmdlet itself (Get-FixCommandShadow).
 $FixCmdletNames = @('Get-Service', 'Set-Service', 'Start-Service', 'Stop-Service', 'Get-Item', 'Set-ItemProperty', 'Remove-ItemProperty', 'Get-Acl', 'Set-Acl',
@@ -804,12 +804,14 @@ function Wait-MpDetection([string]$Path, [datetime]$Since, [int]$Sec, [switch]$H
 function Test-MpResource($Resources, [string]$Path) { return (@(@($Resources) | Where-Object { "$_" -ieq "file:_$Path" }).Count -gt 0) }
 # The exclusion list; it throws when it cannot be read (a read-back must never look empty by mistake, L-2).
 function Get-MpExclusions { return @((Get-MpPreference -ErrorAction Stop).ExclusionPath | Where-Object { $_ } | ForEach-Object { "$_" }) }
+# A fresh random name: the run's tag, and each self-test folder its own (one seen folder does not give away the next, L-d).
+function New-TestTag { return [Guid]::NewGuid().ToString('N') }
 # The forms next to lanq-work that the self-test checks are still scanned (anyone may create them on the drive root).
 # The file names carry the run's tag, so a threat-history entry can only be this run's.
 function Get-SiblingTests([string]$Root, [string]$Tag) {
   $e = "eicar-$Tag.com"
-  return @(@{ Dir = "$Root$WorkDirName-$Tag"; File = $e }, @{ Dir = "$Root$WorkDirName$Tag"; File = $e }, @{ Dir = "$Root$WorkDirName.$Tag"; File = $e },
-    @{ Dir = "$Root$WorkDirName."; File = $e }, @{ Dir = "$Root$WorkDirName "; File = $e }, @{ Dir = "$Root$WorkDirName-$Tag-ads"; File = "host-$Tag.txt:eicar-$Tag"; Host = "host-$Tag.txt"; Ads = $true })
+  return @(@{ Dir = "$Root$WorkDirName-$(New-TestTag)"; File = $e }, @{ Dir = "$Root$WorkDirName$(New-TestTag)"; File = $e }, @{ Dir = "$Root$WorkDirName.$(New-TestTag)"; File = $e },
+    @{ Dir = "$Root$WorkDirName."; File = $e }, @{ Dir = "$Root$WorkDirName "; File = $e }, @{ Dir = "$Root$WorkDirName-$(New-TestTag)-ads"; File = "host-$Tag.txt:eicar-$Tag"; Host = "host-$Tag.txt"; Ads = $true })
 }
 # fsutil file queryCaseSensitiveInfo: $false (disabled), $true (enabled), $null (anything else, other languages too: fail closed).
 function Get-CaseSens([string]$Text) {
@@ -1457,7 +1459,7 @@ function Invoke-FixChange([string]$Id, [string]$Mode, $B, $Cur) {
     'defender.exclude|apply' {
       # 1. lanq-work: created with its owner and permissions in one call (only when the state said it is absent), then
       #    read back; a folder someone else made meanwhile (or anything unexpected) stops here, before any exclusion.
-      $root = Get-DriveRoot $B.Drive; $p = Get-LanqWorkPath $B.Drive; $entry = Get-LanqWorkEntry $B.Drive; $tag = [Guid]::NewGuid().ToString('N')
+      $root = Get-DriveRoot $B.Drive; $p = Get-LanqWorkPath $B.Drive; $entry = Get-LanqWorkEntry $B.Drive; $tag = New-TestTag
       # lanq-work is made with its .lanq-pin in the record folder and moved into place, so it is never empty where the
       # build user can reach it (an empty folder could be turned into a junction), and a C:\lanq-work someone made first
       # makes the move fail.
@@ -1477,7 +1479,7 @@ function Invoke-FixChange([string]$Id, [string]$Mode, $B, $Cur) {
       $made = New-Object System.Collections.ArrayList; $fail = ''; $new = @(); $added = $false; $ok = $false; $err = ''; $left = @(); $bytes = Get-EicarBytes; $k = 0
       try {
         # 2. positive control: Defender must catch the test file in an admin-only folder on the same drive
-        $k++; $stage = Join-Path (Get-FixRecordDir) "stage-$tag-$k"; $dst = $root + "lanq-selftest-$tag"
+        $k++; $stage = Join-Path (Get-FixRecordDir) "stage-$tag-$k"; $dst = $root + "lanq-selftest-$(New-TestTag)"
         New-FixSecuredDir $stage $AdminOnlySddl; [void]$made.Add($stage); [System.IO.Directory]::Move($stage, $dst); [void]$made.Add($dst)
         $f = "$dst\eicar-$tag.com"; $t0 = [DateTime]::Now.AddSeconds(-5); $hit = $false
         if (-not (Test-SelfTestDir $dst)) { throw "$dst is not the folder this script made; nothing was written to it" }
@@ -1493,7 +1495,7 @@ function Invoke-FixChange([string]$Id, [string]$Mode, $B, $Cur) {
         # 4. inside lanq-work the test file must stay 15 s. Defender may take a moment to apply a new exclusion, so a
         #    caught file is tried again with a new name until $ExclusionSettleSec have passed since the exclusion was added.
         if (-not $fail) {
-          $k++; $stage = Join-Path (Get-FixRecordDir) "stage-$tag-$k"; $dst = "$p\lanq-selftest-$tag"
+          $k++; $stage = Join-Path (Get-FixRecordDir) "stage-$tag-$k"; $dst = "$p\lanq-selftest-$(New-TestTag)"
           New-FixSecuredDir $stage $AdminOnlySddl; [void]$made.Add($stage)
           if (-not (Test-WorkDirSame $p $fid)) { throw "$p changed (it is a link now, another folder, or its $PinName is gone): nothing is moved, written or deleted there" }
           try { [System.IO.Directory]::Move($stage, $dst) } catch { throw "a self-test folder could not be put in place ($dst exists already: someone made it first); nothing was written to it" }
@@ -1559,7 +1561,7 @@ function Invoke-FixChange([string]$Id, [string]$Mode, $B, $Cur) {
       $p = Get-LanqWorkPath $L; $hold = '\\?\' + (Get-DriveRoot $L) + ".lanq-stage-$([Guid]::NewGuid().ToString('N'))"; New-FixSecuredDir $hold $AdminOnlySddl
       $stage = "$hold\$WorkDirName"; $dst = '\\?\' + $p
       New-FixSecuredDir $stage (Get-WorkDirSddl $B.User); New-FixSecuredDir "$stage\$PinName" $AdminOnlySddl
-      [System.IO.Directory]::Move($stage, $dst)
+      try { [System.IO.Directory]::Move($stage, $dst) } catch { $q = $hold; try { [System.IO.Directory]::Delete($q, $true) } catch { }; throw "$p could not be put in place (someone made it first)" }   # L-b: no holder left behind
       $q = $hold; [System.IO.Directory]::Delete($q, $true)
       $why = Get-WorkDirProblem $p $B.User $true
       if ($why) { throw "$p is not as this script makes it ($why)" }
