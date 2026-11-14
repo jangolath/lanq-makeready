@@ -27,9 +27,15 @@
   - Undo re-checks service, task and Run entry names against the curated list plus an append-only retired list, and
     every name and path in a record has a fixed shape. A record holds at most 64 changes.
 - **Defender exclusions** behind their own switch, `-Tune -DefenderExclusions`: after a screen that suggests a Dev
-  Drive first, only work_root (`-WorkRoot`) and the NuGet packages folder are offered, never temp or processes;
+  Drive first, only work_root (`-WorkRoot`) plus the NuGet package cache are offered, never temp or processes;
+  a folder must be canonical with no `.`/`..` part, not a drive root, and neither a Windows, program, shared-data or
+  user folder nor a parent of one (the same rule for the tune scan's `-WorkRoot`); the NuGet cache is offered only
+  when the elevated account is the one logged on at the console;
   folders already covered by an exclusion are skipped and never recorded; nothing is offered unless AMRunningMode is
   Normal. Undo removes exactly the folders the record says were added.
+- Names read from the PC (Run entries, services, tasks, drivers) are printed without control or bidi characters and
+  cut at 80 characters; detail and advice at 1024. Under `-Redact` account SIDs in task names are redacted too.
+- `defender.scantime` is not offered when an hour after the window is still inside it (windows of 23 hours or more).
 - Report only, never fixed: cache clean-up, the Windows Update restart policy (`wu.reboot`) and the other checks
   without a fix id.
 - The PC-maker list is short, generic across makers, kept in code and identical in the tune and fix scripts (a test

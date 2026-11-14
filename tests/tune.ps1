@@ -13,6 +13,7 @@ function Assert-Equal($Actual, $Expected, [string]$Name) {
 function Assert-True($Cond, [string]$Name) { Assert-Equal ([bool]$Cond) 'True' $Name }
 
 $env:LANQ_MAKEREADY_TUNE_LIB = '1'
+$text0 = [System.IO.File]::ReadAllText($tunePath)
 . $tunePath
 Remove-Item Env:\LANQ_MAKEREADY_TUNE_LIB
 
@@ -154,6 +155,27 @@ $src = [System.IO.File]::ReadAllText($tunePath)
 $named = @([regex]::Matches($src, "\`$true '([a-z.]+)'") | ForEach-Object { $_.Groups[1].Value }) + @([regex]::Matches($src, "'(defender\.exclude|startup\.vendor)' \`$true") | ForEach-Object { $_.Groups[1].Value })
 Assert-True (@($named | Where-Object { $fixIds -notcontains $_ }).Count -eq 0) 'the script names no fix id the fix script lacks'
 
+Write-Host 'review fixes: names from the PC, task SIDs, scan time, task errors, work_root'
+$esc = [string][char]27; $rlo = [string][char]0x202E; $long = 'x' * 5000
+$jn = Join-Names @("SupportAssist${esc}[2J${esc}]0;owned${rlo}evil", "SupportAssist$long")
+Assert-True ($jn -notmatch '[\x00-\x1F\x7F]' -and $jn.IndexOf($rlo, [System.StringComparison]::Ordinal) -lt 0 -and @($jn.Split(',') | Where-Object { $_.Trim().Length -gt 80 }).Count -eq 0) 'Join-Names: control and bidi characters removed, each name at most 80 characters'
+$si = Get-It (New-TFacts @{ Startup = @(@{ Name = "SupportAssist${esc}[31m$long"; Exe = 'x.exe'; Enabled = $true }) }) 'startup.vendor'
+Assert-True ($si.status -eq 'INFO' -and $si.detail -notmatch '[\x00-\x1F\x7F]' -and $si.detail.Length -le 1024) 'a Run entry name with an escape sequence and 5000 characters: clean and short in the detail'
+$ni = New-TuneItem 'x.y' 't' 'INFO' ('d' * 3000) ('a' * 3000)
+Assert-True ($ni.detail.Length -eq 1024 -and $ni.advice.Length -eq 1024) 'detail and advice are capped at 1024 characters'
+$tf = New-TFacts @{ Tasks = @(@{ Path = '\Dell\'; Name = 'SupportAssistAgent S-1-5-21-1111-2222-3333-1001'; State = 'Ready' }) }
+$tr = ConvertTo-AsciiJson (New-TuneReport $tf (Get-TuneItems $tf) $true); $tp = ConvertTo-AsciiJson (New-TuneReport $tf (Get-TuneItems $tf) $false)
+Assert-True ($tr -notmatch '1111-2222-3333' -and $tr -match 'S-1-5-21-.u003credacted' -and $tp -match '1111-2222-3333') 'with -Redact an account SID in a task name is redacted'
+Test-Case 'defender.schedule' @{ Defender = $dfOn; Hours = '00:00-23:30' } 'INFO' 'a window of 23 hours or more: no fix offered' ''
+Test-Case 'vendor.tasks' @{ Tasks = 'nomodule' } 'SKIP' 'no ScheduledTasks module (not "access denied")' '' 'module is not available'
+Test-Case 'vendor.tasks' @{ Tasks = 'error' } 'SKIP' 'another error' '' 'could not be read$'
+foreach ($bad in @('C:/.', 'C:/lq/.', 'C:/', 'C:/Windows', 'C:/Users', 'C:/ProgramData', 'C:/lq./x', $env:USERPROFILE, (Split-Path -Parent $env:USERPROFILE))) { Assert-True ((Get-BuildDirProblem $bad) -ne '') "work_root refused: '$bad'" }
+Assert-Equal (Get-BuildDirProblem 'C:/lq') '' 'work_root accepted: C:/lq'
+$fx = [System.IO.File]::ReadAllText((Join-Path $root 'lanq-makeready-fix.ps1'))
+foreach ($fn in 'Get-BuildDirProblem', 'Get-ProtectedDirs') { $re = "(?ms)^function $fn\b.*?^}"; Assert-True ([regex]::Match($text0, $re).Value -ceq [regex]::Match($fx, $re).Value -and [regex]::Match($fx, $re).Success) "$fn is the same in the tune and fix scripts" }
+$saved = $TotalSec; $TotalSec = 0; $z = Get-DirSizeMB $env:SystemRoot 30; $TotalSec = $saved
+Assert-True ($z.Capped -and $z.MB -eq 0) 'Get-DirSizeMB stops at the scan deadline'
+
 Write-Host 'helpers'
 Assert-True ((Test-InWindow 120 '22:00-07:00') -and -not (Test-InWindow 420 '22:00-07:00') -and (Test-InWindow 1320 '22:00-07:00') -and (Test-InWindow 60 '00:00-07:00') -and -not (Test-InWindow 1439 '00:00-07:00')) 'Test-InWindow: wraps midnight, end exclusive'
 Assert-True ((Test-Hours '22:00-07:00') -and -not (Test-Hours '07:00-07:00') -and -not (Test-Hours '24:00-01:00') -and -not (Test-Hours '7-9')) 'Test-Hours'
@@ -176,7 +198,8 @@ $rf = New-TFacts @{ Hostname = 'wrk7pc'; User = "o'brien"; Profile = "C:\Users\o
 $plain = ConvertTo-AsciiJson (New-TuneReport $rf (Get-TuneItems $rf) $false)
 $red = ConvertTo-AsciiJson (New-TuneReport $rf (Get-TuneItems $rf) $true)
 function Test-Leak($Text, $Token) { $Text -match ('(?<![A-Za-z0-9_])' + [regex]::Escape($Token) + '(?![A-Za-z0-9_])') }
-Assert-True ((Test-Leak $plain 'wrk7pc') -and (Test-Leak $plain 'o\u0027brien')) 'without -Redact the host and user are in the report'
+# Windows PowerShell 5.1 writes ' as \u0027 in JSON, PowerShell 7 writes it as is: accept either form.
+Assert-True ((Test-Leak $plain 'wrk7pc') -and ((Test-Leak $plain 'o\u0027brien') -or (Test-Leak $plain "o'brien"))) 'without -Redact the host and user are in the report'
 Assert-True (-not (Test-Leak $red 'wrk7pc') -and -not (Test-Leak $red 'o\u0027brien') -and -not (Test-Leak $red "o'brien")) 'with -Redact no host name, user name or profile folder at a token boundary'
 $jr = $red | ConvertFrom-Json; $jp = $plain | ConvertFrom-Json
 Assert-True ($jr.host.hostname -eq '<redacted>' -and $jr.host.user -eq '<redacted>') 'redacted host fields'
@@ -231,7 +254,7 @@ function Get-TuneGuardViolations($Ast) {
   $funcNames = @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name })
   $fnOf = { param($Node) $p = $Node.Parent; while ($p) { if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $p.Name }; $p = $p.Parent }; return '' }
   $ok = @('ConvertTo-Json', 'ForEach-Object', 'Get-ChildItem', 'Get-CimInstance', 'Get-Content', 'Get-Item', 'Get-Location', 'Get-MpComputerStatus', 'Get-MpPreference', 'Get-NetAdapter', 'Get-Partition',
-    'Get-PhysicalDisk', 'Get-ScheduledTask', 'Get-Service', 'Get-StorageReliabilityCounter', 'Join-Path', 'New-Object', 'Sort-Object', 'Test-Path', 'Where-Object', 'Write-Host')
+    'Get-PhysicalDisk', 'Get-ScheduledTask', 'Get-Service', 'Get-Command', 'Get-StorageReliabilityCounter', 'Join-Path', 'New-Object', 'Sort-Object', 'Test-Path', 'Where-Object', 'Write-Host')
   foreach ($c in $Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
     $n = $c.GetCommandName(); $fn = & $fnOf $c
     if (-not $n) { if (-not (($c.Extent.Text -match '^& \$(add|why)\b' -and $fn -eq 'Get-TuneItems') -or ($c.Extent.Text -match '^& \$min\b'))) { $bad += "dynamic command: $($c.Extent.Text)" }; continue }
@@ -245,7 +268,7 @@ function Get-TuneGuardViolations($Ast) {
     if ($n -eq 'ForEach-Object' -and -not ($c.CommandElements.Count -gt 1 -and $c.CommandElements[1] -is [System.Management.Automation.Language.ScriptBlockExpressionAst])) { $bad += "ForEach-Object without a script block" }
   }
   $okMembers = @('Add', 'AddArgument', 'AddScript', 'AddYears', 'BeginInvoke', 'BeginStop', 'Close', 'Contains', 'Create', 'Dispose', 'EndInvoke', 'EnumerateDirectories', 'EnumerateFiles', 'Escape', 'Exit',
-    'ExpandEnvironmentVariables', 'Floor', 'Flush', 'GetCurrent', 'GetDrives', 'GetFolderPath', 'GetValue', 'GetValueNames', 'IsInRole', 'IsPathRooted', 'Kill', 'Matches', 'Min', 'Pop', 'Push', 'ReadToEndAsync',
+    'ExpandEnvironmentVariables', 'EndsWith', 'GetFullPath', 'Floor', 'Flush', 'GetCurrent', 'GetDrives', 'GetFolderPath', 'GetValue', 'GetValueNames', 'IsInRole', 'IsPathRooted', 'Kill', 'Matches', 'Min', 'Pop', 'Push', 'ReadToEndAsync',
     'Replace', 'Round', 'Split', 'Start', 'StartNew', 'StartsWith', 'Substring', 'ToInt64', 'ToLowerInvariant', 'ToString', 'ToUpper', 'Trim', 'TrimEnd', 'TryParseExact', 'Wait', 'WaitForExit', 'WaitOne',
     'Write', 'WriteAllText', 'WriteLine', 'Clear')
   $onlyIn = @{ Start = @('Invoke-Exe'); Kill = @('Invoke-Exe'); Create = @('Invoke-Probe'); AddScript = @('Invoke-Probe'); WriteAllText = @(''); Exit = @('') }
@@ -327,7 +350,7 @@ function Start-Child([string]$ArgText) {
   return @{ Code = $p.ExitCode; Out = "$($o.Result)"; Err = "$($e.Result)" }
 }
 $fa = "-NoProfile -ExecutionPolicy Bypass -File `"$tunePath`""
-foreach ($a in @('-Hours 7-9', '-WorkRoot C:\a b', '-WorkRoot C:/x/../y', '-Fix', '-Yes')) { $r = Start-Child "$fa $a"; Assert-True ($r.Code -eq 2 -and $r.Err -match 'lanq-makeready-tune:') "bad argument '$a': exit 2" }
+foreach ($a in @('-Hours 7-9', '-WorkRoot C:\a b', '-WorkRoot C:/x/../y', '-WorkRoot C:/.', '-WorkRoot C:/Windows', '-WorkRoot C:/Users', '-Fix', '-Yes')) { $r = Start-Child "$fa $a"; Assert-True ($r.Code -eq 2 -and $r.Err -match 'lanq-makeready-tune:') "bad argument '$a': exit 2" }
 if (-not $SkipSmoke) {
   $sw = [Diagnostics.Stopwatch]::StartNew()
   $r = Start-Child "-NoProfile -ExecutionPolicy Bypass -Command `"& '$tunePath' -Json '-' -Redact -Hours 22:00-07:00 -WorkRoot C:/lq; exit `$LASTEXITCODE`""

@@ -412,9 +412,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\lanq-makeready-fix.ps1 -Tu
 
 Windows tune fixes: `power.cpu`, `power.usbsuspend`, `startup.vendor`, `vendor.services`, `vendor.tasks`, `sysmain`,
 `do.mode`, `dotnet.env` and `defender.scantime` (needs `-Hours`). `-Tune -DefenderExclusions` offers only
-`defender.exclude`, for work_root (`-WorkRoot`) and the NuGet packages folder, never temp, after a screen that suggests
-a Dev Drive first; folders already excluded are skipped, and nothing is offered when Defender is not the active
-antivirus. What each one changes and how it is undone is in [docs/TUNE.md](docs/TUNE.md). A record holds at most 64
+`defender.exclude`, for work_root (`-WorkRoot`) plus the NuGet package cache, never temp, after a screen that suggests
+a Dev Drive first; folders already excluded are skipped, nothing is offered when Defender is not the active
+antivirus, a drive root or a Windows, program, shared-data or user folder (or a parent of one) is refused, and the
+NuGet cache is offered only when the elevated account is the one logged on at the console. What each one changes and how it is undone is in [docs/TUNE.md](docs/TUNE.md). A record holds at most 64
 changes; run the script again for the rest.
 
 On Linux, `sudo sh lanq-makeready-fix.sh --tune --dry-run` shows the tune fixes (`sysctl.tune`, `journald.cap`,

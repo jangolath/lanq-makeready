@@ -438,7 +438,11 @@ that already runs as admin or root on the PC.
 - Services: Start and DelayedAutostart come from the registry (PowerShell 5.1 cannot read Delayed Start) and are put
   back with `sc.exe config start=` (`delayed-auto` when needed). The delayed flag is compared only for automatic
   services.
-- Defender: exclusions only for work_root and the NuGet packages folder, never temp or processes; a folder already
+- Defender: exclusions only for work_root plus the NuGet package cache, never temp or processes. Each folder passes
+  `Get-BuildDirProblem` (no `.`/`..` part, canonical by `GetFullPath`, no drive root, not a Windows, program,
+  shared-data or user folder or a parent of one; the tune scan uses the same function, checked equal by a test), and
+  the NuGet cache is offered only when the process user SID equals the console user's (`Win32_ComputerSystem.UserName`),
+  since `%USERPROFILE%` is otherwise another account's. A folder already
   covered is skipped and never recorded; nothing is offered unless AMRunningMode is Normal; undo removes exactly the
   folders the record says this script added. The scan-time fix replaces the plan's "CPU load factor" idea.
 - The commands that come from Windows modules (ScheduledTasks, Defender, Storage, NetAdapter) are CDXML functions, not

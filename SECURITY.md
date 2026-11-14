@@ -63,7 +63,8 @@ The fix script changes the PC, but only what its owner confirms there, one item 
   With `-Tune` (0.5.0+): the tune fixes in [docs/TUNE.md](docs/TUNE.md). PC-maker services, tasks and Run entries are
   taken only from a short curated list in the code (never "everything unused"), tasks under `\Microsoft\` are never
   touched, and undo re-checks every name against that list. Defender exclusions need a second switch
-  (`-DefenderExclusions`), cover only work_root and the NuGet packages folder (never temp, processes or a drive), and
+  (`-DefenderExclusions`), cover work_root plus the NuGet package cache only (never temp, processes, a drive root, or a Windows, program,
+  shared-data or user folder or a parent of one; the NuGet cache only when the elevated account is the console user), and
   are not offered when Defender is not the active antivirus.
   Nothing is installed, deleted, upgraded or downloaded, and there are no network calls.
 - **Never elevates itself.** Without admin or root, every fix is skipped with a note.

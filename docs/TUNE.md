@@ -68,7 +68,7 @@ problems and the `administrators_authorized_keys` ACL (fix `ssh.aclkeys`). The t
 | `power.usbsuspend` | WARN: USB selective suspend is on (AC) while the network adapter in use is on USB | `power.usbsuspend` | a suspended USB adapter drops the SSH connection |
 | `startup.vendor` | INFO: a Run entry (HKCU Run, HKLM Run, HKLM WOW6432Node Run) whose name or program is on the curated PC-maker list and is not disabled in Task Manager | `startup.vendor` | StartupApproved: no value means enabled; an odd first byte means disabled |
 | `vendor.services` | INFO: a service on the curated list (name or display name) is not disabled | `vendor.services` | updaters, assistants, telemetry |
-| `vendor.tasks` | INFO: an enabled scheduled task on the curated list. Tasks under `\Microsoft\` are never listed. Access denied: SKIP | `vendor.tasks` | updaters often enable their tasks again |
+| `vendor.tasks` | INFO: an enabled scheduled task on the curated list. Tasks under `\Microsoft\` are never listed. SKIP when access is denied, the ScheduledTasks module is missing, or the read fails (each said apart) | `vendor.tasks` | updaters often enable their tasks again |
 | `sysmain` | INFO: SysMain is not disabled while every fixed disk is an SSD. A disk whose media type is `Unspecified` counts as unknown, never as an SSD | `sysmain` | |
 | `search.index` | INFO: Windows Search runs and indexes work_root or the NuGet packages folder (the longest crawl rule wins) | none | Indexing Options |
 | `do.mode` | INFO: Delivery Optimization shares update files with peers (mode 1 LAN, 2 group, 3 internet). From the policy, else the Settings value, else the edition default (Home 3, others 1) | `do.mode` (not when a policy already sets it) | the fix offers 0, HTTP only |
@@ -77,7 +77,7 @@ problems and the `administrators_authorized_keys` ACL (fix `ssh.aclkeys`). The t
 | `dotnet.env` | INFO: `DOTNET_CLI_TELEMETRY_OPTOUT`, `DOTNET_NOLOGO` or `DOTNET_GENERATE_ASPNET_CERTIFICATE` is not set for the machine | `dotnet.env` | LanQueue's machines.yml `env:` does the same per job without touching the PC; after a machine-level change restart sshd |
 | `wsl.reclaim` | INFO: WSL is installed and `%USERPROFILE%\.wslconfig` has no `autoMemoryReclaim` | none | a per-user file; `wsl --shutdown` after editing |
 | `defender.paths` | INFO (admin): real-time scanning covers work_root or the NuGet packages folder. SKIP when not elevated, or when Defender is not the active antivirus (AMRunningMode not Normal) | `defender.exclude` | says scanned/excluded per folder (and for temp); the exclusion list is compared inside the probe and never printed |
-| `defender.schedule` | INFO: the scheduled scan (or the daily quick scan) falls inside `-Hours` | `defender.scantime` | replaces the plan's "Defender CPU load" check: the scan's timing is what matters on a build box |
+| `defender.schedule` | INFO: the scheduled scan (or the daily quick scan) falls inside `-Hours` | `defender.scantime` (not for a window of 23 hours or more, where an hour after it is still inside) | replaces the plan's "Defender CPU load" check: the scan's timing is what matters on a build box |
 | `av.other` | INFO: another antivirus is active (Security Center; not on Windows Server) | none | its real-time scanning slows builds too; use its own exclusions or a Dev Drive |
 | `pagefile` | INFO: the page file is on a spinning disk while an SSD exists, or a fixed size is below the RAM | none | the scanner checks that one exists (swap) |
 | `disk.health` | WARN: a disk reports unhealthy, wear 90% or more, or uncorrected read errors (counters need admin). INFO: TRIM is off with an SSD | none | |
@@ -132,8 +132,15 @@ A separate switch, because an exclusion lowers protection. With it, only `defend
 that explains the trade-off and suggests a **Dev Drive** first (Windows 11: Defender scans a Dev Drive in performance
 mode asynchronously, so protection stays on). Then:
 
-- only two folders are ever offered: work_root (`-WorkRoot`) and the NuGet packages folder (`NUGET_PACKAGES`, or
-  `%USERPROFILE%\.nuget\packages`). Never temp, never processes, never a whole drive;
+- exclusions cover work_root (`-WorkRoot`) plus the NuGet package cache (`NUGET_PACKAGES`, or
+  `%USERPROFILE%\.nuget\packages`), nothing else: never temp, never processes;
+- each folder must be a plain folder on a drive: no `.` or `..` part, already in canonical form (Windows reads it back
+  unchanged), not a drive root, and neither the Windows, Program Files, ProgramData or Users folder, a user profile,
+  nor a folder that holds one of them (so `C:/.`, `C:/Windows` or `C:/Users` are refused). The same rule applies to
+  the tune scan's `-WorkRoot`;
+- the NuGet package cache is offered only when the elevated PowerShell runs as the account logged on at the console:
+  otherwise `%USERPROFILE%` belongs to another account (for example an administrator who elevated for you), and the
+  script says so and offers work_root only;
 - a folder already covered by an exclusion (itself or a parent) is skipped and never recorded;
 - nothing is offered when AMRunningMode is not Normal (another antivirus is active, or passive mode);
 - `Add-MpPreference -ExclusionPath <folder>`; the record keeps the folder, and undo runs

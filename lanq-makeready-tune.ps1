@@ -45,6 +45,34 @@ function Test-Hours([string]$H) {
 }
 # LanQueue's Windows work_root rule (ConfigLoader): drive path, forward slashes, [A-Za-z0-9_./-], no '..'.
 function Test-WorkRoot([string]$W) { return ($W -cmatch '^[A-Za-z]:/[A-Za-z0-9_./-]*$' -and $W -notmatch '\.\.') }
+# Folders a build folder must never be, or hold: the Windows, program, shared-data and user folders.
+function Get-ProtectedDirs {
+  $u = [Environment]::GetFolderPath('UserProfile'); $users = "$u" -replace '\\[^\\]+$', ''
+  return @($env:SystemRoot, [Environment]::GetFolderPath('Windows'), [Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86'), $env:ProgramW6432,
+    [Environment]::GetFolderPath('CommonApplicationData'), $env:ProgramData, $env:PUBLIC, $u, $users, $env:USERPROFILE) | Where-Object { $_ }
+}
+# '' when $Path may be work_root: a folder on a drive with no '.' or '..' segment, already in canonical form
+# (GetFullPath gives it back unchanged), not a drive root, and neither a protected folder nor a parent of one.
+# The same rule as lanq-makeready-fix.ps1 uses before a Defender exclusion (a test keeps the two copies equal).
+function Get-BuildDirProblem([string]$Path) {
+  $p = "$Path".Replace('/', '\').TrimEnd('\')
+  if ($p -notmatch '^[A-Za-z]:(\\[^\\]+)+$') { return 'it is not a folder on a drive (a whole drive is never used)' }
+  foreach ($g in @($p.Split('\'))) { if ($g -eq '.' -or $g -eq '..') { return "it has a '.' or '..' part" }; if ($g -ne $g.Trim() -or $g.EndsWith('.')) { return 'a part of it starts or ends with a space or ends with a dot (Windows drops those)' } }
+  $full = ''; try { $full = [System.IO.Path]::GetFullPath($p).TrimEnd('\') } catch { return 'it is not a valid path' }
+  if ($full -ine $p) { return "it is not in canonical form (Windows reads it as $full)" }
+  foreach ($k in (Get-ProtectedDirs)) {
+    $q = "$k".Replace('/', '\').TrimEnd('\')
+    if ($q -and ($q -ieq $p -or $q.StartsWith($p + '\', [System.StringComparison]::OrdinalIgnoreCase))) { return "it is $q or a folder that holds it (Windows, program, shared-data and user folders are never used)" }
+  }
+  return ''
+}
+# A name from the PC (Run entry, service, task, driver, product) made safe to print: control and bidi characters
+# removed (any user process can write a Run entry), at most 80 characters.
+function Get-CleanName([string]$S) {
+  $c = [regex]::Replace("$S", '[\x00-\x1F\x7F\u202A-\u202E\u2066-\u2069]', '')
+  if ($c.Length -gt 80) { $c = $c.Substring(0, 77) + '...' }
+  return $c
+}
 function Get-HoursMin([string]$T) { $p = $T.Split(':'); return ([int]$p[0] * 60 + [int]$p[1]) }
 # True when minute-of-day $M falls inside the window "HH:mm-HH:mm" (the end is exclusive; windows may wrap midnight).
 function Test-InWindow([int]$M, [string]$H) {
@@ -74,7 +102,7 @@ function Test-Indexed([string]$Path, $Rules) {
 }
 # The first $N names, joined, with a count of the rest.
 function Join-Names($Names, [int]$N = 6) {
-  $a = @($Names); if ($a.Count -le $N) { return ($a -join ', ') }
+  $a = @($Names | ForEach-Object { Get-CleanName $_ }); if ($a.Count -le $N) { return ($a -join ', ') }
   return ((@($a[0..($N - 1)]) -join ', ') + " and $($a.Count - $N) more")
 }
 
@@ -84,6 +112,8 @@ $HostIds = @('power.plan', 'power.usbsuspend', 'startup.vendor', 'vendor.service
 function New-TuneItem([string]$Id, [string]$Title, [string]$Status, [string]$Detail, [string]$Advice = '', [bool]$Admin = $false, [string]$FixId = '', [bool]$Security = $false) {
   $fx = $null; if ($FixId -and @('INFO', 'WARN') -contains $Status) { $fx = $FixId }
   if (@('OK', 'SKIP') -contains $Status) { $Advice = '' }
+  $Detail = [regex]::Replace($Detail, '[\x00-\x1F\x7F\u202A-\u202E\u2066-\u2069]', ''); $Advice = [regex]::Replace($Advice, '[\x00-\x1F\x7F\u202A-\u202E\u2066-\u2069]', '')
+  if ($Detail.Length -gt 1024) { $Detail = $Detail.Substring(0, 1021) + '...' }; if ($Advice.Length -gt 1024) { $Advice = $Advice.Substring(0, 1021) + '...' }
   return [ordered]@{ id = $Id; title = $Title; status = $Status; detail = $Detail; advice = $Advice; needsAdmin = $Admin; fixId = $fx; security = $Security }
 }
 
@@ -126,6 +156,8 @@ function Get-TuneItems($F) {
 
   $t = 'Maker scheduled tasks'
   if ($F.Tasks -eq 'denied') { & $add (New-TuneItem 'vendor.tasks' $t 'SKIP' 'the scheduled tasks could not be read (access denied)') }
+  elseif ($F.Tasks -eq 'nomodule') { & $add (New-TuneItem 'vendor.tasks' $t 'SKIP' 'the ScheduledTasks module is not available on this PC') }
+  elseif ($F.Tasks -eq 'error') { & $add (New-TuneItem 'vendor.tasks' $t 'SKIP' 'the scheduled tasks could not be read') }
   elseif ($null -eq $F.Tasks) { & $add (New-TuneItem 'vendor.tasks' $t 'SKIP' (& $why 'tasks' 'the scheduled tasks')) }
   else {
     $v = @($F.Tasks | Where-Object { $_.State -ne 'Disabled' -and $_.Path -notlike '\Microsoft\*' -and ((Test-Vendor $_.Name) -or (Test-Vendor ($_.Path.Trim('\')))) } | ForEach-Object { "$($_.Path)$($_.Name)" })
@@ -207,7 +239,9 @@ function Get-TuneItems($F) {
   else {
     $hit = @(); if (Test-InWindow $d.Time $F.Hours) { $hit += "scan at $(Format-Min $d.Time)" }; if ($d.Quick -gt 0 -and (Test-InWindow $d.Quick $F.Hours)) { $hit += "quick scan at $(Format-Min $d.Quick)" }
     $idle = ''; if ($d.Idle) { $idle = ' (only when the PC is idle, which a quiet build box often is)' }
-    if ($hit.Count) { & $add (New-TuneItem 'defender.schedule' $t 'INFO' "the scheduled $($hit -join ' and ') falls inside the job window $($F.Hours)$idle" 'Move it outside the window: the fix (defender.scantime) sets the scan times to an hour after the window ends; or Set-MpPreference -ScanScheduleTime yourself.' $true 'defender.scantime') }
+    $w = $F.Hours.Split('-'); $tgt = ((Get-HoursMin $w[1]) + 60) % 1440; $fx = 'defender.scantime'; $adv = 'Move it outside the window: the fix (defender.scantime) sets the scan times to an hour after the window ends; or Set-MpPreference -ScanScheduleTime yourself.'
+    if (Test-InWindow $tgt $F.Hours) { $fx = ''; $adv = 'The job window leaves no hour after it outside the window, so the fix is not offered; choose a scan time yourself (Set-MpPreference -ScanScheduleTime).' }
+    if ($hit.Count) { & $add (New-TuneItem 'defender.schedule' $t 'INFO' "the scheduled $($hit -join ' and ') falls inside the job window $($F.Hours)$idle" $adv $true $fx) }
     else { & $add (New-TuneItem 'defender.schedule' $t 'OK' "scheduled scan at $(Format-Min $d.Time), outside $($F.Hours)") }
   }
 
@@ -298,6 +332,7 @@ function Get-TuneSummary($Items, [int]$Sec) {
 
 # Redaction on values: host name, user name and profile folder in every free-text field (longest first).
 function Protect-Text([string]$S, $Toks) {
+  if (@($Toks).Count) { $S = [regex]::Replace($S, 'S-1-5-21-[0-9-]+', 'S-1-5-21-<redacted>') }   # account SIDs (task names often carry one)
   foreach ($t in $Toks) { $S = [regex]::Replace($S, '(?<![A-Za-z0-9_])' + [regex]::Escape($t) + '(?![A-Za-z0-9_])', '<redacted>', 'IgnoreCase') }
   return $S
 }
@@ -348,16 +383,17 @@ function Invoke-Probe([string]$Name, [int]$Sec, [scriptblock]$Block, $Arg = $nul
 
 # Runs a program from System32 with fixed arguments, closed stdin and a deadline; $null when it cannot start.
 function Invoke-Exe([string]$Exe, [string]$ArgText, [int]$Sec = 8) {
-  if ((Get-Left) -lt 2) { return $null }
+  $left = Get-Left; if ($left -lt 2) { return $null }
+  $Sec = [math]::Min($Sec, $left - 1)
   try {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Exe; $psi.Arguments = $ArgText; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.WorkingDirectory = $env:SystemRoot
     $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
     $p = [System.Diagnostics.Process]::Start($psi)
     $p.StandardInput.Close()
-    $o = $p.StandardOutput.ReadToEndAsync()
+    $o = $p.StandardOutput.ReadToEndAsync(); $e = $p.StandardError.ReadToEndAsync()   # both drained, so a full pipe cannot block it
     if (-not $p.WaitForExit($Sec * 1000)) { try { $p.Kill() } catch { }; return $null }
-    [void]$o.Wait(2000)
+    [void]$o.Wait(2000); [void]$e.Wait(2000)
     return @{ Code = $p.ExitCode; Out = "$($o.Result)" }
   } catch { return $null }
 }
@@ -373,6 +409,7 @@ function Get-DirSizeMB([string]$Path, [int]$Sec = 5) {
   $sw = [System.Diagnostics.Stopwatch]::StartNew(); $total = [long]0; $capped = $false
   $stack = New-Object 'System.Collections.Generic.Stack[string]'; $stack.Push($Path)
   while ($stack.Count -gt 0 -and -not $capped) {
+    if ((Get-Left) -lt 2) { $capped = $true; break }   # the scan's own deadline
     $d = $stack.Pop()
     try {
       foreach ($f in [System.IO.Directory]::EnumerateFiles($d)) { if ($sw.Elapsed.TotalSeconds -gt $Sec) { $capped = $true; break }; try { $total += (New-Object System.IO.FileInfo $f).Length } catch { } }
@@ -427,10 +464,11 @@ function Get-TuneFacts([string]$H, [string]$W) {
   if ($null -ne $sv) { $F.Services = @($sv) }
   $ws = @($F.Services | Where-Object { $_.Name -eq 'WSearch' }); if ($null -ne $F.Services) { $F.SearchOn = ($ws.Count -gt 0 -and $ws[0].Status -eq 'Running') }
   $tk = Invoke-Probe 'tasks' 20 { param($x)
-    try { $all = @(Get-ScheduledTask -ErrorAction Stop) } catch { return 'denied' }
+    if (@(Get-Command -Name Get-ScheduledTask -ErrorAction SilentlyContinue).Count -eq 0) { return 'nomodule' }
+    try { $all = @(Get-ScheduledTask -ErrorAction Stop) } catch { if ("$($_.Exception.Message)" -match '(?i)denied|0x80070005') { return 'denied' }; return 'error' }
     $df = @($all | Where-Object { $_.TaskPath -eq '\Microsoft\Windows\Defrag\' -and $_.TaskName -eq 'ScheduledDefrag' -and "$($_.State)" -ne 'Disabled' }).Count -gt 0
     @{ Defrag = $df; List = @($all | Where-Object { $_.TaskPath -notlike '\Microsoft\*' } | ForEach-Object { @{ Path = "$($_.TaskPath)"; Name = "$($_.TaskName)"; State = "$($_.State)" } }) } }
-  if ($null -ne $tk) { if (@($tk)[0] -eq 'denied') { $F.Tasks = 'denied' } else { $F.Tasks = @(@($tk)[0].List); $F.DefragOn = @($tk)[0].Defrag } }
+  if ($null -ne $tk) { if (@('denied', 'nomodule', 'error') -contains @($tk)[0]) { $F.Tasks = @($tk)[0] } else { $F.Tasks = @(@($tk)[0].List); $F.DefragOn = @($tk)[0].Defrag } }
   $dk = Invoke-Probe 'disks' 20 { param($admin)
     $out = @(); foreach ($d in @(Get-PhysicalDisk -ErrorAction Stop)) {
       $h = @{ Id = "$($d.DeviceId)"; Media = "$($d.MediaType)"; Bus = "$($d.BusType)"; Health = "$($d.HealthStatus)"; Wear = $null; ReadErr = $null }
@@ -500,6 +538,7 @@ if ($Extra -and @($Extra | Where-Object { $null -ne $_ -and "$_" -ne '' }).Count
 if ($Hours -and -not (Test-Hours $Hours)) { [Console]::Error.WriteLine('lanq-makeready-tune: -Hours must look like 00:00-07:00 (HH:mm-HH:mm, start different from end).'); exit 2 }
 if ($WorkRoot) { $WorkRoot = $WorkRoot.Replace('\', '/') }
 if ($WorkRoot -and -not (Test-WorkRoot $WorkRoot)) { [Console]::Error.WriteLine('lanq-makeready-tune: -WorkRoot must be a drive path like C:/lq (letters, digits, _ . / -; no spaces, no ..), as in LanQueue machines.yml.'); exit 2 }
+if ($WorkRoot) { $wp = Get-BuildDirProblem $WorkRoot; if ($wp) { [Console]::Error.WriteLine("lanq-makeready-tune: -WorkRoot $WorkRoot is refused: $wp."); exit 2 } }
 $StdoutJson = ($Json -eq '-')
 if ($StdoutJson) { $WarningPreference = 'SilentlyContinue'; $ProgressPreference = 'SilentlyContinue'; $InformationPreference = 'SilentlyContinue'; $VerbosePreference = 'SilentlyContinue' }
 $facts = Get-TuneFacts $Hours $WorkRoot

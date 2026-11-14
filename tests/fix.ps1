@@ -154,7 +154,7 @@ function Get-FixGuardViolations([string]$Path) {
     "`$PowercfgExe|@('/q', 'SCHEME_CURRENT', `$Sub, `$Setting)")
   $okTypes = @('System.Diagnostics.ProcessStartInfo', 'Security.Principal.WindowsPrincipal', 'System.Text.UTF8Encoding', 'System.Collections.ArrayList', 'System.IO.FileInfo',
     'System.Security.AccessControl.RawSecurityDescriptor', 'System.Security.AccessControl.DirectorySecurity', 'System.Security.AccessControl.FileSecurity', 'System.IO.DirectoryInfo',
-    'System.IO.FileStream')
+    'System.IO.FileStream', 'System.Security.Principal.NTAccount')
   foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
     $n = $c.GetCommandName(); $in = & $inR $c; $fn = & $fnOf $c
     if (-not $n) { [void]$bad.Add("dynamic command: $($c.Extent.Text)"); continue }
@@ -179,7 +179,7 @@ function Get-FixGuardViolations([string]$Path) {
     'ToString', 'GetSecurityDescriptorSddlForm', 'SetSecurityDescriptorSddlForm', 'GetOwner', 'Translate', 'IsInRole', 'GetCurrent', 'GetCurrentProcess', 'GetFolderPath', 'Matches',
     'ToInt64', 'Exists', 'ReadAllText', 'WriteAllText', 'Move', 'CreateDirectory', 'WriteLine', 'ReadLine', 'IsPathRooted', 'ContainsKey', 'Round', 'ToUniversalTime',
     'GetValueNames', 'GetValueKind', 'GetValue', 'Create', 'AddScript', 'BeginInvoke', 'WaitOne', 'BeginStop', 'EndInvoke', 'Dispose', 'ComputeHash', 'ToBase64String', 'FromBase64String',
-    'GetFullPath', 'ToLowerInvariant', 'GetBytes', 'Write', 'Min', 'Floor', 'ToByte')
+    'GetFullPath', 'ToLowerInvariant', 'GetBytes', 'Write', 'Min', 'Floor', 'ToByte', 'ExpandEnvironmentVariables', 'EndsWith')
   $onlyIn = @{ 'WriteAllText' = @('Save-FixRecord'); 'Move' = @('Save-FixRecord'); 'CreateDirectory' = @('New-FixSecuredDir'); 'Start' = @('Invoke-Native'); 'Kill' = @('Invoke-Native')
     'Remove' = @('Invoke-Native'); 'SetSecurityDescriptorSddlForm' = @('Invoke-FixChange', 'New-FixSecuredDir', 'New-FixSecuredFile'); 'AddScript' = @('Get-FixProcessTable'); 'BeginStop' = @('Get-FixProcessTable')
     'Write' = @('New-FixSecuredFile') }
@@ -737,7 +737,7 @@ function Reset-Tune {
   $script:Svcs = New-Object System.Collections.ArrayList; $script:Tasks = New-Object System.Collections.ArrayList; $script:TaskDenied = $false
   $script:Disks = @([pscustomobject]@{ MediaType = 'SSD'; BusType = 'NVMe' })
   $script:Mp = @{ Mode = 'Normal'; Tamper = $false; Ex = New-Object System.Collections.ArrayList; Readable = $true; Day = 0; Time = [TimeSpan]'02:00:00'; Quick = [TimeSpan]::Zero }
-  $script:FakeSid = 'S-1-5-21-1-2-3-1001'
+  $script:FakeSid = 'S-1-5-21-1-2-3-1001'; $script:ConsoleSid = 'S-1-5-21-1-2-3-1001'
   Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' 'EditionID' 'String' 'Professional'
   foreach ($k in $EnvKey, $SvcKey) { [void]$RegKeys.Add($k) }
 }
@@ -747,6 +747,7 @@ function Get-RegVal([string]$Path, [string]$Name) { $e = $script:Reg["$Path|$Nam
 function Get-RegNames([string]$Path) { return @($script:Reg.Keys | Where-Object { $_.StartsWith("$Path|") } | ForEach-Object { $_.Substring($Path.Length + 1) } | Sort-Object) }
 function Test-RegKey([string]$Path) { return ($RegKeys -contains $Path) }
 function Get-UserSid { return $script:FakeSid }
+function Get-ConsoleUserSid { return $script:ConsoleSid }
 function New-Item { param($Path, [switch]$Force, $ErrorAction, $ItemType) if ($ItemType) { return (Microsoft.PowerShell.Management\New-Item -ItemType $ItemType -Path $Path) }; Note-Call "New-Item $Path"; [void]$RegKeys.Add($Path) }
 function Set-ItemProperty { param($Path, $LiteralPath, $Name, $Value, $Type, $ErrorAction) $p = "$LiteralPath$Path"; $v = $Value; if ($Type -eq 'Binary') { $v = [byte[]]$Value }; Note-Call "Set-ItemProperty $p $Name $(@($Value) -join ',') $Type"; Set-Reg $p $Name "$Type" $v }
 function Remove-ItemProperty { param($Path, $LiteralPath, $Name, $ErrorAction) $p = "$LiteralPath$Path"; Note-Call "Remove-ItemProperty $p $Name"; $script:Reg.Remove("$p|$Name") }
@@ -908,6 +909,27 @@ Assert-True (@($Calls | Where-Object { $_ -notmatch 'MpPreference' }).Count -eq 
 Reset-Tune; Set-TuneQuiet; $rc = Invoke-Tune 'apply' @('y', 'y') 'tune' '' 'C:/lq'
 Assert-True (@($Calls | Where-Object { $_ -match 'MpPreference' }).Count -eq 0) '-Tune alone never offers exclusions'
 
+Write-Host 'tune: build folders (work_root, NuGet) are checked before an exclusion'
+foreach ($bad in @('C:/.', 'C:/lq/.', 'C:/lq/..', 'C:/', 'C:', 'C:/Windows', 'C:/Users', 'C:/ProgramData', 'C:/Program Files', 'C:/lq./x', 'C:/lq /x', $env:USERPROFILE, $env:SystemRoot, (Split-Path -Parent $env:USERPROFILE))) {
+  Assert-True ((Get-BuildDirProblem $bad) -ne '') "build folder refused: '$bad' ($(Get-BuildDirProblem $bad))"
+}
+foreach ($good in @('C:/lq', 'D:/build/lq-1', 'C:\nuget\packages', "$env:USERPROFILE\.nuget\packages")) { Assert-Equal (Get-BuildDirProblem $good) '' "build folder accepted: '$good'" }
+foreach ($wr in @('C:/.', 'C:/lq/.', 'C:/Windows', 'C:/Users', 'C:/ProgramData')) { Assert-True ((Get-TuneArgError @{ Hours = $null; WorkRoot = $wr } $true $true 'dry') -match 'refused|-WorkRoot must') "-WorkRoot $wr refused (exit 2)" }
+Reset-Tune; Set-TuneQuiet; $env:NUGET_PACKAGES = 'C:\ProgramData'; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' 'C:/lq'
+Assert-True (($Calls -join '|') -eq 'Add-MpPreference C:\lq' -and (OutText) -match 'C:\\ProgramData is refused') 'NUGET_PACKAGES pointing at a protected folder: not offered, says why; work_root still offered'
+$env:NUGET_PACKAGES = 'C:\nuget\packages'
+Reset-Tune; Set-TuneQuiet; $script:ConsoleSid = 'S-1-5-21-1-2-3-2002'; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' 'C:/lq'
+Assert-True (($Calls -join '|') -eq 'Add-MpPreference C:\lq' -and (OutText) -match 'not run as the account logged on at the console') 'elevated as another account than the console user: the NuGet folder is not offered (wrong profile), work_root is'
+Reset-Tune; Set-TuneQuiet; $script:ConsoleSid = ''; $rc = Invoke-Tune 'dry' @() 'defender' '' 'C:/lq'
+Assert-True ((OutText) -match 'not offered: the NuGet packages folder') 'nobody at the console (or unreadable): the NuGet folder is not offered'
+Reset-Tune; Set-TuneQuiet; [void]$Mp.Ex.Add('%SystemDrive%\lq'); $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' "$($env:SystemDrive)/lq"
+Assert-True (($Calls -join '|') -eq 'Add-MpPreference C:\nuget\packages') 'an existing exclusion with an environment variable is expanded (as Defender and the tune scan do): work_root already covered'
+Reset-Tune; Set-TuneQuiet; $Mp.Day = 0; $rc = Invoke-Tune 'dry' @() 'tune' '00:00-23:30'
+Assert-True ((OutText) -match 'defender\.scantime .*not offered: the job window 00:00-23:30 leaves no hour') 'defender.scantime: not offered when an hour after the window is still inside it'
+Reset-Tune; Set-TuneQuiet; ${function:Get-ScheduledTask} = { param($TaskPath, $TaskName, $ErrorAction) throw 'The RPC server is unavailable' }; $rc = Invoke-Tune 'dry'
+Assert-True ((OutText) -match 'vendor\.tasks .*not offered: the scheduled tasks could not be read; skipped' -and (OutText) -notmatch 'access denied') 'vendor.tasks: another error is not called "access denied"'
+${function:Get-ScheduledTask} = { param($TaskPath, $TaskName, $ErrorAction) if ($script:TaskDenied) { throw 'Access is denied' }; $r = @($Tasks | Where-Object { (-not $TaskPath -or $_.TaskPath -eq $TaskPath) -and (-not $TaskName -or $_.TaskName -eq $TaskName) }); if ($TaskName -and $r.Count -eq 0) { throw 'No MSFT_ScheduledTask objects found' }; return $r }
+
 Write-Host 'tune arguments'
 Assert-Equal (Get-UndoArg @('-Hours', '22:00-07:00', '-WorkRoot', 'C:/lq')).WorkRoot 'C:/lq' 'Get-UndoArg: -WorkRoot value'
 Assert-True ((Get-UndoArg @('-Hours')).Error -match '-Hours needs') 'Get-UndoArg: -Hours without a value'
@@ -920,6 +942,17 @@ Assert-Equal (Get-TuneArgError @{ Hours = '22:00-07:00'; WorkRoot = 'D:/lq' } $t
 Remove-Item Env:\NUGET_PACKAGES
 
 Write-Host 'curated vendor list'
+# Every pattern shipped in a release (0.5.0). Append the next release's patterns here; each must stay in the current
+# list or move to $VendorRetiredPatterns, so records written by that release can still be undone.
+$ShippedPatterns = @(
+  '^Dell ?SupportAssist', '^SupportAssist', '^Dell ?(Update|Command ?Update|Digital ?Delivery|Data ?Vault|TechHub|Optimizer|Core ?Services)', '^DDV(DataCollector|RulesProcessor|CollectorSvcApi)$',
+  '^HP ?(Support ?Assistant|Support ?Solutions|Analytics|App ?Helper|Diagnostics|Insights|Touchpoint|System ?Info|Network ?Cap|Comm ?Recovery|JumpStart)', '^HP(AppHelperCap|DiagsCap|NetworkCap|SysInfoCap)$', '^HpTouchpointAnalyticsService$',
+  '^Lenovo ?(Vantage|Service ?Bridge|Smart ?Standby|Utility|Welcome|System ?Update)', '^ImControllerService$', '^LITSSVC$',
+  '^ASUS ?(Optimization|Software ?Manager|System ?Analysis|System ?Diagnosis|Link|Update|App ?Service)', '^ArmouryCrate', '^AsusUpdateCheck$',
+  '^Acer ?(Quick ?Access|Care ?Center|Jumpstart|Collection|Product ?Registration)', '^MSI ?(Center|Dragon ?Center)', '^Samsung ?(Update|Settings)',
+  '^Intel\(R\) ?(Driver ?(&|and) ?Support|Computing ?Improvement)', '^DSA(Update)?Service$', '^NvTelemetryContainer$', '^NVIDIA ?(GeForce ?Experience|Telemetry)'
+)
+foreach ($p in $ShippedPatterns) { Assert-True (@($VendorPatterns) + @($VendorRetiredPatterns) -ccontains $p) "shipped pattern '$p' is still in the list or the retired list" }
 function Get-ListValues([string]$Path, [string]$Var) {
   $a = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
   $as = @($a.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq $Var }, $true))

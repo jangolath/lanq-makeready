@@ -84,7 +84,7 @@ $FixFunctionNames = @('Write-FixLine', 'Write-FixErr', 'Get-FixSessionId', 'Get-
   'Test-Props', 'Test-Str', 'ConvertTo-TimeText', 'New-RecordError', 'Read-FixRecord', 'Show-Fix', 'Invoke-FixApply', 'Invoke-FixUndo', 'Show-FixRecords', 'Invoke-FixMain',
   'Get-UndoArg', 'Test-Vendor', 'Test-VendorUndo', 'Test-InWindow', 'Get-HoursMin', 'Format-Min', 'Get-RegVal', 'Get-RegNames', 'Test-RegKey', 'Get-UserSid', 'Get-ActiveScheme',
   'Get-PowerAc', 'Test-UsbNic', 'Test-FixAllSsd', 'Get-SvcState', 'Get-TaskState', 'Get-StartupState', 'Get-DefenderInfo', 'ConvertTo-Minutes', 'Get-ExcludeState',
-  'Get-DotnetState', 'Get-DoState', 'Get-FixTargets', 'Get-StateTarget', 'Get-UndoRefusal', 'Get-TargetLabel', 'Get-ScanTarget', 'Get-SvcNorm', 'Get-FixApplyNote', 'Get-TuneArgError')
+  'Get-DotnetState', 'Get-DoState', 'Get-FixTargets', 'Get-StateTarget', 'Get-UndoRefusal', 'Get-TargetLabel', 'Get-ScanTarget', 'Get-SvcNorm', 'Get-FixApplyNote', 'Get-TuneArgError', 'Get-NugetDir', 'Get-ConsoleUserSid', 'Get-ProtectedDirs', 'Get-BuildDirProblem')
 # Every cmdlet this file runs. A function or alias with one of these names would run instead of the cmdlet, so the
 # script refuses to start when any of them does not resolve to the cmdlet itself (Get-FixCommandShadow).
 $FixCmdletNames = @('Get-Service', 'Set-Service', 'Start-Service', 'Stop-Service', 'Get-Item', 'Set-ItemProperty', 'Remove-ItemProperty', 'Get-Acl', 'Set-Acl',
@@ -141,8 +141,8 @@ $DefenderScreen = @(
   '    scans asynchronously. Settings > System > Storage > Disks & volumes > Create Dev Drive; put work_root and',
   '    NUGET_PACKAGES there. Prefer it to an exclusion when you can.',
   '  - An exclusion is a trade-off: nothing in that folder is ever scanned in real time, so a malicious package or build',
-  '    output there is not caught. Only folder paths are offered (never processes), only work_root and the NuGet packages',
-  '    folder (never temp), and a folder already covered by an exclusion is skipped.',
+  '    output there is not caught. Only folder paths are offered (never processes), only work_root plus the NuGet package',
+  '    cache (never temp, never a drive or system folder; the cache only for the account at the console), and a folder already covered by an exclusion is skipped.',
   '  - Each one is recorded; -Undo removes exactly the paths this script added.')
 
 # ---------- output ----------
@@ -505,15 +505,46 @@ function Get-DefenderInfo {
 }
 function Get-ExcludeState([string]$Path) {
   $d = Get-DefenderInfo
-  $s = @{ Path = $Path; Known = ($null -ne $d); Mode = ''; Readable = $false; Exact = $false; Covered = $false; Tamper = $false }
+  $s = @{ Path = $Path; Known = ($null -ne $d); Mode = ''; Readable = $false; Exact = $false; Covered = $false; Tamper = $false; IsNuget = $false }
+  $s.IsNuget = ($Path -ieq (Get-NugetDir) -and $Path -ine "$FixWorkRoot".Replace('/', '\'))
   if (-not $d) { return $s }
   $s.Mode = $d.Mode; $s.Readable = $d.Readable; $s.Tamper = $d.Tamper
   $t = $Path.TrimEnd('\') + '\'
   foreach ($e in $d.Ex) {
-    if ("$e".TrimEnd('\') -ieq $Path.TrimEnd('\')) { $s.Exact = $true }
-    if ($t.StartsWith("$e".TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) { $s.Covered = $true }
+    $x = [Environment]::ExpandEnvironmentVariables("$e").TrimEnd('\')   # as Defender does (and the tune scan)
+    if ($x -ieq $Path.TrimEnd('\')) { $s.Exact = $true }
+    if ($t.StartsWith($x + '\', [System.StringComparison]::OrdinalIgnoreCase)) { $s.Covered = $true }
   }
   return $s
+}
+function Get-NugetDir { $ng = "$env:USERPROFILE\.nuget\packages"; if ($env:NUGET_PACKAGES) { $ng = "$env:NUGET_PACKAGES" }; return $ng.Replace('/', '\').TrimEnd('\') }
+# The account logged on at the console (Win32_ComputerSystem.UserName) as a SID; '' when nobody is or it cannot be read.
+function Get-ConsoleUserSid {
+  try {
+    $n = "$((Get-CimInstance -ClassName Win32_ComputerSystem -OperationTimeoutSec 15 -ErrorAction Stop).UserName)"
+    if (-not $n) { return '' }
+    return "$((New-Object System.Security.Principal.NTAccount($n)).Translate([System.Security.Principal.SecurityIdentifier]).Value)"
+  } catch { return '' }
+}
+# Folders a build folder must never be, or hold: the Windows, program, shared-data and user folders.
+function Get-ProtectedDirs {
+  $u = [Environment]::GetFolderPath('UserProfile'); $users = "$u" -replace '\\[^\\]+$', ''
+  return @($env:SystemRoot, [Environment]::GetFolderPath('Windows'), [Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86'), $env:ProgramW6432,
+    [Environment]::GetFolderPath('CommonApplicationData'), $env:ProgramData, $env:PUBLIC, $u, $users, $env:USERPROFILE) | Where-Object { $_ }
+}
+# '' when $Path may be work_root or a Defender exclusion: a folder on a drive with no '.' or '..' segment, already in
+# canonical form (GetFullPath gives it back unchanged), not a drive root, and neither a protected folder nor a parent of one.
+function Get-BuildDirProblem([string]$Path) {
+  $p = "$Path".Replace('/', '\').TrimEnd('\')
+  if ($p -notmatch '^[A-Za-z]:(\\[^\\]+)+$') { return 'it is not a folder on a drive (a whole drive is never used)' }
+  foreach ($g in @($p.Split('\'))) { if ($g -eq '.' -or $g -eq '..') { return "it has a '.' or '..' part" }; if ($g -ne $g.Trim() -or $g.EndsWith('.')) { return 'a part of it starts or ends with a space or ends with a dot (Windows drops those)' } }
+  $full = ''; try { $full = [System.IO.Path]::GetFullPath($p).TrimEnd('\') } catch { return 'it is not a valid path' }
+  if ($full -ine $p) { return "it is not in canonical form (Windows reads it as $full)" }
+  foreach ($k in (Get-ProtectedDirs)) {
+    $q = "$k".Replace('/', '\').TrimEnd('\')
+    if ($q -and ($q -ieq $p -or $q.StartsWith($p + '\', [System.StringComparison]::OrdinalIgnoreCase))) { return "it is $q or a folder that holds it (Windows, program, shared-data and user folders are never used)" }
+  }
+  return ''
 }
 function Get-DotnetState {
   $s = @{ Readable = (Test-RegKey $EnvKey); Vals = [ordered]@{}; Odd = '' }
@@ -543,7 +574,11 @@ function Get-FixTargets([string]$Id) {
     'vendor.services' { return @{ List = @(Get-Service -ErrorAction SilentlyContinue | Where-Object { (Test-Vendor $_.Name) -or (Test-Vendor $_.DisplayName) } | ForEach-Object { "$($_.Name)" }); Note = '' } }
     'sysmain' { return @{ List = @('SysMain'); Note = '' } }
     'vendor.tasks' {
-      try { $all = @(Get-ScheduledTask -ErrorAction Stop) } catch { return @{ List = @(); Note = 'the scheduled tasks could not be read (access denied); skipped' } }
+      if (@(Get-Command -Name Get-ScheduledTask -ErrorAction SilentlyContinue).Count -eq 0) { return @{ List = @(); Note = 'the ScheduledTasks module is not available on this PC; skipped' } }
+      try { $all = @(Get-ScheduledTask -ErrorAction Stop) } catch {
+        if ("$($_.Exception.Message)" -match '(?i)denied|0x80070005') { return @{ List = @(); Note = 'the scheduled tasks could not be read (access denied); skipped' } }
+        return @{ List = @(); Note = 'the scheduled tasks could not be read; skipped' }
+      }
       return @{ List = @($all | Where-Object { "$($_.TaskPath)" -notlike '\Microsoft\*' -and ((Test-Vendor $_.TaskName) -or (Test-Vendor "$($_.TaskPath)".Trim('\'))) } | ForEach-Object { "$($_.TaskPath)|$($_.TaskName)" }); Note = '' }
     }
     'startup.vendor' {
@@ -552,7 +587,7 @@ function Get-FixTargets([string]$Id) {
     }
     'defender.exclude' {
       $l = @(); if ($FixWorkRoot) { $l += $FixWorkRoot.Replace('/', '\') }
-      $ng = "$env:USERPROFILE\.nuget\packages"; if ($env:NUGET_PACKAGES) { $ng = "$env:NUGET_PACKAGES" }; $l += $ng.TrimEnd('\')
+      $l += Get-NugetDir
       return @{ List = $l; Note = '' }
     }
   }
@@ -817,12 +852,18 @@ function Get-FixNote([string]$Id, $S) {
       if (-not $S.Known) { return 'Defender could not be read (Get-MpPreference)' }
       if ($S.Mode -and $S.Mode -ne 'Normal') { return "Defender is not the active antivirus (AMRunningMode: $($S.Mode))" }
       if (-not $FixHours) { return 'give the job window with -Hours HH:mm-HH:mm to check the scan time against it' }
+      if (Test-InWindow (Get-ScanTarget $FixHours) $FixHours) { return "the job window $FixHours leaves no hour after it outside the window; move the scan yourself" }
     }
     'defender.exclude' {
       if (-not $S.Known) { return 'Defender could not be read (Get-MpPreference)' }
       if ($S.Mode -and $S.Mode -ne 'Normal') { return "Defender is not the active antivirus (AMRunningMode: $($S.Mode)); its exclusions do not matter" }
       if (-not $S.Readable) { return 'the exclusion list can only be read elevated' }
-      if ($S.Path -cnotmatch "^$WinPathRe$" -or $S.Path -match '\.\.') { return "$($S.Path): this script adds only plain drive paths (letters, digits, space, _ . ( ) -)" }
+      $why = Get-BuildDirProblem $S.Path; if ($why) { return "$($S.Path) is refused: $why" }
+      if ($S.Path -cnotmatch "^$WinPathRe$") { return "$($S.Path): this script adds only plain drive paths (letters, digits, space, _ . ( ) -)" }
+      if ($S.IsNuget) {
+        $cu = Get-ConsoleUserSid
+        if (-not $cu -or $cu -cne (Get-UserSid)) { return "the NuGet packages folder ($($S.Path)) comes from this account's profile, and this PowerShell does not run as the account logged on at the console, so it may be the wrong profile. Run the script elevated as the build user at the console, or exclude that user's NuGet folder yourself" }
+      }
     }
   }
   return ''
@@ -1423,6 +1464,7 @@ function Get-TuneArgError($Ua, [bool]$TuneOn, [bool]$Def, [string]$Mode) {
   if ($TuneOn -and @('undo', 'list') -contains $Mode) { return '-Tune goes with -WhatIf or alone; -Undo and -List handle every record' }
   if ($null -ne $Ua.Hours -and ($Ua.Hours -notmatch '^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$' -or $Ua.Hours.Split('-')[0] -eq $Ua.Hours.Split('-')[1])) { return '-Hours must look like 00:00-07:00 (HH:mm-HH:mm, start different from end)' }
   if ($null -ne $Ua.WorkRoot -and ("$($Ua.WorkRoot)".Replace('\', '/') -cnotmatch '^[A-Za-z]:/[A-Za-z0-9_.-][A-Za-z0-9_./-]*$' -or "$($Ua.WorkRoot)" -match '\.\.')) { return '-WorkRoot must be a folder like C:/lq (letters, digits, _ . / -; no spaces, no .., not a whole drive), as in LanQueue machines.yml' }
+  if ($null -ne $Ua.WorkRoot) { $why = Get-BuildDirProblem "$($Ua.WorkRoot)"; if ($why) { return "-WorkRoot $($Ua.WorkRoot) is refused: $why" } }
   return ''
 }
 
