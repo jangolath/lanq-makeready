@@ -92,7 +92,7 @@ $FixFunctionNames = @('Write-FixLine', 'Write-FixErr', 'Get-FixSessionId', 'Get-
   'Get-DotnetState', 'Get-DoState', 'Get-FixTargets', 'Get-StateTarget', 'Get-UndoRefusal', 'Get-TargetLabel', 'Get-ScanTarget', 'Get-SvcNorm', 'Get-FixApplyNote', 'Get-TuneArgError', 'Get-CleanName',
   'Get-SystemDriveLetter', 'Get-DriveRoot', 'Get-LanqWorkPath', 'Get-LanqWorkEntry', 'Get-WorkDirSddl', 'Get-SdCanon', 'Get-SdHash', 'Test-WorkDirSd', 'Test-RootSddl', 'Get-BuildUser',
   'Get-BuildUserProblem', 'Get-ExclusionStatus', 'Get-DevDrvInfo', 'Test-DevDriveBuild', 'Get-DefenderFacts', 'Get-VolumeFacts', 'Get-WorkDirFacts', 'Get-DevVhdFacts', 'Get-WorkDirRecords',
-  'Get-WorkDirState', 'Get-WorkDirProblem', 'Get-CaseSens', 'Test-SelfTestDir', 'Get-EicarBytes', 'Test-VirusError', 'Wait-MpDetection', 'Get-MpExclusions', 'Get-SiblingTests', 'Confirm-FixFor')
+  'Get-WorkDirState', 'Get-WorkDirProblem', 'Test-WorkDirSame', 'Test-MpResource', 'Get-RecordSortKey', 'Get-CaseSens', 'Test-SelfTestDir', 'Get-EicarBytes', 'Test-VirusError', 'Wait-MpDetection', 'Get-MpExclusions', 'Get-SiblingTests', 'Confirm-FixFor')
 # Every cmdlet this file runs. A function or alias with one of these names would run instead of the cmdlet, so the
 # script refuses to start when any of them does not resolve to the cmdlet itself (Get-FixCommandShadow).
 $FixCmdletNames = @('Get-Service', 'Set-Service', 'Start-Service', 'Stop-Service', 'Get-Item', 'Set-ItemProperty', 'Remove-ItemProperty', 'Get-Acl', 'Set-Acl',
@@ -148,6 +148,9 @@ $TaskPathRe = '\\(?:[A-Za-z0-9 ._()&+-]{1,64}\\){0,4}'
 $SidRe = 'S-1-5(?:-[0-9]{1,10}){1,14}'
 # The Defender ladder (0.6.0). Fixed names, never taken from the user or a record file.
 $WorkDirName = 'lanq-work'
+# lanq-work keeps this child for good: owner Administrators, Administrators and SYSTEM only. A folder that is not empty
+# cannot be turned into a junction, and the build user cannot delete the pin (review round 2, H-A).
+$PinName = '.lanq-pin'
 # <drive>:\lanq-work, owner Administrators, nothing inherited. The build user ({0}) may list, add files and folders and
 # traverse on the folder itself (no delete, rename, permissions, owner, attributes or delete-child) and gets Modify
 # without permissions or owner on what is created inside; OWNER RIGHTS is limited the same way, so the build user
@@ -686,14 +689,15 @@ function Get-VolumeFacts([string]$L) {
   return $s
 }
 
-# A lanq-work folder: there, a link (or not a folder), its SDDL, empty, its file id (fsutil file queryfileid).
+# A lanq-work folder: there, a link (or not a folder), its SDDL, nothing in it but the pin, the pin as made, its file id.
 function Get-WorkDirFacts([string]$Path) {
-  $s = @{ Exists = $false; Reparse = $false; Sddl = ''; Empty = $false; FileId = '-' }
+  $s = @{ Exists = $false; Reparse = $false; Sddl = ''; Fresh = $false; Pin = $false; FileId = '-' }
   try { $fi = Get-Item -LiteralPath $Path -Force -ErrorAction Stop } catch { return $s }
   $s.Exists = $true; $s.Reparse = ([bool]($fi.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or -not $fi.PSIsContainer)
   if ($s.Reparse) { return $s }
   try { $s.Sddl = "$((Get-Acl -LiteralPath $Path -ErrorAction Stop).Sddl)" } catch { }
-  try { $s.Empty = (@([System.IO.Directory]::GetFileSystemEntries($Path)).Count -eq 0) } catch { }
+  try { $s.Fresh = ((@([System.IO.Directory]::GetFileSystemEntries($Path) | ForEach-Object { Split-Path -Leaf $_ }) -join '|') -ceq $PinName) } catch { }   # only the pin in it
+  $s.Pin = Test-SelfTestDir (Join-Path $Path $PinName)
   $r = Invoke-Native $FsutilExe @('file', 'queryfileid', $Path)
   if ($r.Code -eq 0 -and "$($r.Out)" -match '(0x[0-9a-fA-F]{1,32})') { $s.FileId = $Matches[1].ToLowerInvariant() }
   return $s
@@ -715,20 +719,25 @@ function Get-DevVhdFacts {
 # The lanq-work folders trusted records vouch for: the after state of each defender.exclude item that made one (drive,
 # volume GUID, file id, permissions hash, build user). Only trusted, valid records in the record folder count.
 function Get-WorkDirRecords {
-  $out = @()
+  $seen = @{}
   foreach ($f in @(Get-ChildItem -LiteralPath (Get-FixRecordDir) -Filter 'fix-*.json' -File -ErrorAction SilentlyContinue)) {
-    if ($f.Name -notmatch '^fix-[0-9]{8}T[0-9]{6}Z(-[0-9]{1,4})?\.json$' -or (Test-FixRecordTrusted $f.FullName)) { continue }
+    if (-not (Get-RecordSortKey $f.Name) -or (Test-FixRecordTrusted $f.FullName)) { continue }
     $r = Read-FixRecord $f.FullName
     if ($r.Error) { continue }
     foreach ($i in @($r.Rec.Items)) {
       if ($i.id -ne 'defender.exclude' -or @('applied', 'failed', 'undone') -notcontains $i.status) { continue }
       $a = ConvertFrom-StateText $i.id $i.after
-      # a failed item that left the exclusion in place vouches for nothing (review round 1, HIGH-1)
-      if ($a -and $a.DirState -eq 'lanq' -and $a.FileId -ne '-' -and $a.Sd -ne '-' -and -not ($i.status -eq 'failed' -and $a.Has)) { $a.Add('Status', $i.status); $out += $a }
+      if (-not $a -or $a.FileId -eq '-') { continue }
+      $a.Add('Status', $i.status); $a.Add('Key', ('{0}-{1:000}' -f (Get-RecordSortKey $f.Name), [int]$i.seq))
+      if (-not $seen.ContainsKey($a.FileId) -or $seen[$a.FileId].Key -lt $a.Key) { $seen[$a.FileId] = $a }
     }
   }
-  return $out
+  # only the newest item for a folder counts (review round 2, L-3); a failed one that left the exclusion in place
+  # vouches for nothing (review round 1, HIGH-1)
+  return @($seen.Values | Where-Object { $_.DirState -eq 'lanq' -and $_.Sd -ne '-' -and -not ($_.Status -eq 'failed' -and $_.Has) })
 }
+# The order of fix records: their time, then their number (fix-<time>-2.json comes after fix-<time>.json, -10 after -9).
+function Get-RecordSortKey([string]$Name) { if ($Name -match '^fix-([0-9]{8}T[0-9]{6})Z(?:-([0-9]{1,4}))?\.json$') { return ('{0}-{1:0000}' -f $Matches[1], [int]("0$($Matches[2])")) }; return '' }
 # absent, lanq (made by this script: this run, or a trusted record matches its volume, file id, permissions and user)
 # or other; why it is other; and whether this script added the exclusion that is there (this run, or an applied item
 # that says so). There is no marker file in the folder: the record is the only proof.
@@ -744,8 +753,9 @@ function Get-WorkDirState($S) {
   foreach ($r in @(Get-WorkDirRecords)) {
     if ($r.Drive -ceq $S.Drive -and $r.Vol -ceq $S.Vol.Guid -and $r.FileId -ceq $d.FileId -and $r.Sd -ceq $h -and $r.User -ceq $S.User) { $st = 'lanq'; if ($r.Status -eq 'applied' -and $r.Has) { $v = $true } }
   }
-  if ($st -eq 'lanq') { return @('lanq', '', $v) }
-  return @('other', 'no trusted fix record matches its volume, file id and permissions', $false)
+  if ($st -ne 'lanq') { return @('other', 'no trusted fix record matches its volume, file id and permissions', $false) }
+  if (-not $d.Pin) { return @('other', "its $PinName is missing or not the admin-only one this script made", $false) }
+  return @('lanq', '', $v)
 }
 # True when the self-test folder at $Path is the one this script made: there, not a link, owner Administrators and
 # only Administrators and SYSTEM in its DACL (checked before every write into it and before deleting it).
@@ -759,13 +769,17 @@ function Test-SelfTestDir([string]$Path) {
   } catch { return $false }
 }
 # '' when the folder at $Path is exactly what this script makes: there, not a link, its owner and permissions as set,
-# empty when it was just made, and its file id readable (the record ties the exclusion to it).
+# its admin-only .lanq-pin there, nothing else in it when it was just made, and its file id readable.
+# True when lanq-work is still the same plain folder: there, not a link, the same file id, its pin in place. Checked
+# right before every move into it, every write and every delete there (review round 2, H-A).
+function Test-WorkDirSame([string]$Path, [string]$FileId) { $d = Get-WorkDirFacts $Path; return ($d.Exists -and -not $d.Reparse -and $d.Pin -and "$($d.FileId)" -ceq $FileId -and $FileId -cmatch '^0x') }
 function Get-WorkDirProblem([string]$Path, [string]$Sid, [bool]$New) {
   $d = Get-WorkDirFacts $Path
   if (-not $d.Exists) { return 'it does not exist' }
   if ($d.Reparse) { return 'it is a link or junction' }
   if (-not (Test-WorkDirSd $d.Sddl $Sid)) { return 'its owner or permissions are not the ones this script sets' }
-  if ($New -and -not $d.Empty) { return 'it is not empty' }
+  if (-not $d.Pin) { return "its $PinName is missing or not the admin-only one this script made" }
+  if ($New -and -not $d.Fresh) { return "it is not empty (it holds more than its $PinName)" }
   if ("$($d.FileId)" -cnotmatch '^0x[0-9a-f]{1,32}$') { return 'its file id cannot be read (fsutil file queryfileid)' }
   return ''
 }
@@ -781,12 +795,15 @@ function Wait-MpDetection([string]$Path, [datetime]$Since, [int]$Sec, [switch]$H
   $p = $Path -replace '^\\\\\?\\', ''; $sw = [System.Diagnostics.Stopwatch]::StartNew()
   while ($true) {
     if (-not $HistoryOnly -and -not [System.IO.File]::Exists('\\?\' + $p)) { return $true }
-    try { if (@(Get-MpThreatDetection -ErrorAction Stop | Where-Object { $_.InitialDetectionTime -ge $Since -and @($_.Resources | Where-Object { "$_".IndexOf($p, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count -gt 0 }).Count -gt 0) { return $true } } catch { }
+    try { if (@(Get-MpThreatDetection -ErrorAction Stop | Where-Object { $_.InitialDetectionTime -ge $Since -and (Test-MpResource $_.Resources $p) }).Count -gt 0) { return $true } } catch { }
     if ($sw.Elapsed.TotalSeconds -ge $Sec) { return $false }
     [System.Threading.Thread]::Sleep(500)
   }
 }
-function Get-MpExclusions { try { return @((Get-MpPreference -ErrorAction Stop).ExclusionPath | Where-Object { $_ } | ForEach-Object { "$_" }) } catch { return @() } }
+# A threat-history resource names exactly this file (file:_<path>), not an archive member or a longer path (L-1).
+function Test-MpResource($Resources, [string]$Path) { return (@(@($Resources) | Where-Object { "$_" -ieq "file:_$Path" }).Count -gt 0) }
+# The exclusion list; it throws when it cannot be read (a read-back must never look empty by mistake, L-2).
+function Get-MpExclusions { return @((Get-MpPreference -ErrorAction Stop).ExclusionPath | Where-Object { $_ } | ForEach-Object { "$_" }) }
 # The forms next to lanq-work that the self-test checks are still scanned (anyone may create them on the drive root).
 # The file names carry the run's tag, so a threat-history entry can only be this run's.
 function Get-SiblingTests([string]$Root, [string]$Tag) {
@@ -1441,10 +1458,18 @@ function Invoke-FixChange([string]$Id, [string]$Mode, $B, $Cur) {
       # 1. lanq-work: created with its owner and permissions in one call (only when the state said it is absent), then
       #    read back; a folder someone else made meanwhile (or anything unexpected) stops here, before any exclusion.
       $root = Get-DriveRoot $B.Drive; $p = Get-LanqWorkPath $B.Drive; $entry = Get-LanqWorkEntry $B.Drive; $tag = [Guid]::NewGuid().ToString('N')
-      if ($B.DirState -eq 'absent') { New-FixSecuredDir $p (Get-WorkDirSddl $B.User) }
+      # lanq-work is made with its .lanq-pin in the record folder and moved into place, so it is never empty where the
+      # build user can reach it (an empty folder could be turned into a junction), and a C:\lanq-work someone made first
+      # makes the move fail.
+      if ($B.DirState -eq 'absent') {
+        $stage = '\\?\' + (Join-Path (Get-FixRecordDir) "stage-$tag-w"); $dst = '\\?\' + $p
+        New-FixSecuredDir $stage (Get-WorkDirSddl $B.User); New-FixSecuredDir "$stage\$PinName" $AdminOnlySddl
+        try { [System.IO.Directory]::Move($stage, $dst) } catch { $q = $stage; try { [System.IO.Directory]::Delete($q, $true) } catch { }; throw "$p could not be put in place (someone made it first); no exclusion was added" }
+      }
       $why = Get-WorkDirProblem $p $B.User ($B.DirState -eq 'absent')
       if ($why) { throw "$p is not as this script makes it ($why); no exclusion was added" }
-      if ($B.DirState -eq 'absent') { $script:FixMade = "$p|$((Get-WorkDirFacts $p).FileId)" }
+      $fid = (Get-WorkDirFacts $p).FileId
+      if ($B.DirState -eq 'absent') { $script:FixMade = "$p|$fid" }
       # Every self-test folder is made admin-only in the record folder (only Administrators and SYSTEM may write there)
       # and moved into place on the same drive: a move fails when the name exists (a folder, file or link someone made
       # first), so nobody can slip a folder of their own under the test file or the delete. Before each write and each
@@ -1470,12 +1495,13 @@ function Invoke-FixChange([string]$Id, [string]$Mode, $B, $Cur) {
         if (-not $fail) {
           $k++; $stage = Join-Path (Get-FixRecordDir) "stage-$tag-$k"; $dst = "$p\lanq-selftest-$tag"
           New-FixSecuredDir $stage $AdminOnlySddl; [void]$made.Add($stage)
+          if (-not (Test-WorkDirSame $p $fid)) { throw "$p changed (it is a link now, another folder, or its $PinName is gone): nothing is moved, written or deleted there" }
           try { [System.IO.Directory]::Move($stage, $dst) } catch { throw "a self-test folder could not be put in place ($dst exists already: someone made it first); nothing was written to it" }
           [void]$made.Add($dst)
           $sw = [System.Diagnostics.Stopwatch]::StartNew(); $n = 0; $kept = $false
           do {
             $n++; $f = "$dst\eicar-$tag-$n.com"; $t0 = [DateTime]::Now.AddSeconds(-5); $hit = $true
-            if (-not (Test-SelfTestDir $dst)) { throw "$dst is not the folder this script made; nothing was written to it" }
+            if (-not (Test-SelfTestDir $dst) -or -not (Test-WorkDirSame $p $fid)) { throw "$dst or $p changed: nothing was written there" }
             try { [System.IO.File]::WriteAllBytes($f, $bytes); $hit = Wait-MpDetection $f $t0 15 } catch { if (-not (Test-VirusError $_.Exception)) { throw } }
             if (-not $hit) { $kept = $true }
           } while (-not $kept -and $sw.Elapsed.TotalSeconds -lt $ExclusionSettleSec)
@@ -1501,18 +1527,19 @@ function Invoke-FixChange([string]$Id, [string]$Mode, $B, $Cur) {
         # an error, a failed check or Ctrl+C: the exclusion goes again (and is read back); our folders are removed
         if ($added -and -not $ok) {
           foreach ($e in @(@($entry) + @($new | Where-Object { "$_".TrimEnd('\', '.', ' ') -eq $entry.TrimEnd('\') }))) { Remove-MpPreference -ExclusionPath $e -ErrorAction SilentlyContinue }
-          $left = @(Get-MpExclusions | Where-Object { "$_".TrimEnd('\', '.', ' ') -eq $entry.TrimEnd('\') })
+          try { $left = @(Get-MpExclusions | Where-Object { "$_".TrimEnd('\', '.', ' ') -eq $entry.TrimEnd('\') }) } catch { $left = @("the exclusion list could not be read: $($_.Exception.Message)") }
         }
         for ($j = $made.Count - 1; $j -ge 0; $j--) {
           $q = "$($made[$j])"; if (-not $q.StartsWith('\\?\')) { $q = '\\?\' + $q }
           if (-not [System.IO.Directory]::Exists($q)) { continue }
+          if ("$($made[$j])".StartsWith("$p\") -and -not (Test-WorkDirSame $p $fid)) { Write-FixLine "  left alone: $($made[$j]) ($p changed; look at it)" 'DarkYellow'; continue }
           if (Test-SelfTestDir $q) { try { [System.IO.Directory]::Delete($q, $true) } catch { } } else { Write-FixLine "  left alone: $($made[$j]) is not the folder this script made (look at it)" 'DarkYellow' }
         }
       }
       if (-not $ok) {
         $why = $fail; if ($err) { $why = $err; if ($fail) { $why = "$fail; $err" } }
         if (-not $added) { throw $why }
-        if ($left.Count) { throw "$why; FAILED to remove the exclusion again: it is still there ($($left -join ', ')). Remove it now in an elevated PowerShell: Remove-MpPreference -ExclusionPath '$entry'" }
+        if ($left.Count) { throw "$why; FAILED to remove the exclusion again, or to read the list back ($($left -join ', ')). Remove it now in an elevated PowerShell: Remove-MpPreference -ExclusionPath '$entry'" }
         throw "$why; the exclusion was removed again"
       }
       $script:FixAdded = $entry
@@ -1528,7 +1555,12 @@ function Invoke-FixChange([string]$Id, [string]$Mode, $B, $Cur) {
       [void](Format-Volume -DriveLetter $L -DevDrive -NewFileSystemLabel 'lanq-dev' -Confirm:$false -Force -ErrorAction Stop)
       $v = Get-VolumeFacts $L
       if ($v.DevDrv -ne 'trusted' -or $v.DevAv -ne 'ok' -or -not $v.DevFilter) { throw "the new volume $L`: is not a trusted Dev Drive with antivirus allowed and WdFilter attached (fsutil devdrv query $L`:: $($v.DevDrv), antivirus $($v.DevAv))" }
-      $p = Get-LanqWorkPath $L; New-FixSecuredDir $p (Get-WorkDirSddl $B.User)
+      # lanq-work with its pin, made in an admin-only holder on the new volume and moved into place (never empty there)
+      $p = Get-LanqWorkPath $L; $hold = '\\?\' + (Get-DriveRoot $L) + ".lanq-stage-$([Guid]::NewGuid().ToString('N'))"; New-FixSecuredDir $hold $AdminOnlySddl
+      $stage = "$hold\$WorkDirName"; $dst = '\\?\' + $p
+      New-FixSecuredDir $stage (Get-WorkDirSddl $B.User); New-FixSecuredDir "$stage\$PinName" $AdminOnlySddl
+      [System.IO.Directory]::Move($stage, $dst)
+      $q = $hold; [System.IO.Directory]::Delete($q, $true)
       $why = Get-WorkDirProblem $p $B.User $true
       if ($why) { throw "$p is not as this script makes it ($why)" }
     }

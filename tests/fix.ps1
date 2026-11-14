@@ -1132,6 +1132,7 @@ function Reset-Dx {
   $script:FixMade = ''; $script:AddVariant = $null; $script:ThrowAt = ''; $script:SquatWork = $false; $script:JunctionAfterPc = $false; $script:MpReadBroken = $false; $script:SquatInside = $false; $script:NotOurs = @(); $script:RemoveBroken = $false
   $script:ExclusionSettleSec = 0   # one attempt for the inside test unless a test sets it
   foreach ($d in @(Get-ChildItem -LiteralPath $Sandbox -Force -ErrorAction SilentlyContinue)) { [System.IO.Directory]::Delete('\\?\' + $d.FullName, $true) }
+  [void][System.IO.Directory]::CreateDirectory((Get-DriveRoot 'C'))   # the drive root always exists
 }
 function Invoke-Dx([string]$Mode = 'apply', [object[]]$Ans = @(), [string]$Set = 'defender', [string]$User = 'builder', [int]$Size = 100, [string]$UndoPath = '') {
   $FixOut.Clear(); $Calls.Clear(); $Snaps.Clear(); $Reads.Clear(); $script:Asked = 0
@@ -1264,7 +1265,7 @@ Assert-True ((Read-Rec (Get-LatestRecord)).items[0].status -eq 'failed' -and (Re
 $script:RemoveBroken = $false; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
 Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and (OutText) -match 'not offered: .*this script did not add it') 'HIGH-1: a failed record with the exclusion still there does not count as done: not offered, says to remove it'
 Reset-Dx; $script:SquatInside = $true; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
-Assert-True ($rc -eq 1 -and @($Mp.Ex).Count -eq 0 -and (OutText) -match 'could not be put in place' -and @(Get-ChildItem -LiteralPath (Join-Path (Get-DriveRoot 'C') 'lanq-work')).Count -eq 1) 'HIGH-2: the build user made the inside self-test folder first: nothing is written into it or deleted from it, rolled back'
+Assert-True ($rc -eq 1 -and @($Mp.Ex).Count -eq 0 -and (OutText) -match 'could not be put in place' -and @(Get-ChildItem -LiteralPath (Join-Path (Get-DriveRoot 'C') 'lanq-work') -Force).Count -eq 2) 'HIGH-2: the build user made the inside self-test folder first: nothing is written into it or deleted from it, rolled back'
 Reset-Dx; $script:NotOurs = @('C\lanq-work.<id>'); $rc = Invoke-Dx 'apply' @('C:\lanq-work')
 Assert-True ($rc -eq 1 -and @($Mp.Ex).Count -eq 0 -and (OutText) -match 'is not the folder this script made' -and (OutText) -match 'left alone' -and @(Get-SandboxDirs 'C' | Where-Object { $_ -match '^lanq-work\.[0-9a-f]{32}$' }).Count -eq 1) 'HIGH-2: a self-test folder that is not ours before the write: nothing written, never deleted, rolled back'
 Reset-Dx; $script:ExclusionSettleSec = 30; $script:Undetected = @('C\lanq-work\lanq-selftest-*-2.com'); $rc = Invoke-Dx 'apply' @('C:\lanq-work')

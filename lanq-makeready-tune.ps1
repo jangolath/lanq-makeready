@@ -90,6 +90,8 @@ function Join-Names($Names, [int]$N = 6) {
 $BaSid = 'S-1-5-32-544'; $SySid = 'S-1-5-18'; $TiSid = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
 $WriteMask = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
 $RootRiskMask = 0x40 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
+$PinName = '.lanq-pin'
+$PinSddl = 'O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)'   # the pin as the fix makes it (its $AdminOnlySddl)
 $WorkDirSddl = 'O:BAG:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200af;;;{0})(A;OICIIO;0x1301bf;;;{0})(A;OICIIO;0x1301bf;;;OW)'
 function ConvertFrom-Sddl([string]$Sddl) { try { return (New-Object System.Security.AccessControl.RawSecurityDescriptor($Sddl)) } catch { return $null } }
 function Get-AccountName([string]$Sid) {
@@ -200,7 +202,9 @@ function Get-DriftProblems($Dr) {
   if ($Dr.CaseSens -ne $false) { $p += 'the drive root is case-sensitive (or that could not be read)' }
   $rw = Test-RootSddl $Dr.RootSddl; if ($rw) { $p += "the drive root is no longer safe: $rw" }
   if (@('USB', 'File Backed Virtual', 'SD', 'MMC') -contains $Dr.Bus) { $p += "the drive is now on a $($Dr.Bus) disk" }
-  if ($Dr.DevDrv -ne 'no') { $p += 'the drive is now a Dev Drive' }
+  if ($null -eq $Dr.Bus) { $p += 'the disk bus could not be read' }
+  if ($null -eq $Dr.DevDrv) { $p += 'the Dev Drive state could not be read' } elseif ($Dr.DevDrv -ne 'no') { $p += 'the drive is now a Dev Drive' }
+  if (-not $Dr.Pin) { $p += "its $PinName is missing or changed (an emptied lanq-work could be turned into a junction)" }
   if ($Dr.ObCi -ne 1) { $p += 'ObCaseInsensitive is not 1' }
   $bad = @($Dr.Sample.Bad); if ($bad.Count) { $p += "$($bad.Count) of $($Dr.Sample.Count) sampled entries are links or let others change them: $(Join-Names $bad 3)" }
   return $p
@@ -568,7 +572,7 @@ function Get-LanqWorkSample([string]$Path, [string]$User) {
 # Elevated only: the lanq-work exclusion ($Def from the Defender probe), its record, the folder, its file id and volume,
 # case sensitivity, and the sample.
 function Get-DriftFacts([string]$L, $Def) {
-  $h = @{ Entry = [bool]$Def.LwEntry; Variant = [bool]$Def.LwVariant; Record = $null; Exists = $false; Reparse = $false; Sddl = ''; FileId = ''; Vol = ''; CaseSens = $null; ObCi = 1; Sample = @{ Count = 0; Bad = @(); Capped = $false }; RootSddl = ''; Bus = ''; DevDrv = 'no' }
+  $h = @{ Entry = [bool]$Def.LwEntry; Variant = [bool]$Def.LwVariant; Record = $null; Exists = $false; Reparse = $false; Sddl = ''; FileId = ''; Vol = ''; CaseSens = $null; ObCi = 1; Sample = @{ Count = 0; Bad = @(); Capped = $false }; RootSddl = ''; Bus = $null; DevDrv = $null; Pin = $false }
   if (-not ($h.Entry -or $h.Variant)) { return $h }
   $p = "$L`:\lanq-work"; $h.Record = Get-LanqWorkRecord $L
   try { $fi = Get-Item -LiteralPath $p -Force -ErrorAction Stop; $h.Exists = $true; $h.Reparse = ([bool]($fi.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or -not $fi.PSIsContainer) } catch { }
@@ -576,8 +580,9 @@ function Get-DriftFacts([string]$L, $Def) {
   $x = Invoke-Fsutil "file queryfileid $p"; if ($x -and "$($x.Out)" -match '(0x[0-9a-fA-F]{1,32})') { $h.FileId = $Matches[1].ToLowerInvariant() }
   $x = Invoke-Fsutil "file queryCaseSensitiveInfo $L`:\"; if ($x -and $x.Code -eq 0) { $h.CaseSens = Get-CaseSens "$($x.Out)" }
   $h.RootSddl = Get-PathSddl "$L`:\"
-  $x = Invoke-Fsutil "devdrv query $L`:"; if ($x) { $h.DevDrv = (Get-DevDrvInfo "$($x.Out)").State }
-  $b = Invoke-Probe 'bus' 10 { param($l) "$((Get-Disk -Number (Get-Partition -DriveLetter $l -ErrorAction Stop).DiskNumber -ErrorAction Stop).BusType)" } $L; $h.Bus = "$(@($b)[0])"
+  $x = Invoke-Fsutil "devdrv query $L`:"; if ($x -and $x.Code -eq 0) { $h.DevDrv = (Get-DevDrvInfo "$($x.Out)").State }
+  $b = Invoke-Probe 'bus' 10 { param($l) "$((Get-Disk -Number (Get-Partition -DriveLetter $l -ErrorAction Stop).DiskNumber -ErrorAction Stop).BusType)" } $L; if ("$(@($b)[0])") { $h.Bus = "$(@($b)[0])" }
+  $pn = Get-PathSddl "$p\$PinName"; $h.Pin = ([bool](Get-SdCanon $pn) -and (Get-SdCanon $pn) -ceq (Get-SdCanon $PinSddl))
   $v = Invoke-Probe 'volume' 10 { param($l) "$((Get-Volume -DriveLetter $l -ErrorAction Stop).UniqueId)" } $L
   if ("$v" -match '\{([0-9a-fA-F-]{36})\}') { $h.Vol = '{' + $Matches[1].ToLowerInvariant() + '}' }
   $ob = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel' 'ObCaseInsensitive'; if ($null -ne $ob) { $h.ObCi = [int]$ob }
