@@ -1,6 +1,7 @@
 #!/bin/sh
 # CI ONLY: real apply and undo of lanq-makeready-fix.sh on a disposable GitHub-hosted Ubuntu runner (systemd, run as
-# root). This CHANGES the machine (ssh unit, sleep targets) and then puts it back. The gate below (GITHUB_ACTIONS,
+# root). This CHANGES the machine (ssh unit, sleep targets; with --tune: the inotify limits and their sysctl drop-in,
+# cups/cups-browsed, fstrim.timer and whatever other tune fix the runner needs) and then puts it back. The gate below (GITHUB_ACTIONS,
 # RUNNER_ENVIRONMENT=github-hosted, LANQ_REAL_FIX_OK) only guards against running it by accident; it is not a security
 # boundary. Never run it on a machine you care about.
 # The only test seam used is console simulation: has_console returns true and the answers (y) come from stdin.
@@ -22,6 +23,43 @@ fail=0
 check() { if [ "$1" = 0 ]; then echo "  ok   $2"; else fail=$((fail + 1)); echo "  FAIL $2"; fi; }
 raw() { for u in ssh.service ssh.socket sleep.target suspend.target hibernate.target hybrid-sleep.target; do printf '%s=%s/%s ' "$u" "$(systemctl is-enabled "$u" 2>/dev/null)" "$(systemctl is-active "$u" 2>/dev/null)"; done; echo; }
 snap() { echo "$(state_of ssh.start) / $(state_of power.sleep) / $(raw)"; }
+yeses() { printf 'y\ny\ny\ny\ny\ny\ny\ny\ny\ny\n'; }
+
+# --tune: the tune fixes. LANQ_REAL_FIX_REQUIRE lists the keys the CI step made necessary (comma separated); every
+# other tune fix the runner happens to need is applied and undone as well (answers are all y).
+if [ "${1:-}" = --tune ]; then
+  traw() { for u in cups.service cups.socket cups.path cups-browsed.service fstrim.timer systemd-journald.service; do printf '%s=%s/%s ' "$u" "$(systemctl is-enabled "$u" 2>/dev/null)" "$(systemctl is-active "$u" 2>/dev/null)"; done
+    printf 'inotify=%s/%s dropin=%s' "$(cat /proc/sys/fs/inotify/max_user_instances)" "$(cat /proc/sys/fs/inotify/max_user_watches)" "$([ -e /etc/sysctl.d/99-zz-lanq-makeready.conf ] && echo yes || echo no)"; echo; }
+  tsnap() { for k in $TUNE_KEYS; do printf '%s / ' "$(state_of "$k")"; done; traw; }
+  req=$(printf '%s' "${LANQ_REAL_FIX_REQUIRE:-}" | tr ',' ' ')
+  [ -n "$req" ]; check $? "LANQ_REAL_FIX_REQUIRE names the tune fixes the setup made necessary"
+  before=$(tsnap); echo "before: $before"
+  for k in $req; do s=$(state_of "$k"); needed "$k" "$s"; check $? "setup made $k necessary (state: $s)"; done
+  yeses | main --tune; check $? "tune apply: exit 0"
+  echo "after apply: $(tsnap)"
+  for k in $req; do done_ok "$k" "$(state_of "$k")"; check $? "applied for real: $k"; done
+  case " $req " in *" sysctl.tune "*)
+    [ "$(cat /proc/sys/fs/inotify/max_user_instances)" = 1024 ]; check $? "max_user_instances really 1024"
+    [ "$(stat -c '%a %u' /etc/sysctl.d/99-zz-lanq-makeready.conf)" = "600 0" ]; check $? "the sysctl drop-in is root's, mode 600"
+    grep -qx 'fs.inotify.max_user_instances = 1024' /etc/sysctl.d/99-zz-lanq-makeready.conf; check $? "the drop-in holds the new limit for the next boot" ;;
+  esac
+  case " $req " in *" services.unused:cups "*)
+    [ "$(systemctl is-active cups.service)" != active ] && [ "$(systemctl is-enabled cups.service)" = disabled ]; check $? "cups.service really stopped and disabled"
+    [ "$(systemctl is-enabled cups.service)" != masked ]; check $? "cups.service is not masked" ;;
+  esac
+  case " $req " in *" fstrim.timer "*) [ "$(systemctl is-enabled fstrim.timer)" = enabled ]; check $? "fstrim.timer really enabled" ;; esac
+  rec=$(ls -t /var/lib/lanq-makeready/fix-*.json | head -n 1)
+  echo "record: $rec"; cat "$rec"
+  record_trusted "$rec"; check $? "the record passes the root-ownership check"
+  if command -v python3 >/dev/null 2>&1; then python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$rec"; check $? "record is valid JSON"; fi
+  n=$(grep -c '"status": "applied"' "$rec")
+  yeses | main --undo "$rec"; check $? "tune undo: exit 0"
+  after=$(tsnap); echo "after undo: $after"
+  [ "$after" = "$before" ]; check $? "undo restored every tune fix: $before"
+  [ ! -e /etc/sysctl.d/99-zz-lanq-makeready.conf ] && [ ! -e /etc/systemd/journald.conf.d/99-zz-lanq-makeready.conf ]; check $? "the drop-ins are gone"
+  [ "$(grep -c '"status": "undone"' "$rec")" = "$n" ]; check $? "record: all $n items undone"
+  [ "$fail" = 0 ]; exit $?
+fi
 
 before=$(snap); echo "before: $before"
 echo "sleep risk (the scanner's view): $(sleep_risk)"
