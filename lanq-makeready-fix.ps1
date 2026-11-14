@@ -1,9 +1,10 @@
 <#
 .SYNOPSIS
-  lanq-makeready-fix: applies a short list of reversible fixes for what lanq-makeready reports, one at a time, each only
-  after you confirm it at this PC.
+  lanq-makeready-fix: applies a short list of reversible fixes for what lanq-makeready (and, with -Tune, the tune scan
+  lanq-makeready-tune.ps1) reports, one at a time, each only after you confirm it at this PC.
 .DESCRIPTION
-  The scanner (lanq-makeready.ps1) never changes anything. This separate script changes only what you confirm:
+  The scanners (lanq-makeready.ps1, lanq-makeready-tune.ps1) never change anything. This separate script changes only
+  what you confirm:
   - it refuses to run over SSH, from stdin or a string ([scriptblock]::Create, iex), or without an interactive console
     (-WhatIf and -List need no console);
   - there is no -Yes or -Force: each fix is shown (check, current state, exact command, undo) and asked with
@@ -13,23 +14,29 @@
     lanq-makeready-fix/v1) in a folder only Administrators and SYSTEM may change, and -Undo <file> puts the changes
     back, newest first, again confirming each.
   Fixes (v1): ssh.start, ssh.auto, power.sleep, longpaths.on, git.longpaths, ssh.aclkeys.
+  Tune fixes (-Tune): power.cpu, power.usbsuspend, startup.vendor, vendor.services, vendor.tasks, sysmain, do.mode,
+  dotnet.env, defender.scantime (needs -Hours). Defender exclusions are not automated (see docs/TUNE.md).
   Exit code: 0 = done or nothing to do, 1 = a change failed or did not verify, 2 = bad arguments or a rejected record,
   3 = refused (over SSH, from stdin, no interactive console).
 .PARAMETER WhatIf
   Dry run: show every applicable fix and its undo; change nothing.
 .PARAMETER List
   List the undo records in %ProgramData%\lanq-makeready (needs an elevated PowerShell to read them).
+.PARAMETER Tune
+  Offer the tune fixes instead of the readiness fixes. -Hours HH:mm-HH:mm gives the job window (defender.scantime).
 .NOTES
   -Undo <record file>: undo the changes in that record, newest first, confirming each.
 #>
 # lanq-makeready-fix-marker (identifies this file; the script refuses to run when it was not started from a file)
 [CmdletBinding(PositionalBinding = $false)]
-param([switch]$WhatIf, [switch]$List, [switch]$Help, [Parameter(ValueFromRemainingArguments = $true)][string[]]$Extra)
+param([switch]$WhatIf, [switch]$List, [switch]$Help, [switch]$Tune, [Parameter(ValueFromRemainingArguments = $true)][string[]]$Extra)
 
 $FixInvocation = $MyInvocation
-$ToolVersion = '0.4.1'
+$ToolVersion = '0.5.0'
 $RecordSchema = 'lanq-makeready-fix/v1'
-$FixIds = @('ssh.start', 'ssh.auto', 'power.sleep', 'longpaths.on', 'git.longpaths', 'ssh.aclkeys')
+$BaseFixIds = @('ssh.start', 'ssh.auto', 'power.sleep', 'longpaths.on', 'git.longpaths', 'ssh.aclkeys')
+$TuneFixIds = @('power.cpu', 'power.usbsuspend', 'startup.vendor', 'vendor.services', 'vendor.tasks', 'sysmain', 'do.mode', 'dotnet.env', 'defender.scantime')
+$FixIds = $BaseFixIds + $TuneFixIds   # every id a record may hold (an older script rejects a record with a newer id)
 # check id in the scanner's report, and what is wrong
 $FixInfo = @{
   'ssh.start'     = @('ssh.server', 'OpenSSH Server is installed but not running')
@@ -38,7 +45,30 @@ $FixInfo = @{
   'longpaths.on'  = @('longpaths', 'Windows long paths are off')
   'git.longpaths' = @('git', 'git core.longpaths is not on')
   'ssh.aclkeys'   = @('ssh.keys', 'administrators_authorized_keys may be changed by others than Administrators and SYSTEM, so sshd ignores it')
+  'power.cpu'         = @('power.plan', 'the processor is held below 100%, or never clocks down, on AC')
+  'power.usbsuspend'  = @('power.usbsuspend', 'USB selective suspend may suspend the USB network adapter')
+  'startup.vendor'    = @('startup.vendor', 'a PC-maker updater or assistant starts at logon')
+  'vendor.services'   = @('vendor.services', 'a PC-maker updater, assistant or telemetry service is enabled')
+  'vendor.tasks'      = @('vendor.tasks', 'a PC-maker updater or assistant task is enabled')
+  'sysmain'           = @('sysmain', 'SysMain runs while every disk is an SSD')
+  'do.mode'           = @('do.mode', 'Delivery Optimization shares update files with other PCs')
+  'dotnet.env'        = @('dotnet.env', '.NET telemetry, first-run banner and dev-certificate variables are not set for the machine')
+  'defender.scantime' = @('defender.schedule', 'the Defender scheduled scan falls inside the job window')
 }
+# Curated OEM updater / assistant / telemetry names (services, scheduled tasks, Run entries). Generic across makers,
+# changed only by reviewed pull requests. The same list is in lanq-makeready-tune.ps1 (a test keeps them identical).
+# Every entry is a case-insensitive regex with a literal name in it: no bare wildcards.
+$VendorPatterns = @(
+  '^Dell ?SupportAssist', '^SupportAssist', '^Dell ?(Update|Command ?Update|Digital ?Delivery|Data ?Vault|TechHub|Optimizer|Core ?Services)', '^DDV(DataCollector|RulesProcessor|CollectorSvcApi)$',
+  '^HP ?(Support ?Assistant|Support ?Solutions|Analytics|App ?Helper|Diagnostics|Insights|Touchpoint|System ?Info|Network ?Cap|Comm ?Recovery|JumpStart)', '^HP(AppHelperCap|DiagsCap|NetworkCap|SysInfoCap)$', '^HpTouchpointAnalyticsService$',
+  '^Lenovo ?(Vantage|Service ?Bridge|Smart ?Standby|Utility|Welcome|System ?Update)', '^ImControllerService$', '^LITSSVC$',
+  '^ASUS ?(Optimization|Software ?Manager|System ?Analysis|System ?Diagnosis|Link|Update|App ?Service)', '^ArmouryCrate', '^AsusUpdateCheck$',
+  '^Acer ?(Quick ?Access|Care ?Center|Jumpstart|Collection|Product ?Registration)', '^MSI ?(Center|Dragon ?Center)', '^Samsung ?(Update|Settings)',
+  '^Intel\(R\) ?(Driver ?(&|and) ?Support|Computing ?Improvement)', '^DSA(Update)?Service$', '^NvTelemetryContainer$', '^NVIDIA ?(GeForce ?Experience|Telemetry)'
+)
+# APPEND-ONLY: undo accepts a name that matches $VendorPatterns or one of these. A pattern removed from the list above
+# moves here (never deleted), so records written by an older version can still be undone.
+$VendorRetiredPatterns = @()
 # Every function this file defines; an alias with one of these names (or of a command a fix runs) would run instead.
 $FixFunctionNames = @('Write-FixLine', 'Write-FixErr', 'Get-FixSessionId', 'Get-FixProcessTable', 'Get-AncestorNames', 'Test-FixOverSsh', 'Test-FixFromFile',
   'Test-FixConsole', 'Read-FixAnswer', 'Test-Yes', 'Confirm-Fix', 'Test-FixElevated', 'Get-FixCommandShadow', 'Get-FixRefusal', 'Invoke-Native', 'Get-PowercfgAcSeconds',
@@ -48,12 +78,21 @@ $FixFunctionNames = @('Write-FixLine', 'Write-FixErr', 'Get-FixSessionId', 'Get-
   'Get-FixRecordDirProblem', 'Get-PathSddl',
   'Test-FixRecordDirTrusted', 'Initialize-FixRecordDir', 'Test-FixRecordTrusted', 'New-FixRecord', 'ConvertTo-JsonText', 'ConvertTo-FixJson', 'Save-FixRecord',
   'Test-Props', 'Test-Str', 'ConvertTo-TimeText', 'New-RecordError', 'Read-FixRecord', 'Show-Fix', 'Invoke-FixApply', 'Invoke-FixUndo', 'Show-FixRecords', 'Invoke-FixMain',
-  'Get-UndoArg')
+  'Get-UndoArg', 'Test-Vendor', 'Test-VendorUndo', 'Test-InWindow', 'Get-HoursMin', 'Format-Min', 'Get-RegVal', 'Get-RegNames', 'Test-RegKey', 'Get-UserSid', 'Get-ActiveScheme',
+  'Get-PowerAc', 'Test-UsbNic', 'Test-FixAllSsd', 'Get-SvcState', 'Get-TaskState', 'Get-StartupState', 'Get-DefenderInfo', 'ConvertTo-Minutes',
+  'Get-DotnetState', 'Get-DoState', 'Get-FixTargets', 'Get-StateTarget', 'Get-UndoRefusal', 'Get-TargetLabel', 'Get-ScanTarget', 'Get-SvcNorm', 'Get-FixApplyNote', 'Get-TuneArgError', 'Get-CleanName')
 # Every cmdlet this file runs. A function or alias with one of these names would run instead of the cmdlet, so the
 # script refuses to start when any of them does not resolve to the cmdlet itself (Get-FixCommandShadow).
 $FixCmdletNames = @('Get-Service', 'Set-Service', 'Start-Service', 'Stop-Service', 'Get-Item', 'Set-ItemProperty', 'Remove-ItemProperty', 'Get-Acl', 'Set-Acl',
   'Get-Content', 'Get-ChildItem', 'Test-Path', 'Join-Path', 'Split-Path', 'Get-Command', 'Get-CimInstance', 'Select-Object', 'Where-Object', 'ForEach-Object', 'Sort-Object',
-  'ConvertFrom-Json', 'Write-Host', 'New-Object', 'Get-Location', 'Get-Alias')
+  'ConvertFrom-Json', 'Write-Host', 'New-Object', 'Get-Location', 'Get-Alias', 'New-Item')
+# Commands from Windows modules (CDXML functions, not cmdlets) the tune fixes run, and the module each must come from:
+# a function or alias of the same name from anywhere else would run instead, so the script refuses then too.
+$FixModuleCmds = @{ 'Get-NetAdapter' = @('NetAdapter'); 'Get-PhysicalDisk' = @('Storage'); 'Get-ScheduledTask' = @('ScheduledTasks'); 'Disable-ScheduledTask' = @('ScheduledTasks')
+  'Enable-ScheduledTask' = @('ScheduledTasks'); 'Get-MpComputerStatus' = @('ConfigDefender', 'Defender'); 'Get-MpPreference' = @('ConfigDefender', 'Defender')
+  'Set-MpPreference' = @('ConfigDefender', 'Defender') }
+$FixSet = 'base'      # base (readiness fixes) or tune
+$FixHours = ''        # -Hours HH:mm-HH:mm (tune: defender.scantime)
 $FixWalkCache = $null   # the parent-process walk is done once per process
 # The things the fixes touch. Fixed names, never taken from a record file.
 $SshdName = 'sshd'
@@ -69,6 +108,26 @@ $RecordFileSddl = 'O:BAD:PAI(A;;FA;;;BA)(A;;FA;;;SY)'
 # The DACL icacls leaves on the keys file (used to predict a pending record's after state).
 $TightDacl = 'D:PAI(A;;FA;;;BA)(A;;FA;;;SY)'
 $FixOut = New-Object System.Collections.ArrayList
+# Tune: fixed names, never taken from a record file (names and paths in a record are checked against these shapes).
+$ScExe = Join-Path $SysDir 'sc.exe'
+$SvcKey = 'HKLM:\SYSTEM\CurrentControlSet\Services'
+$DoKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization'
+$DoSettingKey = 'Registry::HKEY_USERS\S-1-5-20\Software\Microsoft\Windows\CurrentVersion\DeliveryOptimization\Settings'
+$EnvKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+$UsbSub = '2a737441-1930-4402-8d77-b2bebba308a3'; $UsbSet = '48e6b7a6-50f5-4782-a5d4-53bb8f07e226'
+$RunSources = @{
+  'HKCU|Run'   = @('HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run', 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run')
+  'HKLM|Run'   = @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run')
+  'HKLM|Run32' = @('HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32')
+}
+$DisabledFlag = '030000000000000000000000'   # StartupApproved: first byte odd = disabled (what Task Manager writes, time zeroed)
+$DotnetVars = [ordered]@{ telemetry = @('DOTNET_CLI_TELEMETRY_OPTOUT', '1'); nologo = @('DOTNET_NOLOGO', '1'); aspnetcert = @('DOTNET_GENERATE_ASPNET_CERTIFICATE', 'false') }
+$StartWord = @{ 0 = 'boot'; 1 = 'system'; 2 = 'auto'; 3 = 'demand'; 4 = 'disabled' }
+$GuidRe = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+$NameRe = '[A-Za-z0-9._()&+{}-][A-Za-z0-9 ._()&+{}-]{0,95}'
+$SvcRe = '[A-Za-z0-9_.-]{1,64}'
+$TaskPathRe = '\\(?:[A-Za-z0-9 ._()&+-]{1,64}\\){0,4}'
+$SidRe = 'S-1-5(?:-[0-9]{1,10}){1,14}'
 
 # ---------- output ----------
 
@@ -161,6 +220,12 @@ function Get-FixCommandShadow {
   foreach ($n in $FixCmdletNames) {
     $c = @(Microsoft.PowerShell.Core\Get-Command -Name $n -ErrorAction SilentlyContinue)
     if ($c.Count -eq 0 -or "$($c[0].CommandType)" -ne 'Cmdlet') { $bad += $n }
+  }
+  if ($FixSet -ne 'base') {   # module commands (only the tune fixes use them; looking them up loads their modules)
+    foreach ($n in $FixModuleCmds.Keys) {
+      $c = @(Microsoft.PowerShell.Core\Get-Command -Name $n -ErrorAction SilentlyContinue)
+      if ($c.Count -gt 0 -and (@('Function', 'Cmdlet') -notcontains "$($c[0].CommandType)" -or @($FixModuleCmds[$n]) -notcontains "$($c[0].ModuleName)")) { $bad += $n }
+    }
   }
   return $bad
 }
@@ -343,8 +408,158 @@ function Get-AuthKeySummary([string[]]$Lines) {
   return , $out
 }
 
-# The current state of what one fix touches, as a hashtable.
-function Get-FixState([string]$Id) {
+# ---------- tune: reads only ----------
+
+function Test-Vendor([string]$Name) { foreach ($p in $VendorPatterns) { if ($Name -match $p) { return $true } }; return $false }
+# Undo: the name still has its shape and matches the current list or an append-only retired entry.
+function Test-VendorUndo([string]$Name) { foreach ($p in @($VendorPatterns) + @($VendorRetiredPatterns)) { if ($Name -match $p) { return $true } }; return $false }
+function Get-HoursMin([string]$T) { $p = $T.Split(':'); return ([int]$p[0] * 60 + [int]$p[1]) }
+function Test-InWindow([int]$M, [string]$H) {
+  $w = $H.Split('-'); $a = Get-HoursMin $w[0]; $e = Get-HoursMin $w[1]
+  if ($a -lt $e) { return ($M -ge $a -and $M -lt $e) }
+  return ($M -ge $a -or $M -lt $e)
+}
+function Format-Min([int]$M) { return ('{0:00}:{1:00}:00' -f [math]::Floor($M / 60), ($M % 60)) }
+
+# A registry value: @{ Has = $true; Kind; Value }, @{ Has = $false } when the key or value is absent, @{ Has = $null } when unreadable.
+function Get-RegVal([string]$Path, [string]$Name) {
+  if (-not (Test-RegKey $Path)) { return @{ Has = $false } }
+  try {
+    $k = Get-Item -LiteralPath $Path -ErrorAction Stop
+    if (@($k.GetValueNames()) -notcontains $Name) { return @{ Has = $false } }
+    return @{ Has = $true; Kind = "$($k.GetValueKind($Name))"; Value = $k.GetValue($Name, $null, 'DoNotExpandEnvironmentNames') }
+  } catch { return @{ Has = $null } }
+}
+function Get-RegNames([string]$Path) { try { return @((Get-Item -LiteralPath $Path -ErrorAction Stop).GetValueNames() | Where-Object { $_ }) } catch { return @() } }
+function Test-RegKey([string]$Path) { return [bool](Test-Path -LiteralPath $Path) }
+function Get-UserSid { try { return "$([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)" } catch { return '' } }
+
+function Get-ActiveScheme {
+  $r = Invoke-Native $PowercfgExe @('/getactivescheme')
+  if ($r.Code -eq 0 -and "$($r.Out)" -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') { return $Matches[1].ToLowerInvariant() }
+  return $null
+}
+function Get-PowerAc([string]$Sub, [string]$Setting) { $r = Invoke-Native $PowercfgExe @('/q', 'SCHEME_CURRENT', $Sub, $Setting); if ($r.Code -eq 0) { return (Get-PowercfgAcSeconds $r.Out) }; return $null }
+function Test-UsbNic { try { return (@(Get-NetAdapter -Physical -ErrorAction Stop | Where-Object { "$($_.Status)" -eq 'Up' -and "$($_.PnPDeviceID)" -like 'USB\*' }).Count -gt 0) } catch { return $null } }
+# Every fixed physical disk is an SSD (MediaType Unspecified counts as unknown, never as SSD); $null when unreadable.
+function Test-FixAllSsd {
+  try { $d = @(Get-PhysicalDisk -ErrorAction Stop | Where-Object { @('USB', 'File Backed Virtual', 'Virtual') -notcontains "$($_.BusType)" }) } catch { return $null }
+  return ($d.Count -gt 0 -and @($d | Where-Object { "$($_.MediaType)" -ne 'SSD' }).Count -eq 0)
+}
+
+# A service's start type and delayed flag from the registry (PowerShell 5.1 cannot read Delayed Start).
+function Get-SvcState([string]$Name) {
+  if ($Name -cnotmatch "^$SvcRe$" -or -not (Test-RegKey "$SvcKey\$Name")) { return @{ Name = $Name; Exists = $false } }
+  $st = Get-RegVal "$SvcKey\$Name" 'Start'; $dl = Get-RegVal "$SvcKey\$Name" 'DelayedAutostart'; $dn = "$(@(Get-Service -Name $Name -ErrorAction SilentlyContinue | Select-Object -First 1).DisplayName)"
+  $start = $null; if ($st.Has -and $st.Kind -eq 'DWord' -and @(0, 1, 2, 3, 4) -contains [int]$st.Value) { $start = [int]$st.Value }
+  $del = 0; if ($dl.Has -and $dl.Kind -eq 'DWord' -and [int]$dl.Value -eq 1) { $del = 1 }
+  return @{ Name = $Name; Exists = ($null -ne $start); Start = $start; Delayed = $del; Display = $dn }
+}
+# delayed only matters for an automatic service: compared as 0 otherwise.
+function Get-SvcNorm([string]$T) { if ($T -cmatch '^start=([0-4]) delayed=[01] (name=.*)$' -and $Matches[1] -ne '2') { return "start=$($Matches[1]) delayed=0 $($Matches[2])" }; return $T }
+
+function Get-TaskState([string]$Path, [string]$Name) {
+  if ($Path -cnotmatch "^$TaskPathRe$" -or $Path -like '\Microsoft\*' -or $Name -cnotmatch "^$NameRe$") { return @{ Path = $Path; Name = $Name; Exists = $false } }
+  try { $t = @(Get-ScheduledTask -TaskPath $Path -TaskName $Name -ErrorAction Stop) } catch { return @{ Path = $Path; Name = $Name; Exists = $null } }
+  if ($t.Count -ne 1) { return @{ Path = $Path; Name = $Name; Exists = $null } }
+  return @{ Path = $Path; Name = $Name; Exists = $true; Enabled = ("$($t[0].State)" -ne 'Disabled') }
+}
+
+# A Run entry and its StartupApproved flag ('-' = no flag value, which means enabled).
+function Get-StartupState([string]$Target) {
+  $p = $Target.Split('|'); $src = $RunSources["$($p[0])|$($p[1])"]; $nm = ''; if ($p.Count -gt 2) { $nm = $p[2..($p.Count - 1)] -join '|' }
+  $s = @{ Hive = $p[0]; Key = $p[1]; Name = $nm; Sid = (Get-UserSid); RunHas = $false; Exe = ''; Flag = $null; Enabled = $false }
+  if (-not $src) { return $s }
+  $run = Get-RegVal $src[0] $s.Name; $s.RunHas = [bool]$run.Has
+  if ($run.Has) { $s.Exe = ("$($run.Value)" -replace '^\s*"?([^"]*?\.exe).*$', '$1') -replace '^.*\\', '' }
+  $f = Get-RegVal $src[1] $s.Name
+  if ($f.Has -eq $false) { $s.Flag = '-'; $s.Enabled = $true }
+  elseif ($f.Has -and $f.Kind -eq 'Binary' -and @($f.Value).Count -eq 12) { $s.Flag = (@($f.Value | ForEach-Object { '{0:x2}' -f $_ }) -join ''); $s.Enabled = ((@($f.Value)[0] -band 1) -eq 0) }
+  return $s
+}
+
+function ConvertTo-Minutes($V) { if ($V -is [TimeSpan]) { return [int]$V.TotalMinutes }; if ($V -is [DateTime]) { return [int]$V.TimeOfDay.TotalMinutes }; return $null }
+# Defender's running mode and scan schedule; $null when unreadable.
+function Get-DefenderInfo {
+  try { $st = Get-MpComputerStatus -ErrorAction Stop; $pr = Get-MpPreference -ErrorAction Stop } catch { return $null }
+  return @{ Mode = "$($st.AMRunningMode)"; Day = [int]$pr.ScanScheduleDay
+    Time = (ConvertTo-Minutes $pr.ScanScheduleTime); Quick = (ConvertTo-Minutes $pr.ScanScheduleQuickScanTime) }
+}
+function Get-DotnetState {
+  $s = @{ Readable = (Test-RegKey $EnvKey); Vals = [ordered]@{}; Odd = '' }
+  foreach ($k in $DotnetVars.Keys) {
+    $v = Get-RegVal $EnvKey $DotnetVars[$k][0]
+    if ($v.Has -eq $false) { $s.Vals[$k] = '-' }
+    elseif ($v.Has -and @('String', 'ExpandString') -contains $v.Kind -and "$($v.Value)" -match '^[A-Za-z0-9]{1,8}$') { $s.Vals[$k] = "$($v.Value)" }
+    else { $s.Vals[$k] = $null; $s.Odd = $DotnetVars[$k][0] }
+  }
+  return $s
+}
+function Get-DoState {
+  $p = Get-RegVal $DoKey 'DODownloadMode'
+  $s = @{ Value = $null; Kind = 'none'; Effective = $null }
+  if ($null -eq $p.Has) { $s.Kind = 'unreadable' } elseif ($p.Has) { $s.Kind = "$($p.Kind)"; if ($p.Kind -eq 'DWord') { $s.Value = ([long]$p.Value) -band 4294967295 } }
+  $u = Get-RegVal $DoSettingKey 'DownloadMode'; $ed = Get-RegVal 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' 'EditionID'
+  if ($null -ne $s.Value) { $s.Effective = $s.Value } elseif ($u.Has -and $u.Kind -eq 'DWord') { $s.Effective = [int]$u.Value } elseif ("$($ed.Value)" -like 'Core*') { $s.Effective = 3 } else { $s.Effective = 1 }
+  return $s
+}
+# The new scan time: an hour after the job window ends.
+function Get-ScanTarget([string]$H) { return ((Get-HoursMin $H.Split('-')[1]) + 60) % 1440 }
+
+# The things one fix id may change on this PC: @{ List = targets; Note = why none can be listed }. '' = the single
+# thing a fix touches; services, tasks, Run entries and folders are listed (vendor names from the curated list only).
+function Get-FixTargets([string]$Id) {
+  switch ($Id) {
+    'vendor.services' { return @{ List = @(Get-Service -ErrorAction SilentlyContinue | Where-Object { (Test-Vendor $_.Name) -or (Test-Vendor $_.DisplayName) } | ForEach-Object { "$($_.Name)" }); Note = '' } }
+    'sysmain' { return @{ List = @('SysMain'); Note = '' } }
+    'vendor.tasks' {
+      if (@(Get-Command -Name Get-ScheduledTask -ErrorAction SilentlyContinue).Count -eq 0) { return @{ List = @(); Note = 'the ScheduledTasks module is not available on this PC; skipped' } }
+      try { $all = @(Get-ScheduledTask -ErrorAction Stop) } catch {
+        if ("$($_.Exception.Message)" -match '(?i)denied|0x80070005') { return @{ List = @(); Note = 'the scheduled tasks could not be read (access denied); skipped' } }
+        return @{ List = @(); Note = 'the scheduled tasks could not be read; skipped' }
+      }
+      return @{ List = @($all | Where-Object { "$($_.TaskPath)" -notlike '\Microsoft\*' -and ((Test-Vendor $_.TaskName) -or (Test-Vendor "$($_.TaskPath)".Trim('\'))) } | ForEach-Object { "$($_.TaskPath)|$($_.TaskName)" }); Note = '' }
+    }
+    'startup.vendor' {
+      $l = @(); foreach ($k in @('HKCU|Run', 'HKLM|Run', 'HKLM|Run32')) { foreach ($n in (Get-RegNames $RunSources[$k][0])) { $l += "$k|$n" } }
+      return @{ List = @($l | Where-Object { $st = Get-StartupState $_; (Test-Vendor $st.Name) -or (Test-Vendor $st.Exe) }); Note = '' }
+    }
+  }
+  return @{ List = @(''); Note = '' }
+}
+# The target a parsed before state belongs to (undo reads the current state of that same thing).
+function Get-StateTarget([string]$Id, $B) {
+  switch ($Id) {
+    'startup.vendor' { return "$($B.Hive)|$($B.Key)|$($B.Name)" }
+    { @('vendor.services', 'sysmain') -contains $_ } { return $B.Name }
+    'vendor.tasks' { return "$($B.Path)|$($B.Name)" }
+  }
+  return ''
+}
+function Get-TargetLabel([string]$Id, $S) {
+  switch ($Id) {
+    'startup.vendor' { return " $($S.Hive) $($S.Key): $(Get-CleanName $S.Name)" }
+    { @('vendor.services', 'sysmain') -contains $_ } { return " $($S.Name)" }
+    'vendor.tasks' { return " $($S.Path)$($S.Name)" }
+  }
+  return ''
+}
+# Why undo leaves an item alone although the record is valid ('' = it may go ahead).
+function Get-UndoRefusal([string]$Id, $B) {
+  switch ($Id) {
+    'startup.vendor' {
+      if ($B.Hive -eq 'HKCU' -and $B.Sid -cne (Get-UserSid)) { return "this entry belongs to the account $($B.Sid); undo it as that account (HKCU is per account)" }
+      $run = Get-StartupState (Get-StateTarget $Id $B)
+      if (-not ((Test-VendorUndo $B.Name) -or ($run.RunHas -and (Test-VendorUndo $run.Exe)))) { return "$($B.Name) is not a known PC-maker name (and its Run entry is gone or runs something else)" }
+    }
+    'vendor.services' { $sv = Get-SvcState $B.Name; if (-not ((Test-VendorUndo $B.Name) -or (Test-VendorUndo $sv.Display))) { return "$($B.Name) is not a known PC-maker service" } }
+    'vendor.tasks' { if (-not ((Test-VendorUndo $B.Name) -or (Test-VendorUndo $B.Path.Trim('\')))) { return "$($B.Path)$($B.Name) is not a known PC-maker task" } }
+  }
+  return ''
+}
+
+# The current state of what one fix touches, as a hashtable. $Target names the service, task, Run entry or folder.
+function Get-FixState([string]$Id, [string]$Target = '') {
   switch ($Id) {
     { @('ssh.start', 'ssh.auto') -contains $_ } {
       $svc = Get-Service -Name $SshdName -ErrorAction SilentlyContinue
@@ -395,6 +610,19 @@ function Get-FixState([string]$Id) {
       } catch { }
       return $s
     }
+    'power.cpu' { return @{ Scheme = (Get-ActiveScheme); Max = (Get-PowerAc 'SUB_PROCESSOR' 'PROCTHROTTLEMAX'); Min = (Get-PowerAc 'SUB_PROCESSOR' 'PROCTHROTTLEMIN') } }
+    'power.usbsuspend' { return @{ Scheme = (Get-ActiveScheme); Usb = (Get-PowerAc $UsbSub $UsbSet); UsbNic = (Test-UsbNic) } }
+    'startup.vendor' { return (Get-StartupState $Target) }
+    'vendor.services' { return (Get-SvcState $Target) }
+    'sysmain' { $s = Get-SvcState 'SysMain'; $s.AllSsd = Test-FixAllSsd; return $s }
+    'vendor.tasks' { $p = $Target.Split('|'); return (Get-TaskState $p[0] (($p | Select-Object -Skip 1) -join '|')) }
+    'do.mode' { return (Get-DoState) }
+    'dotnet.env' { return (Get-DotnetState) }
+    'defender.scantime' {
+      $d = Get-DefenderInfo
+      if (-not $d) { return @{ Known = $false } }
+      return @{ Known = $true; Mode = $d.Mode; Day = $d.Day; Time = $d.Time; Quick = $d.Quick }
+    }
   }
   return @{}
 }
@@ -432,6 +660,38 @@ function ConvertFrom-StateText([string]$Id, [string]$Text) {
       if ($Text -cmatch "^dacl=($DaclRe)$") { return @{ Exists = $true; Reparse = $false; Dacl = $Matches[1] } }
       return $null
     }
+    'power.cpu' {
+      if ($Text -cmatch "^scheme=($GuidRe) max=([0-9]{1,3}) min=([0-9]{1,3})$") { $sc = $Matches[1]; $mx = [int]$Matches[2]; $mn = [int]$Matches[3]; if ($mx -le 100 -and $mn -le 100) { return @{ Scheme = $sc; Max = $mx; Min = $mn } } }
+      return $null
+    }
+    'power.usbsuspend' { if ($Text -cmatch "^scheme=($GuidRe) usbsuspend=([01])$") { return @{ Scheme = $Matches[1]; Usb = [int]$Matches[2]; UsbNic = $true } }; return $null }
+    'startup.vendor' {
+      if ($Text -cmatch "^hive=(HKCU|HKLM) key=(Run|Run32) sid=($SidRe) flag=(-|[0-9a-f]{24}) name=($NameRe)$" -and -not ($Matches[1] -eq 'HKCU' -and $Matches[2] -eq 'Run32')) {
+        return @{ Hive = $Matches[1]; Key = $Matches[2]; Sid = $Matches[3]; Flag = $Matches[4]; Name = $Matches[5]; RunHas = $true; Enabled = $true }
+      }
+      return $null
+    }
+    { @('vendor.services', 'sysmain') -contains $_ } {
+      if ($Text -cmatch "^start=([0-4]) delayed=([01]) name=($SvcRe)$" -and ($Id -ne 'sysmain' -or $Matches[3] -ceq 'SysMain')) { return @{ Exists = $true; Start = [int]$Matches[1]; Delayed = [int]$Matches[2]; Name = $Matches[3] } }
+      return $null
+    }
+    'vendor.tasks' {
+      if ($Text -cmatch "^enabled=([01]) path=($TaskPathRe) name=($NameRe)$" -and $Matches[2] -notlike '\Microsoft\*') { return @{ Exists = $true; Enabled = ($Matches[1] -eq '1'); Path = $Matches[2]; Name = $Matches[3] } }
+      return $null
+    }
+    'do.mode' {
+      if ($Text -cmatch '^value=([0-9]{1,10}) type=dword$') { $v = [long]$Matches[1]; if ($v -gt 4294967295) { return $null }; return @{ Value = $v; Kind = 'DWord' } }
+      if ($Text -ceq 'value=- type=none') { return @{ Value = $null; Kind = 'none' } }
+      return $null
+    }
+    'dotnet.env' {
+      if ($Text -cmatch '^telemetry=(-|[A-Za-z0-9]{1,8}) nologo=(-|[A-Za-z0-9]{1,8}) aspnetcert=(-|[A-Za-z0-9]{1,8})$') { return @{ Readable = $true; Odd = ''; Vals = [ordered]@{ telemetry = $Matches[1]; nologo = $Matches[2]; aspnetcert = $Matches[3] } } }
+      return $null
+    }
+    'defender.scantime' {
+      if ($Text -cmatch '^day=([0-8]) time=([0-9]{1,4}) quick=([0-9]{1,4})$') { $dy = [int]$Matches[1]; $tm = [int]$Matches[2]; $qk = [int]$Matches[3]; if ($tm -lt 1440 -and $qk -lt 1440) { return @{ Known = $true; Mode = 'Normal'; Day = $dy; Time = $tm; Quick = $qk } } }
+      return $null
+    }
   }
   return $null
 }
@@ -445,15 +705,26 @@ function Get-StateText([string]$Id, $S) {
     'longpaths.on' { if ($S.Kind -eq 'none') { $t = 'value=- type=none' } elseif ($S.Kind -eq 'DWord') { $t = "value=$($S.Value) type=dword" } }
     'git.longpaths' { if ($S.Git -and $S.Trusted) { $v = '-'; if ($null -ne $S.System) { $v = "$($S.System)" }; $t = "value=$v" } }
     'ssh.aclkeys' { if ($S.Exists -and -not $S.Reparse -and $S.Dacl) { $t = "dacl=$($S.Dacl)" } }
+    'power.cpu' { if ($S.Scheme -and $null -ne $S.Max -and $null -ne $S.Min) { $t = "scheme=$($S.Scheme) max=$($S.Max) min=$($S.Min)" } }
+    'power.usbsuspend' { if ($S.Scheme -and @(0, 1) -contains $S.Usb) { $t = "scheme=$($S.Scheme) usbsuspend=$($S.Usb)" } }
+    'startup.vendor' { if ($S.RunHas -and $S.Flag) { $t = "hive=$($S.Hive) key=$($S.Key) sid=$($S.Sid) flag=$($S.Flag) name=$($S.Name)" } }
+    { @('vendor.services', 'sysmain') -contains $_ } { if ($S.Exists) { $t = "start=$($S.Start) delayed=$($S.Delayed) name=$($S.Name)" } }
+    'vendor.tasks' { if ($S.Exists) { $t = "enabled=$([int][bool]$S.Enabled) path=$($S.Path) name=$($S.Name)" } }
+    'do.mode' { if ($S.Kind -eq 'none') { $t = 'value=- type=none' } elseif ($S.Kind -eq 'DWord') { $t = "value=$($S.Value) type=dword" } }
+    'dotnet.env' { if ($S.Readable -and -not $S.Odd) { $t = "telemetry=$($S.Vals.telemetry) nologo=$($S.Vals.nologo) aspnetcert=$($S.Vals.aspnetcert)" } }
+    'defender.scantime' { if ($S.Known -and $null -ne $S.Time) { $q = 0; if ($S.Quick) { $q = $S.Quick }; $t = "day=$($S.Day) time=$($S.Time) quick=$q" } }
   }
   if ($null -eq $t -or $null -eq (ConvertFrom-StateText $Id $t)) { return $null }
   return $t
 }
 
 # Two state texts of one fix describe the same state. For the keys file that is the protection flag and the explicit
-# entries: inherited entries are re-inherited by Windows, not restored literally.
+# entries: inherited entries are re-inherited by Windows, not restored literally. A Run entry's account (sid) is
+# checked on its own before undo; a service's delayed flag only counts for an automatic service.
 function Test-SameState([string]$Id, [string]$A, [string]$B) {
   if ($Id -eq 'ssh.aclkeys' -and $A.StartsWith('dacl=') -and $B.StartsWith('dacl=')) { return ((Get-DaclCore $A.Substring(5)) -ceq (Get-DaclCore $B.Substring(5))) }
+  if ($Id -eq 'startup.vendor') { return (($A -creplace ' sid=\S+', '') -ceq ($B -creplace ' sid=\S+', '')) }
+  if (@('vendor.services', 'sysmain') -contains $Id) { return ((Get-SvcNorm $A) -ceq (Get-SvcNorm $B)) }
   return ($A -ceq $B)
 }
 
@@ -488,6 +759,27 @@ function Get-FixNote([string]$Id, $S) {
         }
       }
     }
+    { @('power.cpu', 'power.usbsuspend') -contains $_ } { if (-not $S.Scheme) { return 'the active power scheme could not be read (powercfg /getactivescheme), so undo could not be tied to it' } }
+    'startup.vendor' {
+      if ($S.RunHas -and $S.Name -cnotmatch "^$NameRe$") { return "the entry name has characters this script does not record; use Task Manager > Startup apps" }
+      if ($S.RunHas -and -not $S.Flag) { return "$(Get-CleanName $S.Name): its StartupApproved value is not the usual 12-byte flag; use Task Manager > Startup apps" }
+    }
+    'vendor.services' { if (-not $S.Exists -and $S.Name -cnotmatch "^$SvcRe$") { return "$(Get-CleanName $S.Name): the service name has characters this script does not record; use services.msc" } }
+    'vendor.tasks' {
+      if ($null -eq $S.Exists) { return "$(Get-CleanName "$($S.Path)$($S.Name)") could not be read (access denied); skipped" }
+      if (-not $S.Exists) { return "$(Get-CleanName "$($S.Path)$($S.Name)"): the task path or name has characters this script does not record; use taskschd.msc" }
+    }
+    'do.mode' {
+      if ($S.Kind -eq 'DWord' -and $S.Value -ne 0) { return "DODownloadMode is $($S.Value) by a policy (managed by your organization or set by hand); not changed here" }
+      if (@('none', 'DWord') -notcontains $S.Kind) { return "DODownloadMode is of type $($S.Kind), not DWORD; not changed here" }
+    }
+    'dotnet.env' { if ($S.Odd) { return "$($S.Odd) has a value this script does not record (not 1-8 letters or digits); set the variables yourself" } }
+    'defender.scantime' {
+      if (-not $S.Known) { return 'Defender could not be read (Get-MpPreference)' }
+      if ($S.Mode -and $S.Mode -ne 'Normal') { return "Defender is not the active antivirus (AMRunningMode: $($S.Mode))" }
+      if (-not $FixHours) { return 'give the job window with -Hours HH:mm-HH:mm to check the scan time against it' }
+      if (Test-InWindow (Get-ScanTarget $FixHours) $FixHours) { return "the job window $FixHours leaves no hour after it outside the window; move the scan yourself" }
+    }
   }
   return ''
 }
@@ -502,6 +794,15 @@ function Test-FixNeeded([string]$Id, $S) {
     'longpaths.on' { return ($S.Value -ne 1) }
     'git.longpaths' { return ("$($S.System)" -notmatch '^(?i)true$' -and "$($S.Effective)" -notmatch '^(?i)true$') }
     'ssh.aclkeys' { return ($S.Ok -eq $false) }
+    'power.cpu' { return ($S.Max -lt 100 -or $S.Min -ge 100) }
+    'power.usbsuspend' { return ($S.Usb -eq 1 -and $S.UsbNic -eq $true) }
+    'startup.vendor' { return ($S.RunHas -and $S.Enabled -and ((Test-Vendor $S.Name) -or (Test-Vendor $S.Exe))) }
+    'vendor.services' { return ($S.Start -ne 4 -and ((Test-Vendor $S.Name) -or (Test-Vendor $S.Display))) }
+    'sysmain' { return (@(2, 3) -contains $S.Start -and $S.AllSsd -eq $true) }
+    'vendor.tasks' { return ($S.Enabled -and ((Test-Vendor $S.Name) -or (Test-Vendor $S.Path.Trim('\')))) }
+    'do.mode' { return ($S.Kind -eq 'none' -and @(1, 2, 3) -contains [int]$S.Effective) }
+    'dotnet.env' { return (@($S.Vals.Values | Where-Object { $_ -eq '-' }).Count -gt 0) }
+    'defender.scantime' { return ($S.Day -ne 8 -and ((Test-InWindow $S.Time $FixHours) -or ($S.Quick -gt 0 -and (Test-InWindow $S.Quick $FixHours)))) }
   }
   return $false
 }
@@ -514,6 +815,14 @@ function Test-FixDone([string]$Id, $S) {
     'longpaths.on' { return ($S.Value -eq 1) }
     'git.longpaths' { return ("$($S.System)" -match '^(?i)true$' -and "$($S.Effective)" -match '^(?i)true$') }
     'ssh.aclkeys' { return ($S.Ok -eq $true) }
+    'power.cpu' { return ($S.Max -eq 100 -and $S.Min -lt 100) }
+    'power.usbsuspend' { return ($S.Usb -eq 0) }
+    'startup.vendor' { return ($S.Flag -ceq $DisabledFlag) }
+    { @('vendor.services', 'sysmain') -contains $_ } { return ($S.Start -eq 4) }
+    'vendor.tasks' { return ($S.Exists -and -not $S.Enabled) }
+    'do.mode' { return ($S.Kind -eq 'DWord' -and $S.Value -eq 0) }
+    'dotnet.env' { return ($S.Readable -and @($S.Vals.Values | Where-Object { $_ -eq '-' -or $null -eq $_ }).Count -eq 0) }
+    'defender.scantime' { return ($S.Known -and -not (Test-InWindow $S.Time $FixHours) -and -not ($S.Quick -gt 0 -and (Test-InWindow $S.Quick $FixHours))) }
   }
   return $false
 }
@@ -527,10 +836,28 @@ function Get-ExpectedAfter([string]$Id, $S) {
     'longpaths.on' { return 'value=1 type=dword' }
     'git.longpaths' { return 'value=true' }
     'ssh.aclkeys' { return "dacl=$TightDacl" }
+    'power.cpu' { $mn = $S.Min; if ($mn -ge 100) { $mn = 5 }; return "scheme=$($S.Scheme) max=100 min=$mn" }
+    'power.usbsuspend' { return "scheme=$($S.Scheme) usbsuspend=0" }
+    'startup.vendor' { return "hive=$($S.Hive) key=$($S.Key) sid=$($S.Sid) flag=$DisabledFlag name=$($S.Name)" }
+    { @('vendor.services', 'sysmain') -contains $_ } { return "start=4 delayed=$($S.Delayed) name=$($S.Name)" }
+    'vendor.tasks' { return "enabled=0 path=$($S.Path) name=$($S.Name)" }
+    'do.mode' { return 'value=0 type=dword' }
+    'dotnet.env' { $t = @(foreach ($k in $DotnetVars.Keys) { $x = $S.Vals[$k]; if ($x -eq '-') { $x = $DotnetVars[$k][1] }; "$k=$x" }); return ($t -join ' ') }
+    'defender.scantime' {
+      $n = Get-ScanTarget $FixHours; $q = $S.Quick; if ($q -gt 0 -and (Test-InWindow $q $FixHours)) { $q = $n }
+      $tm = $S.Time; if (Test-InWindow $tm $FixHours) { $tm = $n }; return "day=$($S.Day) time=$tm quick=$q"
+    }
   }
   return 'unknown'
 }
 
+# A name from the PC (Run entry, service, task, driver, product) made safe to print: control and bidi characters
+# removed (any user process can write a Run entry), at most 80 characters.
+function Get-CleanName([string]$S) {
+  $c = [regex]::Replace("$S", '[\p{Cc}\p{Cf}\p{Cs}\u2028\u2029]', '')
+  if ($c.Length -gt 80) { $c = $c.Substring(0, 77) + '...' }
+  return $c
+}
 function Get-StateSummary([string]$Id, $S) {
   switch ($Id) {
     { @('ssh.start', 'ssh.auto') -contains $_ } { return "sshd is $($S.Status), start type $($S.StartType)" }
@@ -542,6 +869,25 @@ function Get-StateSummary([string]$Id, $S) {
       return "git $($S.Git), system config $f; core.longpaths there: $v; in effect: $e"
     }
     'ssh.aclkeys' { return "$KeysFile has the DACL $($S.Dacl)" }
+    'power.cpu' { return "power scheme $($S.Scheme): processor maximum $($S.Max)%, minimum $($S.Min)% on AC" }
+    'power.usbsuspend' { $o = 'off'; if ($S.Usb -eq 1) { $o = 'on' }; return "power scheme $($S.Scheme): USB selective suspend $o on AC; a network adapter in use is on USB" }
+    'startup.vendor' { $f = 'no flag (enabled)'; if ($S.Flag -ne '-') { $f = "flag $($S.Flag)" }; return "$($S.Hive) $($S.Key) entry '$(Get-CleanName $S.Name)' ($(Get-CleanName $S.Exe)), StartupApproved $f" }
+    { @('vendor.services', 'sysmain') -contains $_ } { $d = ''; if ($S.Start -eq 2 -and $S.Delayed -eq 1) { $d = ' (delayed)' }; return "service $($S.Name) ($(Get-CleanName $S.Display)): start $($StartWord[[int]$S.Start])$d" }
+    'vendor.tasks' { $e = 'disabled'; if ($S.Enabled) { $e = 'enabled' }; return "task $($S.Path)$($S.Name) is $e" }
+    'do.mode' { $p = 'not set'; if ($null -ne $S.Value) { $p = "$($S.Value)" }; return "policy DODownloadMode: $p; download mode in effect: $($S.Effective) (1 = LAN peers, 2 = group, 3 = internet peers)" }
+    'dotnet.env' { return (@($DotnetVars.Keys | ForEach-Object { "$($DotnetVars[$_][0])=$($S.Vals[$_])" }) -join ', ') + ' (- = not set) for the machine' }
+    'defender.scantime' { return "scheduled scan day $($S.Day) (0 = every day, 8 = never) at $(Format-Min $S.Time); daily quick scan at $(Format-Min ([int]$S.Quick)) (00:00:00 = none); job window $FixHours" }
+  }
+  return ''
+}
+
+# What to say after a tune change was applied and verified ('' = nothing).
+function Get-FixApplyNote([string]$Id, $S) {
+  switch ($Id) {
+    { @('vendor.services', 'sysmain') -contains $_ } { return "note: it stops at the next restart (or now: Stop-Service -Name $($S.Name))" }
+    'vendor.tasks' { return 'note: updaters often enable their tasks again when they update themselves; run the tune scan again later' }
+    'do.mode' { return 'note: Settings now shows "managed by your organization" for Delivery Optimization' }
+    'dotnet.env' { return 'note: new processes see it; restart sshd (Restart-Service sshd) so new SSH sessions do, and sign out and in for this desktop' }
   }
   return ''
 }
@@ -565,6 +911,32 @@ function Get-FixCommand([string]$Id, [string]$Mode, $B, $Cur) {
     'git.longpaths|undo' { if ($null -eq $B.System) { $cmd = @("$git config --system --unset core.longpaths") } else { $cmd = @("$git config --system core.longpaths $($B.System)") } }
     'ssh.aclkeys|apply' { $cmd = @("icacls.exe `"$KeysFile`" /inheritance:r /grant *S-1-5-32-544:F /grant *S-1-5-18:F") }
     'ssh.aclkeys|undo' { $cmd = @("`$a = Get-Acl -LiteralPath '$KeysFile'; `$a.SetSecurityDescriptorSddlForm('$(Get-RestoreDacl $B.Dacl)', 'Access'); Set-Acl -LiteralPath '$KeysFile' -AclObject `$a   (inherited entries come back from the folder)") }
+    'power.cpu|apply' {
+      if ($B.Max -lt 100) { $cmd += 'powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100' }; if ($B.Min -ge 100) { $cmd += 'powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMIN 5' }
+      $cmd += 'powercfg /setactive SCHEME_CURRENT'
+    }
+    'power.cpu|undo' { $cmd = @("powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX $($B.Max)", "powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMIN $($B.Min)", 'powercfg /setactive SCHEME_CURRENT') }
+    'power.usbsuspend|apply' { $cmd = @("powercfg /setacvalueindex SCHEME_CURRENT $UsbSub $UsbSet 0", 'powercfg /setactive SCHEME_CURRENT') }
+    'power.usbsuspend|undo' { $cmd = @("powercfg /setacvalueindex SCHEME_CURRENT $UsbSub $UsbSet $($B.Usb)", 'powercfg /setactive SCHEME_CURRENT') }
+    'startup.vendor|apply' { $cmd = @("Set-ItemProperty -LiteralPath '$($RunSources["$($B.Hive)|$($B.Key)"][1])' -Name '$($B.Name)' -Type Binary -Value 3,0,0,0,0,0,0,0,0,0,0,0   (as Task Manager > Disable; the key is created first when missing)") }
+    'startup.vendor|undo' {
+      $k = $RunSources["$($B.Hive)|$($B.Key)"][1]
+      if ($B.Flag -eq '-') { $cmd = @("Remove-ItemProperty -LiteralPath '$k' -Name '$($B.Name)'") } else { $cmd = @("Set-ItemProperty -LiteralPath '$k' -Name '$($B.Name)' -Type Binary -Value 0x$($B.Flag)") }
+    }
+    { @('vendor.services|apply', 'sysmain|apply') -contains $_ } { $cmd = @("sc.exe config $($B.Name) start= disabled") }
+    { @('vendor.services|undo', 'sysmain|undo') -contains $_ } { $w = $StartWord[[int]$B.Start]; if ($B.Start -eq 2 -and $B.Delayed -eq 1) { $w = 'delayed-auto' }; $cmd = @("sc.exe config $($B.Name) start= $w") }
+    'vendor.tasks|apply' { $cmd = @("Disable-ScheduledTask -TaskPath '$($B.Path)' -TaskName '$($B.Name)'") }
+    'vendor.tasks|undo' { if ($B.Enabled) { $cmd = @("Enable-ScheduledTask -TaskPath '$($B.Path)' -TaskName '$($B.Name)'") } }
+    'do.mode|apply' { $cmd = @("New-Item -Path '$DoKey' -Force   (only when the key is missing)", "Set-ItemProperty -LiteralPath '$DoKey' -Name DODownloadMode -Value 0 -Type DWord") }
+    'do.mode|undo' { if ($null -eq $B.Value) { $cmd = @("Remove-ItemProperty -LiteralPath '$DoKey' -Name DODownloadMode") } else { $cmd = @("Set-ItemProperty -LiteralPath '$DoKey' -Name DODownloadMode -Value $($B.Value) -Type DWord") } }
+    'dotnet.env|apply' { foreach ($k in $DotnetVars.Keys) { if ($B.Vals[$k] -eq '-') { $cmd += "Set-ItemProperty -LiteralPath '$EnvKey' -Name $($DotnetVars[$k][0]) -Value $($DotnetVars[$k][1]) -Type String" } } }
+    'dotnet.env|undo' { foreach ($k in $DotnetVars.Keys) { if ($B.Vals[$k] -eq '-') { $cmd += "Remove-ItemProperty -LiteralPath '$EnvKey' -Name $($DotnetVars[$k][0])" } } }
+    'defender.scantime|apply' {
+      $n = Format-Min (Get-ScanTarget $FixHours); $o = ''
+      if (Test-InWindow $B.Time $FixHours) { $o += " -ScanScheduleTime $n" }; if ($B.Quick -gt 0 -and (Test-InWindow $B.Quick $FixHours)) { $o += " -ScanScheduleQuickScanTime $n" }
+      $cmd = @("Set-MpPreference$o")
+    }
+    'defender.scantime|undo' { $cmd = @("Set-MpPreference -ScanScheduleTime $(Format-Min $B.Time) -ScanScheduleQuickScanTime $(Format-Min $B.Quick)") }
   }
   return $cmd
 }
@@ -602,6 +974,51 @@ function Invoke-FixChange([string]$Id, [string]$Mode, $B, $Cur) {
       $a.SetSecurityDescriptorSddlForm((Get-RestoreDacl $B.Dacl), [System.Security.AccessControl.AccessControlSections]::Access)
       Set-Acl -LiteralPath $KeysFile -AclObject $a -ErrorAction Stop
     }
+    'power.cpu|apply' {
+      if ($B.Max -lt 100) { Assert-Native (Invoke-Native $PowercfgExe @('/setacvalueindex', 'SCHEME_CURRENT', 'SUB_PROCESSOR', 'PROCTHROTTLEMAX', '100')) }
+      if ($B.Min -ge 100) { Assert-Native (Invoke-Native $PowercfgExe @('/setacvalueindex', 'SCHEME_CURRENT', 'SUB_PROCESSOR', 'PROCTHROTTLEMIN', '5')) }
+      Assert-Native (Invoke-Native $PowercfgExe @('/setactive', 'SCHEME_CURRENT'))
+    }
+    'power.cpu|undo' {
+      Assert-Native (Invoke-Native $PowercfgExe @('/setacvalueindex', 'SCHEME_CURRENT', 'SUB_PROCESSOR', 'PROCTHROTTLEMAX', "$([int]$B.Max)"))
+      Assert-Native (Invoke-Native $PowercfgExe @('/setacvalueindex', 'SCHEME_CURRENT', 'SUB_PROCESSOR', 'PROCTHROTTLEMIN', "$([int]$B.Min)"))
+      Assert-Native (Invoke-Native $PowercfgExe @('/setactive', 'SCHEME_CURRENT'))
+    }
+    'power.usbsuspend|apply' { Assert-Native (Invoke-Native $PowercfgExe @('/setacvalueindex', 'SCHEME_CURRENT', $UsbSub, $UsbSet, '0')); Assert-Native (Invoke-Native $PowercfgExe @('/setactive', 'SCHEME_CURRENT')) }
+    'power.usbsuspend|undo' { Assert-Native (Invoke-Native $PowercfgExe @('/setacvalueindex', 'SCHEME_CURRENT', $UsbSub, $UsbSet, "$([int]$B.Usb)")); Assert-Native (Invoke-Native $PowercfgExe @('/setactive', 'SCHEME_CURRENT')) }
+    'startup.vendor|apply' {
+      $k = $RunSources["$($B.Hive)|$($B.Key)"][1]
+      if (-not (Test-RegKey $k)) { [void](New-Item -Path $k -Force -ErrorAction Stop) }
+      Set-ItemProperty -LiteralPath $k -Name $B.Name -Value ([byte[]](3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) -Type Binary -ErrorAction Stop
+    }
+    'startup.vendor|undo' {
+      $k = $RunSources["$($B.Hive)|$($B.Key)"][1]
+      if ($B.Flag -eq '-') { Remove-ItemProperty -LiteralPath $k -Name $B.Name -ErrorAction Stop }
+      else { Set-ItemProperty -LiteralPath $k -Name $B.Name -Value ([byte[]]@(for ($i = 0; $i -lt 24; $i += 2) { [Convert]::ToByte($B.Flag.Substring($i, 2), 16) })) -Type Binary -ErrorAction Stop }
+    }
+    { @('vendor.services|apply', 'sysmain|apply') -contains $_ } { Assert-Native (Invoke-Native $ScExe @('config', $B.Name, 'start=', 'disabled')) }
+    { @('vendor.services|undo', 'sysmain|undo') -contains $_ } {
+      $w = $StartWord[[int]$B.Start]; if ($B.Start -eq 2 -and $B.Delayed -eq 1) { $w = 'delayed-auto' }
+      Assert-Native (Invoke-Native $ScExe @('config', $B.Name, 'start=', $w))
+    }
+    'vendor.tasks|apply' { [void](Disable-ScheduledTask -TaskPath $B.Path -TaskName $B.Name -ErrorAction Stop) }
+    'vendor.tasks|undo' { if ($B.Enabled) { [void](Enable-ScheduledTask -TaskPath $B.Path -TaskName $B.Name -ErrorAction Stop) } }
+    'do.mode|apply' {
+      if (-not (Test-RegKey $DoKey)) { [void](New-Item -Path $DoKey -Force -ErrorAction Stop) }
+      Set-ItemProperty -LiteralPath $DoKey -Name DODownloadMode -Value 0 -Type DWord -ErrorAction Stop
+    }
+    'do.mode|undo' {
+      if ($null -eq $B.Value) { Remove-ItemProperty -LiteralPath $DoKey -Name DODownloadMode -ErrorAction Stop }
+      else { Set-ItemProperty -LiteralPath $DoKey -Name DODownloadMode -Value ([long]$B.Value) -Type DWord -ErrorAction Stop }
+    }
+    'dotnet.env|apply' { foreach ($k in $DotnetVars.Keys) { if ($B.Vals[$k] -eq '-') { Set-ItemProperty -LiteralPath $EnvKey -Name $DotnetVars[$k][0] -Value $DotnetVars[$k][1] -Type String -ErrorAction Stop } } }
+    'dotnet.env|undo' { foreach ($k in $DotnetVars.Keys) { if ($B.Vals[$k] -eq '-') { Remove-ItemProperty -LiteralPath $EnvKey -Name $DotnetVars[$k][0] -ErrorAction Stop } } }
+    'defender.scantime|apply' {
+      $n = Format-Min (Get-ScanTarget $FixHours)
+      if (Test-InWindow $B.Time $FixHours) { Set-MpPreference -ScanScheduleTime $n -ErrorAction Stop }
+      if ($B.Quick -gt 0 -and (Test-InWindow $B.Quick $FixHours)) { Set-MpPreference -ScanScheduleQuickScanTime $n -ErrorAction Stop }
+    }
+    'defender.scantime|undo' { Set-MpPreference -ScanScheduleTime (Format-Min $B.Time) -ScanScheduleQuickScanTime (Format-Min $B.Quick) -ErrorAction Stop }
     default { throw "no fix $Id ($Mode)" }
   }
 }
@@ -780,7 +1197,7 @@ function Read-FixRecord([string]$Path) {
 
 function Show-Fix([string]$Id, $S) {
   Write-FixLine ''
-  Write-FixLine "$Id  (check $($FixInfo[$Id][0])): $($FixInfo[$Id][1])" 'Yellow'
+  Write-FixLine "$Id$(Get-TargetLabel $Id $S)  (check $($FixInfo[$Id][0])): $($FixInfo[$Id][1])" 'Yellow'
   Write-FixLine "  now:     $(Get-StateSummary $Id $S)"
   if ($Id -eq 'ssh.aclkeys') {
     Write-FixLine "  keys:    $(@($S.Keys).Count) line(s) in the file. Review them: after this fix sshd trusts every one of them for administrator logins."
@@ -798,9 +1215,14 @@ function Invoke-FixApply([bool]$Dry) {
   if ($Dry) { Write-FixLine "lanq-makeready-fix $ToolVersion dry run: shows each applicable fix and its undo; nothing is changed" }
   else { Write-FixLine "lanq-makeready-fix ${ToolVersion}: changes only what you confirm, one fix at a time (default no)" }
   $rec = $null; $failed = 0; $shown = 0
+  $ids = $BaseFixIds
+  if ($FixSet -eq 'tune') { $ids = $TuneFixIds; Write-FixLine 'Tune fixes (lanq-makeready-tune.ps1 reports these; none of them changes whether the PC is worker-ready).' }
   if ($elev -and -not $Dry) { $why = Get-FixRecordDirProblem; if ($why) { Write-FixErr "lanq-makeready-fix: $why"; return 1 } }
-  foreach ($id in $FixIds) {
-    $s = Get-FixState $id
+  foreach ($id in $ids) {
+   $tg = Get-FixTargets $id
+   if ($tg.Note) { Write-FixLine ''; Write-FixLine "$id  (check $($FixInfo[$id][0])): not offered: $($tg.Note)" 'DarkYellow'; continue }
+   foreach ($target in @($tg.List)) {
+    $s = Get-FixState $id $target
     $note = Get-FixNote $id $s
     if ($note) { Write-FixLine ''; Write-FixLine "$id  (check $($FixInfo[$id][0])): not offered: $note" 'DarkYellow'; continue }
     if (-not (Test-FixNeeded $id $s)) { continue }
@@ -808,8 +1230,10 @@ function Invoke-FixApply([bool]$Dry) {
     Show-Fix $id $s
     if (-not $elev) { Write-FixLine '  skipped: needs an elevated PowerShell (Run as administrator); this script never elevates itself' 'DarkYellow'; continue }
     if ($Dry) { Write-FixLine '  dry run: not applied'; continue }
+    if ($rec -and $rec.Items.Count -ge 64) { Write-FixLine '  not offered: this session''s undo record is full (64 changes); run the script again for the rest' 'DarkYellow'; continue }
     if (-not (Confirm-Fix)) { Write-FixLine '  not applied'; continue }
-    $s2 = Get-FixState $id   # the precondition, re-read just before the change
+    $s2 = Get-FixState $id $target   # the precondition, re-read just before the change
+    $n2 = Get-FixNote $id $s2; if ($n2) { Write-FixLine "  not applied: $n2" 'DarkYellow'; continue }
     if (-not (Test-FixNeeded $id $s2)) { Write-FixLine '  no longer needed (the state changed); nothing done'; continue }
     $before = Get-StateText $id $s2
     if ($before -cne (Get-StateText $id $s)) { Write-FixLine '  the state changed since it was shown; nothing done (run the script again)' 'DarkYellow'; continue }
@@ -819,15 +1243,17 @@ function Invoke-FixApply([bool]$Dry) {
     if (-not (Save-FixRecord $rec)) { Write-FixErr '  nothing changed: the undo record could not be written'; $rec.Items.RemoveAt($rec.Items.Count - 1); return 1 }
     $err = ''
     try { Invoke-FixChange $id 'apply' $s2 $s2 } catch { $err = "$($_.Exception.Message)" }
-    $s3 = Get-FixState $id
+    $s3 = Get-FixState $id $target
     $after = Get-StateText $id $s3; if (-not $after) { $after = 'unknown' }
     $item.after = $after; $item.time = Get-UtcStamp
     if (-not $err -and (Test-FixDone $id $s3)) { $item.status = 'applied'; Write-FixLine '  applied and verified' 'Green' }
     else { $item.status = 'failed'; $failed++; Write-FixLine "  FAILED: $err (now: $(Get-StateSummary $id $s3)); recorded, so -Undo can put back what changed" 'Red' }
     if (-not (Save-FixRecord $rec)) { $failed++; Write-FixErr "  the record could not be updated after the change; it still says pending: $($rec.Path)" }
     if ($id -eq 'longpaths.on' -and $item.status -eq 'applied') { Write-FixLine '  note: programs started from now on see it; reboot so that every program does' }
+    $an = Get-FixApplyNote $id $s2; if ($an -and $item.status -eq 'applied') { Write-FixLine "  $an" }
+   }
   }
-  if ($shown -eq 0) { Write-FixLine "Nothing to fix here (fixes: $($FixIds -join ', '))." }
+  if ($shown -eq 0) { Write-FixLine "Nothing to fix here (fixes: $($ids -join ', '))." }
   elseif (-not $elev) { Write-FixLine ''; Write-FixLine 'To apply, open PowerShell as administrator at this PC and run this script again.' }
   if ($rec) { Write-FixLine ''; Write-FixLine "Undo record: $($rec.Path)"; Write-FixLine "To undo:     lanq-makeready-fix.ps1 -Undo `"$($rec.Path)`"" }
   if ($failed -gt 0) { return 1 }
@@ -855,10 +1281,12 @@ function Invoke-FixUndo([string]$Path) {
   $todo = @($rec.Items | Where-Object { @('applied', 'failed', 'pending') -contains $_.status } | Sort-Object -Property { $_.seq } -Descending)
   if ($todo.Count -eq 0) { Write-FixLine 'Nothing to undo in this record.'; return 0 }
   foreach ($it in $todo) {
-    $id = $it.id; $b = ConvertFrom-StateText $id $it.before
+    $id = $it.id; $b = ConvertFrom-StateText $id $it.before; $tgt = Get-StateTarget $id $b
     Write-FixLine ''
-    Write-FixLine "undo $id  (check $($FixInfo[$id][0])), $($it.status) at $($it.time)" 'Yellow'
-    $cur = Get-FixState $id; $ct = Get-StateText $id $cur
+    Write-FixLine "undo $id$(Get-TargetLabel $id $b)  (check $($FixInfo[$id][0])), $($it.status) at $($it.time)" 'Yellow'
+    $no = Get-UndoRefusal $id $b
+    if ($no) { Write-FixLine "  left alone: $no" 'DarkYellow'; continue }
+    $cur = Get-FixState $id $tgt; $ct = Get-StateText $id $cur
     Write-FixLine "  before the fix: $($it.before)"
     Write-FixLine "  after the fix:  $($it.after)"
     Write-FixLine "  now:            $ct"
@@ -875,12 +1303,12 @@ function Invoke-FixUndo([string]$Path) {
       Write-FixLine '  Every account above that may change the file could add keys again, and sshd ignores the file while others may change it: administrator key logins stop working.' 'Yellow'
     }
     if (-not (Confirm-Fix)) { Write-FixLine '  left as it is'; continue }
-    $cur2 = Get-FixState $id
+    $cur2 = Get-FixState $id $tgt
     $ct2 = Get-StateText $id $cur2
     if (-not $ct2 -or -not (Test-SameState $id $ct2 $it.after)) { Write-FixLine '  changed since; left alone' 'DarkYellow'; continue }
     $err = ''
     try { Invoke-FixChange $id 'undo' $b $cur2 } catch { $err = "$($_.Exception.Message)" }
-    $nowState = Get-FixState $id
+    $nowState = Get-FixState $id $tgt
     $now = Get-StateText $id $nowState
     if ($id -eq 'ssh.aclkeys' -and $nowState.Dacl) {
       $lost = Test-SafeRestoreDacl $nowState.Dacl
@@ -917,7 +1345,8 @@ function Show-FixRecords {
   return 0
 }
 
-function Invoke-FixMain([string]$Mode = 'apply', [string]$UndoPath = '', [bool]$FromFile = $false) {
+function Invoke-FixMain([string]$Mode = 'apply', [string]$UndoPath = '', [bool]$FromFile = $false, [string]$Set = 'base', [string]$Hours = '') {
+  $script:FixSet = $Set; $script:FixHours = $Hours
   $why = Get-FixRefusal $Mode $FromFile
   if ($why) { Write-FixErr "lanq-makeready-fix: $why"; return 3 }
   if ($Mode -eq 'list') { return (Show-FixRecords) }
@@ -925,25 +1354,36 @@ function Invoke-FixMain([string]$Mode = 'apply', [string]$UndoPath = '', [bool]$
   return (Invoke-FixApply ($Mode -eq 'dry'))
 }
 
-# -Undo <file> is read from the remaining arguments, so a missing file name is a usage error (exit 2), not a binder error.
-# Returns @{ Path; Rest; Error }.
+# -Undo <file> and -Hours <window> are read from the remaining arguments, so a missing value is a usage error
+# (exit 2), not a binder error. Returns @{ Path; Hours; Rest; Error }.
 function Get-UndoArg([string[]]$Rest) {
-  $out = @(); $path = $null; $err = ''; $a = @($Rest | Where-Object { $null -ne $_ -and "$_" -ne '' })   # PowerShell 7 can hand over one empty element
+  $out = @(); $seen = @{ undo = $null; hours = $null }; $err = ''; $a = @($Rest | Where-Object { $null -ne $_ -and "$_" -ne '' })   # PowerShell 7 can hand over one empty element
+  $what = @{ undo = 'a record file'; hours = 'a window like 22:00-07:00' }
   for ($i = 0; $i -lt $a.Count; $i++) {
-    if ($a[$i] -match '^-(?i:undo)$') {
-      if ($null -ne $path) { $err = '-Undo given twice' }
-      elseif ($i + 1 -ge $a.Count -or "$($a[$i + 1])" -eq '' -or "$($a[$i + 1])".StartsWith('-')) { $err = '-Undo needs a record file' }
-      else { $path = $a[$i + 1]; $i++ }
+    if ($a[$i] -match '^-(?i:(undo|hours))$') {
+      $k = $Matches[1].ToLowerInvariant(); $nm = @{ undo = '-Undo'; hours = '-Hours' }[$k]
+      if ($null -ne $seen[$k]) { $err = "$nm given twice" }
+      elseif ($i + 1 -ge $a.Count -or "$($a[$i + 1])" -eq '' -or "$($a[$i + 1])".StartsWith('-')) { $err = "$nm needs $($what[$k])" }
+      else { $seen[$k] = $a[$i + 1]; $i++ }
     } else { $out += $a[$i] }
   }
-  return @{ Path = $path; Rest = $out; Error = $err }
+  return @{ Path = $seen.undo; Hours = $seen.hours; Rest = $out; Error = $err }
+}
+
+# '' when the tune arguments are usable, else the usage error.
+function Get-TuneArgError($Ua, [bool]$TuneOn, [string]$Mode) {
+  if (-not $TuneOn -and $null -ne $Ua.Hours) { return '-Hours goes with -Tune' }
+  if ($TuneOn -and @('undo', 'list') -contains $Mode) { return '-Tune goes with -WhatIf or alone; -Undo and -List handle every record' }
+  if ($null -ne $Ua.Hours -and ($Ua.Hours -notmatch '^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$' -or $Ua.Hours.Split('-')[0] -eq $Ua.Hours.Split('-')[1])) { return '-Hours must look like 00:00-07:00 (HH:mm-HH:mm, start different from end)' }
+  return ''
 }
 
 # ---------- main ----------
 
 if ($env:LANQ_MAKEREADY_FIX_LIB -eq '1' -and $MyInvocation.InvocationName -eq '.') { return }
-$Usage = 'usage: lanq-makeready-fix.ps1 [-WhatIf | -Undo <record file> | -List]   (no -Yes or -Force: every change is confirmed one by one)'
+$Usage = 'usage: lanq-makeready-fix.ps1 [-WhatIf | -Undo <record file> | -List] [-Tune [-Hours HH:mm-HH:mm]]   (no -Yes or -Force: every change is confirmed one by one)'
 $ua = Get-UndoArg $Extra
+if (@($ua.Rest) -match '^-(?i:DefenderExclusions)$') { [Console]::Error.WriteLine('lanq-makeready-fix: Defender exclusions are not automated; see the tune scan''s advice and docs/TUNE.md (nothing was changed)'); exit 2 }
 if ($ua.Error) { [Console]::Error.WriteLine("lanq-makeready-fix: $($ua.Error)"); [Console]::Error.WriteLine($Usage); exit 2 }
 if (@($ua.Rest).Count -gt 0) { [Console]::Error.WriteLine("lanq-makeready-fix: unknown argument(s): $(@($ua.Rest) -join ' ')"); [Console]::Error.WriteLine($Usage); exit 2 }
 if ($Help) { Write-Host $Usage; exit 0 }
@@ -952,8 +1392,12 @@ if ($WhatIf) { $mode = 'dry'; $n++ }
 if ($null -ne $ua.Path) { $mode = 'undo'; $n++ }
 if ($List) { $mode = 'list'; $n++ }
 if ($n -gt 1) { [Console]::Error.WriteLine('lanq-makeready-fix: use only one of -WhatIf, -Undo and -List'); exit 2 }
+$te = Get-TuneArgError $ua ([bool]$Tune) $mode
+if ($te) { [Console]::Error.WriteLine("lanq-makeready-fix: $te"); [Console]::Error.WriteLine($Usage); exit 2 }
+$set = 'base'; if ($Tune) { $set = 'tune' }
+$FixSet = $set
 $fromFile = Test-FixFromFile $FixInvocation
 $why = Get-FixRefusal $mode $fromFile
 if ($why) { [Console]::Error.WriteLine("lanq-makeready-fix: $why"); exit 3 }
 if ($env:LANQ_MAKEREADY_FIX_LIB -eq '1') { [Console]::Error.WriteLine('lanq-makeready-fix: LANQ_MAKEREADY_FIX_LIB=1 is only for tests that dot-source this file; unset it.'); exit 2 }
-exit (Invoke-FixMain -Mode $mode -UndoPath "$($ua.Path)" -FromFile $fromFile)
+exit (Invoke-FixMain -Mode $mode -UndoPath "$($ua.Path)" -FromFile $fromFile -Set $set -Hours "$($ua.Hours)")

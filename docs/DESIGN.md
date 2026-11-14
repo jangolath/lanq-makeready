@@ -1,4 +1,4 @@
-# lanq-makeready — design (v0.4)
+# lanq-makeready — design (v0.5)
 
 Name approved by the owner 2026-11-08 (formerly the working name lanq-ready).
 
@@ -19,6 +19,7 @@ Then it prints a ready-to-paste `machines.yml` entry for LanQueue, and optionall
 - **Read-only.** The scanner never installs, uninstalls, updates, changes settings, disables services, edits the registry,
   or touches drivers. Every fix is printed as advice (often an exact command the user may choose to run themselves).
   The scanner has no `--fix` flag. Fixes live in separate scripts with their own rules (see "Fix mode (0.4)").
+  The tune scan (0.5) is a second read-only script with the same rules (see "Tune scan and tune fixes (0.5)").
 - **No admin required.** Checks that need admin print `skipped (needs admin)`. Running elevated is allowed and just
   fills in those rows.
 - **No network calls.** No telemetry, no update check, no downloads. (Exception: none.) It does not resolve or ping anything.
@@ -44,11 +45,15 @@ lanq-makeready/
   lanq-makeready.sh           # Linux + macOS (POSIX sh)
   lanq-makeready-fix.ps1      # fix mode, Windows (0.4)
   lanq-makeready-fix.sh       # fix mode, Linux with systemd (0.4)
+  lanq-makeready-tune.ps1     # tune scan, Windows (0.5), read-only
+  lanq-makeready-tune.sh      # tune scan, Linux (0.5), read-only
   schema/report.v1.json   # JSON Schema for --json output
+  schema/tune.v1.json     # JSON Schema for the tune scan's --json output
   schema/fix-record.v1.json   # JSON Schema for the fix undo record
   tests/                  # see Testing
   docs/DESIGN.md          # this file
   docs/FIX-RECORD.md      # the undo record, explained
+  docs/TUNE.md            # the tune checks, the tune fixes and the tune JSON
   README.md               # how to download, verify (SHA256 + gh attestation verify), run; never irm|iex
   LICENSE                 # MIT (same as LanQueue)
 ```
@@ -206,7 +211,7 @@ With `--redact`: hostname, user and any absolute user-profile paths replaced by 
 - **Released together.** Same tag, listed in `SHA256SUMS`, attested. Not embedded in LanQueue: `lanq` never copies or
   runs the fix script.
 - **Local only, confirm each.** It refuses to run over SSH, from stdin or a string, or without an interactive console
-  (exit 3). There is no `--yes`. Each fix is shown as check, current state, exact command and undo, then
+  (exit 3). On Linux, `--tune` also refuses to apply (and `--undo` refuses tune items) inside a container (Docker, Podman, LXC, systemd-nspawn; WSL 2 counts as a host; exit 3); `--tune --dry-run` is allowed there. There is no `--yes`. Each fix is shown as check, current state, exact command and undo, then
   `Apply? [y/N]`; the default is no. It never elevates itself: without admin or root each fix is skipped with a note.
 - **Short, reversible fix list (v1).** Windows: `ssh.start`, `ssh.auto`, `power.sleep`, `longpaths.on`,
   `git.longpaths`, `ssh.aclkeys`. Linux: `ssh.start`, `power.sleep`. Left out on purpose: installing OpenSSH, firewall
@@ -387,6 +392,60 @@ that already runs as admin or root on the PC.
   `RUNNER_ENVIRONMENT=github-hosted` and `LANQ_REAL_FIX_OK=disposable-runner`; that gate guards against accidents and is
   not a security boundary. On a runner image without sshd, Windows `ssh.start` and `ssh.auto` are covered by the fake
   tests only.
+
+## Tune scan and tune fixes (0.5)
+
+### Why a separate script
+
+- The tune results must never change readiness. In the scanner they would flow into `checks[]`, the verdicts, the
+  next steps and LanQueue's view of the report. A separate script and schema (`lanq-makeready-tune/v1`) keep them out.
+- The scanner's own budget: it is close to its line cap, and its parameter list and read-only guard are pinned by
+  tests. The new probes (scheduled tasks, Defender preferences, storage, network adapters) would widen its allow-list.
+- LanQueue runs each remote scan with a time limit; the tune scan has its own 90-second deadline, so a second run fits.
+
+### Shape
+
+- Same structure as the scanner: probes fill a facts table, pure functions turn facts into items, and the output is
+  text or JSON. Tests feed fixtures to the pure functions (`tests/tune.ps1`).
+- Statuses OK, INFO, WARN, SKIP only. Exit code 0 always (2 for bad arguments). `fixId` only on INFO and WARN.
+- Time: a stopwatch for the whole run (90 s) and a budget per probe. Slow probes run in a separate runspace with
+  `WaitOne(budget)`; on timeout the runspace is stopped, the probe's checks say `SKIP` "time budget", and the process
+  exits with `[Environment]::Exit` so a hung pipeline cannot hold it. Executables (`powercfg /q`, `fsutil behavior
+  query`) run with closed stdin and a deadline. Driver dates come from `Get-NetAdapter` and the Class registry, never
+  `Win32_PnPSignedDriver` (30 to 90 s or more), within 15 s.
+- Read-only by construction: the guard test allows a fixed list of read-only commands and member calls, bans
+  `Get-ItemProperty` outright (registry values are read with `Get-Item` and the key object), allows the literal
+  `DefaultPassword` only as the right side of `-contains` (its existence is tested with `GetValueNames()`, its value is
+  never read), and allows `Invoke-Exe` only for `powercfg /q` and `fsutil behavior query`. Injected mutants prove the
+  guard catches each banned form. Line cap 800.
+- Defender exclusions are compared with work_root, the NuGet packages and temp inside the probe's runspace; only a
+  scanned/excluded flag per folder comes out, so the list itself can never be printed or serialized.
+- Redaction is on values (host, user, profile folder, at token boundaries) after the items are built, before output.
+
+### Tune fixes
+
+- In the existing fix script, behind `-Tune`, with the same
+  refusals, confirmation, record and undo. Fix ids are additive under `lanq-makeready-fix/v1`; a 0.4 script rejects a
+  record with a tune id ("unknown fix id", exit 2).
+- One fix id may touch several things (services, tasks, Run entries). `Get-FixTargets` lists them,
+  `Get-FixState` reads one, and the target is part of the recorded state, so undo knows what to read again. Each target
+  is asked separately; a record holds at most 64 items, after which nothing more is offered in that session.
+- Names in a record (service, task, Run entry) must match a fixed shape, and undo re-checks them against the curated
+  list plus an append-only list of retired entries (`$VendorRetiredPatterns`), so a record can neither name an
+  arbitrary service nor be orphaned by a later list change. Tasks under `\Microsoft\` are rejected by shape.
+- StartupApproved: no value means enabled; `Run32` (WOW6432Node) has its own key; undo deletes a value that was absent.
+  The account SID is recorded and an HKCU item is undone only by that account.
+- Services: Start and DelayedAutostart come from the registry (PowerShell 5.1 cannot read Delayed Start) and are put
+  back with `sc.exe config start=` (`delayed-auto` when needed). The delayed flag is compared only for automatic
+  services.
+- Defender exclusions are not automated: whether a folder can be trusted (who can write to it, where it really is, what runs from it) is hard to verify safely from a script, and a wrong exclusion silently turns off scanning. An earlier draft of 0.5.0 had an exclusion fix with an allow-list, ACL, drive and final-path checks; review
+  kept finding ways around it, so it was removed before release. `-DefenderExclusions` exits 2, and the tune scan
+  gives the manual procedure. The scan-time fix (`defender.scantime`) stays; it is not an exclusion.
+- The commands that come from Windows modules (ScheduledTasks, Defender, Storage, NetAdapter) are CDXML functions, not
+  cmdlets; the shadow check requires each to come from its module, so a function or alias of the same name refuses the
+  run (only in tune mode, since looking them up loads the modules).
+- Real apply and undo on a disposable Windows runner cover `power.cpu`, `do.mode`, `sysmain` (the SSD test is replaced
+  there, since runner disks report no media type) and `defender.scantime`. The others are covered by fake-world tests.
 
 ## Later (not v0.1)
 

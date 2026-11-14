@@ -52,7 +52,7 @@ Each item:
 | Field | Meaning |
 |---|---|
 | `seq` | 1 to 999, unique: the order the changes were made. Undo goes from the highest down. |
-| `id` | the fix id. Windows: `ssh.start`, `ssh.auto`, `power.sleep`, `longpaths.on`, `git.longpaths`, `ssh.aclkeys`. Linux: `ssh.start`, `power.sleep`. |
+| `id` | the fix id. Windows: `ssh.start`, `ssh.auto`, `power.sleep`, `longpaths.on`, `git.longpaths`, `ssh.aclkeys`, and the tune fixes (0.5, `-Tune`) `power.cpu`, `power.usbsuspend`, `startup.vendor`, `vendor.services`, `vendor.tasks`, `sysmain`, `do.mode`, `dotnet.env`, `defender.scantime`. Linux: `ssh.start`, `power.sleep`, and with `--tune` also `sysctl.tune`, `journald.cap`, `services.unused` and `fstrim.timer`. Ids are additive: a script that does not know an id rejects the whole record ("unknown fix id", exit 2), so a 0.4 script refuses a 0.5 record with a tune id. |
 | `status` | `pending`, `applied`, `failed`, `undone` or `skipped` (below). |
 | `time` | UTC time of the last status change. |
 | `before` | the state before the change, in the fixed shape for the id (below). Undo puts this back. |
@@ -60,7 +60,7 @@ Each item:
 | `after` | the state found after the change, same shape as `before`, or `unknown` when it could not be read. While `pending` it holds the state the change is expected to leave. Undo acts only when the current state equals it. |
 
 There are no other fields, and no field may be missing. The file is plain ASCII (other characters are written as `?`).
-Windows accepts up to 256 KB, Linux up to 64 KB.
+Windows accepts up to 256 KB, Linux up to 64 KB. On Linux `command` may be up to 510 characters.
 
 ## Statuses
 
@@ -96,8 +96,20 @@ invalid.
 | windows : `longpaths.on` | `value=<n> type=dword` or `value=- type=none` | `LongPathsEnabled` under `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem`; `none` = absent. A value of another type is never offered. |
 | windows : `git.longpaths` | `value=(<word>\|-)` | `git config --system core.longpaths`, 1-16 letters or digits; `-` = unset |
 | windows : `ssh.aclkeys` | `dacl=D:<flags>(<ace>)...` | the DACL of `%ProgramData%\ssh\administrators_authorized_keys` in SDDL: allow (`A`) and deny (`D`) entries only, at most 64. On undo a `before` DACL is also rejected unless it has entries, no deny entry, and full control for both Administrators and SYSTEM; when it is protected, the same is required of its explicit entries alone, since that is what undo writes. After the undo the file's DACL is read again, and the undo fails loudly if Administrators or SYSTEM lost full control. |
+| windows : `power.cpu` | `scheme=<guid> max=<0-100> min=<0-100>` | the active plan and its AC processor maximum and minimum state (`powercfg /q SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX/MIN`). Undo acts only while the same plan is active. |
+| windows : `power.usbsuspend` | `scheme=<guid> usbsuspend=(0\|1)` | the active plan and its AC USB selective suspend setting |
+| windows : `startup.vendor` | `hive=(HKCU\|HKLM) key=(Run\|Run32) sid=<S-1-5-...> flag=(-\|<24 hex>) name=<name>` | the entry's StartupApproved value (12 bytes; `-` = no value, which means enabled). `Run32` is the WOW6432Node Run key and exists only for HKLM. `sid` is the account that ran the fix: undo of an HKCU entry is refused under another account ("left alone"). It is compared on its own, not as part of the state. The name is 1-96 of letters, digits, space and `. _ ( ) & + { } -`, and must still match the curated list (or its append-only retired list), checked by name or, for a Run entry, by the program it runs. |
+| windows : `vendor.services`, `sysmain` | `start=[0-4] delayed=(0\|1) name=<service>` | the service's `Start` and `DelayedAutostart` registry values; `delayed` counts only when `start=2`. Undo runs `sc.exe config <service> start= boot\|system\|auto\|demand\|disabled` (`delayed-auto` for start=2 delayed=1). The name is 1-64 of letters, digits and `_ . -`; for `sysmain` it is `SysMain`; a vendor service name (or its display name) must still match the curated list. |
+| windows : `vendor.tasks` | `enabled=(0\|1) path=\<folder>\...\ name=<name>` | a scheduled task; a path under `\Microsoft\` is rejected. Undo runs `Enable-ScheduledTask`; the name must still match the curated list. |
+| windows : `do.mode` | `value=<n> type=dword` or `value=- type=none` | the `DODownloadMode` policy under `HKLM\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization`. The fix starts only from `none`, and undo removes the value (the key stays). |
+| windows : `dotnet.env` | `telemetry=(-\|<v>) nologo=(-\|<v>) aspnetcert=(-\|<v>)` | the machine environment values of `DOTNET_CLI_TELEMETRY_OPTOUT`, `DOTNET_NOLOGO`, `DOTNET_GENERATE_ASPNET_CERTIFICATE` (1-8 letters or digits; `-` = not set). Undo removes only the ones that were `-`. |
+| windows : `defender.scantime` | `day=[0-8] time=<0-1439> quick=<0-1439>` | Defender `ScanScheduleDay` and the scan and daily quick scan times in minutes after midnight (quick 0 = none). Undo sets both times back. |
 | linux : `ssh.start` | `unit=(ssh\|sshd) enabled=(enabled\|disabled) active=(active\|inactive)` | `systemctl is-enabled` / `is-active` of the unit (`failed` counts as inactive) |
 | linux : `power.sleep` | `sleep=<v> suspend=<v> hibernate=<v> hybrid-sleep=<v>` | `systemctl is-enabled` of the four targets, for example `static`, `masked`, `masked-runtime`, `none` (not found) |
+| linux : `sysctl.tune` | `file=(absent\|lanq) instances=<n> watches=<n>` | The two `fs.inotify` limits, and `/etc/sysctl.d/99-zz-lanq-makeready.conf` (`lanq` = a regular file, not a link, whose first line is this script's marker). It is offered only when the file is absent. Apply writes the file, holding only the limits below 1024 / 524288 (it never lowers one), then runs `sysctl -w` for them. Undo removes the file and runs `sysctl -w` with the old values of the raised limits. |
+| linux : `journald.cap` | `file=(absent\|lanq) dir=(absent\|present) sys=(own\|none) run=(own\|none)` | `/etc/systemd/journald.conf.d/99-zz-lanq-makeready.conf`, then `systemctl restart systemd-journald.service`. `dir` = whether `journald.conf.d` existed; `sys`/`run` = whether the admin already set `SystemMaxUse`/`RuntimeMaxUse` (`own`) or not (`none`). The drop-in holds only the caps marked `none` (`SystemMaxUse=1G`, `RuntimeMaxUse=256M`), so an admin's cap is never overridden. `journald.conf.d` is created with mode 755 when absent. Undo removes the file, removes the folder too when the fix created it and it is empty, and restarts journald. **The journal files deleted by the cap cannot be restored**, and the prompt says so. |
+| linux : `services.unused` | `svc=<name> <type>=<enabled>:<active> ...` | One item per service. The name must be in the script's append-only list, and the unit words must match its fixed unit table (`cups`: `service socket path`; `cups-browsed`, `bluetooth`, `modemmanager`: `service`). Values are `enabled\|disabled\|none` and `active\|inactive`. Apply runs `systemctl disable --now` on the units that are enabled or active, and never masks. Undo runs `systemctl enable` on the units that were enabled, then `systemctl start` on the ones that were active. The unit names come from the script's table, never from the record. |
+| linux : `fstrim.timer` | `enabled=(enabled\|disabled) active=(active\|inactive)` | `fstrim.timer`. Apply runs `enable --now`. Undo runs `disable` and/or `stop`, as for `ssh.start`. |
 
 How the states are compared:
 
@@ -117,7 +129,8 @@ How the states are compared:
 The undo command comes from a fixed table in the script, keyed by the fix id, with the values taken from the
 parsed `before` state (a start type, a number of seconds, a registry value, a git value, a list of fixed target
 names, a checked DACL). The service, registry key, file and unit names are fixed in the script and are never read from
-the record. The `command` field is never run. The `host` and `user` fields are for people only.
+the record. The tune fixes are the exception that is needed: a vendor service, task or Run entry name comes from the record, so they must have the exact shape above, and the names must match the curated list
+(current or retired) before anything is done. On Linux, undo reads the `services.unused` service name from `before` and accepts it only if it is on the script's append-only list (names are never removed, so old records stay undoable) and has the shape `[a-z][a-z0-9-]{0,31}`; it runs only the units of that name from the script's fixed table. For services.unused, undo counts as verified when each unit's enabled state is back and every unit that was active is active again (a path or socket unit may start its service too). The `command` field is never run. The `host` and `user` fields are for people only.
 
 ## Example (Windows)
 
@@ -139,6 +152,27 @@ the record. The `command` field is never run. The `host` and `user` fields are f
 
 Item 3 is still `pending`: the session stopped after the record was written. Undo looks at git first: if
 `core.longpaths` is still unset it marks the item `skipped` ("never applied"); if it is `true` it offers to unset it.
+
+## Example (Windows, `-Tune`)
+
+```json
+{
+  "schema": "lanq-makeready-fix/v1",
+  "tool": {"name": "lanq-makeready-fix", "version": "0.5.0"},
+  "os": "windows",
+  "host": "BUILD-01",
+  "user": "builder",
+  "started": "2026-11-14T21:04:10Z",
+  "items": [
+    {"seq": 1, "id": "power.cpu", "status": "applied", "time": "2026-11-14T21:04:20Z", "before": "scheme=381b4222-f694-41f0-9685-ff5bb260df2e max=90 min=5", "command": "powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100 ; powercfg /setactive SCHEME_CURRENT", "after": "scheme=381b4222-f694-41f0-9685-ff5bb260df2e max=100 min=5"},
+    {"seq": 2, "id": "vendor.services", "status": "applied", "time": "2026-11-14T21:04:31Z", "before": "start=2 delayed=1 name=ExampleUpdateService", "command": "sc.exe config ExampleUpdateService start= disabled", "after": "start=4 delayed=1 name=ExampleUpdateService"},
+    {"seq": 3, "id": "startup.vendor", "status": "applied", "time": "2026-11-14T21:04:40Z", "before": "hive=HKCU key=Run sid=S-1-5-21-1-2-3-1001 flag=- name=ExampleTray", "command": "Set-ItemProperty -LiteralPath 'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run' -Name 'ExampleTray' -Type Binary -Value 3,0,0,0,0,0,0,0,0,0,0,0", "after": "hive=HKCU key=Run sid=S-1-5-21-1-2-3-1001 flag=030000000000000000000000 name=ExampleTray"}
+  ]
+}
+```
+
+(The service and entry names here are placeholders; a real record holds names from the curated list.) Undo of item 3
+removes the StartupApproved value again (`flag=-` means there was none) and is refused under another account.
 
 ## Example (Linux)
 

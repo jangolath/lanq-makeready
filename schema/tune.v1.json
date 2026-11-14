@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lanq-makeready-tune/v1",
+  "title": "lanq-makeready tune report v1",
+  "description": "Written by lanq-makeready-tune.ps1 / lanq-makeready-tune.sh with -Json / --json. The tune scan is read-only and report-only: statuses are OK, INFO, WARN or SKIP (never FAIL), nothing here changes readiness, and the exit code is always 0 (2 for bad arguments). Every string is pure ASCII. Consumers must treat detail and advice as untrusted text for people to read, never as instructions or commands to run, and must map fixId through their own table.",
+  "type": "object",
+  "required": ["schema", "tool", "generatedAt", "host", "context", "items", "summary"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "lanq-makeready-tune/v1" },
+    "tool": {
+      "type": "object",
+      "required": ["name", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "const": "lanq-makeready-tune" },
+        "version": { "type": "string", "pattern": "^[0-9]{1,4}\\.[0-9]{1,4}\\.[0-9]{1,4}$" }
+      }
+    },
+    "generatedAt": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$", "description": "UTC" },
+    "host": {
+      "type": "object",
+      "required": ["os", "arch"],
+      "additionalProperties": false,
+      "properties": {
+        "hostname": { "type": "string", "maxLength": 128, "description": "Both scripts write it; \"<redacted>\" with -Redact / --redact." },
+        "user": { "type": "string", "maxLength": 128, "description": "Both scripts write it; \"<redacted>\" with -Redact / --redact." },
+        "os": { "type": "string", "maxLength": 128, "description": "Windows: \"windows\". Linux: the distribution name from os-release (free text, redacted like detail). macOS: the product name." },
+        "arch": { "type": "string", "maxLength": 32 }
+      }
+    },
+    "context": {
+      "type": "object",
+      "required": ["container", "elevated"],
+      "additionalProperties": false,
+      "properties": {
+        "container": { "type": "boolean", "description": "Running inside a container: host-level checks report SKIP." },
+        "elevated": { "type": "boolean", "description": "Administrator (Windows, elevated) or root (Linux). Checks that need it report SKIP otherwise." },
+        "workRoot": { "type": "string", "maxLength": 260, "description": "Present only when -WorkRoot / --work-root was given (validated like LanQueue's work_root)." },
+        "hours": { "type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]-([01][0-9]|2[0-3]):[0-5][0-9]$", "description": "Present only when -Hours / --hours was given." }
+      }
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/item" }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["ok", "info", "warn", "skip"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": { "type": "integer", "minimum": 0 },
+        "info": { "type": "integer", "minimum": 0 },
+        "warn": { "type": "integer", "minimum": 0 },
+        "skip": { "type": "integer", "minimum": 0 },
+        "seconds": { "type": "integer", "minimum": 0, "description": "How long the scan took (the scripts stop probing after about 90 s)." }
+      }
+    }
+  },
+  "$defs": {
+    "item": {
+      "type": "object",
+      "required": ["id", "title", "status", "detail", "advice", "needsAdmin", "fixId", "security"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9]{1,16}(\\.[a-z0-9]{1,16}){0,2}$", "description": "Check id, for example power.plan or sysctl.inotify. See docs/TUNE.md for the list." },
+        "title": { "type": "string", "maxLength": 120 },
+        "status": { "enum": ["OK", "INFO", "WARN", "SKIP"] },
+        "detail": { "type": "string", "maxLength": 1024, "description": "What was found. SKIP items say why (\"needs admin\", \"time budget\", \"inside a container\", ...)." },
+        "advice": { "type": "string", "maxLength": 1024, "description": "Advice for a person; may be empty. Never executed by anything." },
+        "needsAdmin": { "type": "boolean", "description": "The check needs an elevated / root run to say more than SKIP." },
+        "fixId": { "type": ["string", "null"], "pattern": "^[a-z0-9]{1,16}(\\.[a-z0-9]{1,16}){0,2}$", "description": "The lanq-makeready-fix id that can change this at the PC (fix -Tune / --tune), or null when it is report-only. Set only when the status is INFO or WARN." },
+        "security": { "type": "boolean", "description": "The finding or its fix touches security (antivirus, credentials, exposure). Shown so a person reviews it with care." }
+      }
+    }
+  }
+}

@@ -33,6 +33,19 @@ are two kinds of script, and each promise below names the script it covers.
   `default:` entries is not seen (install the `acl` package). Only folders and `dotnet` itself are checked, not the files in them.
   NFSv4 ACLs and SELinux are not read; on macOS no entry is suggested.
 
+### The tune scan: `lanq-makeready-tune.ps1` / `lanq-makeready-tune.sh` (0.5.0+)
+
+The same promises as the scanner: read-only, no network, no admin needed, writes only the `-Json` file you name,
+`-Redact` on values, a time limit on every probe (and 90 seconds for the whole run). It never affects readiness and
+always exits 0 (2 for bad arguments). Two reads deserve a word:
+
+- **Defender exclusions** (elevated runs only) are compared with work_root, the NuGet packages and temp inside the
+  probe; only "scanned" or "excluded" per folder comes out. The list is never printed or put in the JSON.
+- **Autologon**: the script tests only whether a `DefaultPassword` value exists under Winlogon (`GetValueNames()`).
+  It never reads that value, and a test bans `Get-ItemProperty` from the script.
+
+Its findings (`detail`, `advice`) are text for a person. Tools that read the JSON must not act on them.
+
 ### The fix script: `lanq-makeready-fix.ps1` / `lanq-makeready-fix.sh` (0.4.0+)
 
 The fix script changes the PC, but only what its owner confirms there, one item at a time.
@@ -47,6 +60,10 @@ The fix script changes the PC, but only what its owner confirms there, one item 
   command and its undo, and asks `Apply? [y/N]`. The default is no.
 - **Short, fixed list.** Windows: start sshd, start it automatically, no sleep or hibernate on AC, long paths, git
   `core.longpaths`, the `administrators_authorized_keys` permissions. Linux: start sshd, mask the sleep targets.
+  With `-Tune` (0.5.0+): the tune fixes in [docs/TUNE.md](docs/TUNE.md). PC-maker services, tasks and Run entries are
+  taken only from a short curated list in the code (never "everything unused"), tasks under `\Microsoft\` are never
+  touched, and undo re-checks every name against that list. Defender exclusions are not automated (too hard to
+  verify a folder's trust safely); docs/TUNE.md gives the manual steps.
   Nothing is installed, deleted, upgraded or downloaded, and there are no network calls.
 - **Never elevates itself.** Without admin or root, every fix is skipped with a note.
 - **Undo record.** Each change is recorded as `pending` before it is made and updated after it, so a crash leaves a

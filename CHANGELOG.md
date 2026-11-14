@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.5.0 (2026-11-14)
+
+- **Tune scan**, in new, separate, read-only scripts: `lanq-makeready-tune.ps1` (Windows PowerShell 5.1 and
+  PowerShell 7) and `lanq-makeready-tune.sh`. It reports what slows a worker down or keeps it busy during the job
+  window. Statuses OK, INFO, WARN and SKIP (never FAIL); it never changes readiness, and the exit code is always 0
+  (2 for bad arguments). Arguments like the scanner's (`-Json <path|->`, `-Redact`, `-Hours`) plus `-WorkRoot`
+  (LanQueue's work_root rule). JSON schema `lanq-makeready-tune/v1` (`schema/tune.v1.json`). See docs/TUNE.md.
+- Time: a 90-second deadline for the whole scan and a budget per probe; a probe over its budget reports SKIP
+  "time budget". Driver dates come from `Get-NetAdapter` and the Class registry (15 s), never `Win32_PnPSignedDriver`.
+- Windows checks: `power.plan`, `power.usbsuspend`, `startup.vendor`, `vendor.services`, `vendor.tasks`, `sysmain`,
+  `search.index`, `do.mode`, `wu.reboot`, `visual.fx`, `dotnet.env`, `wsl.reclaim`, `defender.paths` (admin; report only; the
+  exclusion list is compared inside the probe and never printed), `defender.schedule` (the scheduled scan against
+  `-Hours`, in place of a CPU-load check), `av.other` (Security Center and AMRunningMode), `pagefile`, `disk.health`,
+  `disk.full` (over 90%), `drivers.age`, `cache.sizes` (NuGet HTTP cache and Windows Update downloads only),
+  `autologon.plain` (tests that `DefaultPassword` exists, never reads it), `onedrive.workroot`, `bios.power` (a
+  reminder) and `maint.schedule` (automatic maintenance and defrag against `-Hours`).
+- **Tune fixes** in `lanq-makeready-fix.ps1 -Tune`, with the same refusals, confirmation, record and undo:
+  `power.cpu`, `power.usbsuspend`, `startup.vendor`, `vendor.services`, `vendor.tasks`, `sysmain`, `do.mode` (offers 0,
+  HTTP only), `dotnet.env` and `defender.scantime` (needs `-Hours`). Fix ids are additive under
+  `lanq-makeready-fix/v1`; a 0.4 script rejects a record that holds one (exit 2).
+  - StartupApproved: no value means enabled, `Run32` handled, the account SID recorded; an HKCU entry is undone only
+    by the same account.
+  - Services: Start and DelayedAutostart recorded from the registry and put back with `sc.exe` (`delayed-auto`).
+  - Scheduled tasks under `\Microsoft\` are never touched; access denied is skipped.
+  - Undo re-checks service, task and Run entry names against the curated list plus an append-only retired list, and
+    every name and path in a record has a fixed shape. A record holds at most 64 changes.
+- **Defender exclusions are report-only.** Defender exclusions are not automated in 0.5.0: whether a folder can be trusted (who can write to it, where it really is, what runs from it) is hard to verify safely from a script, and a wrong exclusion silently turns off scanning. `defender.paths` says, per
+  folder, whether real-time scanning covers it and gives the manual procedure (Dev Drive first; otherwise lock a
+  top-level build folder down with icacls and use `Add-MpPreference`); docs/TUNE.md has the steps. The fix script
+  has no exclusion fix: `-DefenderExclusions` exits 2 with a pointer to that page.
+- Names read from the PC (Run entries, services, tasks, drivers) are printed without control or bidi characters and
+  cut at 80 characters; detail and advice at 1024. Under `-Redact` account SIDs in task names are redacted too.
+- `defender.scantime` is not offered when an hour after the window is still inside it (windows of 23 hours or more).
+- Report only, never fixed: cache clean-up, the Windows Update restart policy (`wu.reboot`) and the other checks
+  without a fix id.
+- The PC-maker list is short, generic across makers, kept in code and identical in the tune and fix scripts (a test
+  checks it); every entry has a literal name, no bare wildcards.
+- Agents may run the tune scan only when the developer asks; they never run the fix script.
+- Tests: `tests/tune.ps1` (one fixture per status per check, the read-only AST guard with mutants, an 800-line cap,
+  redaction, a schema check, a real read-only run) on PowerShell 5.1 and 7; tune fixes against fakes in
+  `tests/fix.ps1`; real apply and undo of `power.cpu`, `do.mode`, `sysmain` and `defender.scantime` on a disposable
+  Windows runner. PSScriptAnalyzer 1.23.0 runs in CI, warnings only.
+- The release ships, checksums and attests the tune scripts and `tune.v1.json`; its Windows tests run first.
+- New `lanq-makeready-tune.sh`:
+  - a read-only tuning report for Linux workers (`lanq-makeready-tune/v1` JSON with `--json`);
+  - checks: CPU governor, swappiness, inotify limits, journald size (persistent and `/run`), unused services
+    (cups-browsed flagged as a security item), automatic update reboots against `--hours`, package cache, SSD TRIM,
+    SMART health (root), thermal throttling, and disks over 90% full;
+  - `--work-root` (lanq's `work_root` rule) and `--hours`, a 90 s internal deadline, and SKIP for host checks inside a
+    container;
+  - on macOS it reports "no tune checks". Tuning never changes readiness or the exit code.
+- `lanq-makeready-fix.sh --tune`:
+  - four new reversible fixes: `sysctl.tune` (inotify limits through `/etc/sysctl.d/99-zz-lanq-makeready.conf`),
+    `journald.cap` (a journald size cap; the trimmed logs cannot be restored), `services.unused` (`disable --now` of
+    cups, cups-browsed, bluetooth, ModemManager; never masks, avahi stays report only), `fstrim.timer`;
+  - the new fix ids are additive under `lanq-makeready-fix/v1`, and older fix scripts reject records that hold them;
+  - undo checks service names against an append-only list and a name shape.
+- Tests:
+  - `tests/tune.sh` (fake root: one case per status per check, a read-only guard with injected mutations, a line cap
+    of 800, redaction, JSON shape, the 90 s deadline, containers, macOS);
+  - tune-fix tests in `tests/fix.sh` (fakes);
+  - a `--tune` leg in `tests/real-fix.sh` for disposable CI runners (cups, the sysctl drop-in, fstrim.timer).
+- Linux review fixes: `journald.cap` never overrides an admin's cap (it writes only the caps not already set, and
+  removes a `journald.conf.d` folder it created when undone); desktop detection uses logind x11/wayland sessions;
+  `bluetooth` is never offered while a Bluetooth input device is present; `--tune` refuses to apply, and `--undo` refuses tune items,
+  inside a container (Docker, Podman, LXC, systemd-nspawn; exit 3), `--tune --dry-run` still works there, and WSL 2
+  counts as a host; `journald.cap` undo compares only the drop-in and its folder, so a cap you add later does not block it.
+- Both tune scripts write the same JSON: `host.hostname` and `host.user` are `"<redacted>"` with `-Redact`/`--redact`, `context.hours` is present when given, and `summary` has `ok`, `info`, `warn` and `skip` (`host.os` is free text: `windows`, or the Linux distribution name).
+- Version 0.5.0 in the scanners, tune scripts and fix scripts. The scanners are otherwise unchanged.
+
 ## 0.4.1 (2026-11-13)
 
 ### Security

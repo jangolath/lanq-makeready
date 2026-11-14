@@ -21,6 +21,7 @@ foreach ($v in 'SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY') { Remove-Item "Env:\$v
 $env:LANQ_MAKEREADY_FIX_LIB = '1'
 . $fixPath
 Remove-Item Env:\LANQ_MAKEREADY_FIX_LIB
+$RealFixState = ${function:Get-FixState}   # the tune tests run the real state readers over faked low-level reads
 
 Write-Host 'pure helpers'
 foreach ($y in 'y', 'Y', 'yes', ' YES ', 'Yes') { Assert-True (Test-Yes $y) "Test-Yes '$y' is yes" }
@@ -142,12 +143,15 @@ function Get-FixGuardViolations([string]$Path) {
   if (($regionFns -join ',') -ne 'Get-FixCommand,Assert-Native,Invoke-FixChange') { [void]$bad.Add("functions in FIXES must be exactly Get-FixCommand, Assert-Native, Invoke-FixChange (found: $($regionFns -join ', '))") }
   $fnOf = { param($Node) $p = $Node.Parent; while ($p) { if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $p.Name }; $p = $p.Parent }; return '' }
   $read = @('Get-Service', 'Get-CimInstance', 'Get-Command', 'Get-Item', 'Get-Acl', 'Get-ChildItem', 'Get-Content', 'Get-Alias', 'Test-Path', 'Join-Path', 'Split-Path',
+    'Get-NetAdapter', 'Get-PhysicalDisk', 'Get-ScheduledTask', 'Get-MpComputerStatus', 'Get-MpPreference',
     'Select-Object', 'Where-Object', 'ForEach-Object', 'Sort-Object', 'ConvertFrom-Json', 'Write-Host', 'New-Object', 'Get-Location',
     'Microsoft.PowerShell.Utility\Get-Alias', 'Microsoft.PowerShell.Core\Get-Command')
-  $mut = @('Set-Service', 'Start-Service', 'Stop-Service', 'Set-ItemProperty', 'Remove-ItemProperty', 'Set-Acl')
+  $mut = @('Set-Service', 'Start-Service', 'Stop-Service', 'Set-ItemProperty', 'Remove-ItemProperty', 'Set-Acl', 'New-Item', 'Disable-ScheduledTask', 'Enable-ScheduledTask',
+    'Set-MpPreference', 'Add-MpPreference', 'Remove-MpPreference')
   $callers = @{ 'Invoke-FixChange' = @('Invoke-FixApply', 'Invoke-FixUndo'); 'Assert-Native' = @('Invoke-FixChange'); 'New-FixSecuredDir' = @('Initialize-FixRecordDir'); 'New-FixSecuredFile' = @('Save-FixRecord') }
   $okNative = @("`$PowercfgExe|@('/q', 'SCHEME_CURRENT', 'SUB_SLEEP', 'STANDBYIDLE')", "`$PowercfgExe|@('/q', 'SCHEME_CURRENT', 'SUB_SLEEP', 'HIBERNATEIDLE')",
-    "`$PowercfgExe|@('/getactivescheme')", "`$git|@('config', '--system', '--show-origin', '--get', 'core.longpaths')", "`$git|@('config', '--system', '--show-origin', '--list')", "`$git|@('config', '--get', 'core.longpaths')")
+    "`$PowercfgExe|@('/getactivescheme')", "`$git|@('config', '--system', '--show-origin', '--get', 'core.longpaths')", "`$git|@('config', '--system', '--show-origin', '--list')", "`$git|@('config', '--get', 'core.longpaths')",
+    "`$PowercfgExe|@('/q', 'SCHEME_CURRENT', `$Sub, `$Setting)")
   $okTypes = @('System.Diagnostics.ProcessStartInfo', 'Security.Principal.WindowsPrincipal', 'System.Text.UTF8Encoding', 'System.Collections.ArrayList', 'System.IO.FileInfo',
     'System.Security.AccessControl.RawSecurityDescriptor', 'System.Security.AccessControl.DirectorySecurity', 'System.Security.AccessControl.FileSecurity', 'System.IO.DirectoryInfo',
     'System.IO.FileStream')
@@ -162,7 +166,7 @@ function Get-FixGuardViolations([string]$Path) {
     if ($callers.ContainsKey($n) -and $callers[$n] -notcontains $fn) { [void]$bad.Add("$n called from '$fn'") }
     if ($n -eq 'Invoke-Native' -and $fn -ne 'Invoke-Native') {
       $exe = $c.CommandElements[1].Extent.Text
-      if ($in) { if ($fn -ne 'Invoke-FixChange' -or @('$PowercfgExe', '$IcaclsExe', '$Cur.Git') -notcontains $exe) { [void]$bad.Add("Invoke-Native in FIXES with $exe") } }
+      if ($in) { if ($fn -ne 'Invoke-FixChange' -or @('$PowercfgExe', '$IcaclsExe', '$Cur.Git', '$ScExe') -notcontains $exe) { [void]$bad.Add("Invoke-Native in FIXES with $exe") } }
       else {
         $k = $exe + '|' + $(if ($c.CommandElements.Count -gt 2) { $c.CommandElements[2].Extent.Text } else { '' })
         if ($okNative -notcontains $k) { [void]$bad.Add("Invoke-Native outside FIXES with other than a read: $k") }
@@ -175,7 +179,7 @@ function Get-FixGuardViolations([string]$Path) {
     'ToString', 'GetSecurityDescriptorSddlForm', 'SetSecurityDescriptorSddlForm', 'GetOwner', 'Translate', 'IsInRole', 'GetCurrent', 'GetCurrentProcess', 'GetFolderPath', 'Matches',
     'ToInt64', 'Exists', 'ReadAllText', 'WriteAllText', 'Move', 'CreateDirectory', 'WriteLine', 'ReadLine', 'IsPathRooted', 'ContainsKey', 'Round', 'ToUniversalTime',
     'GetValueNames', 'GetValueKind', 'GetValue', 'Create', 'AddScript', 'BeginInvoke', 'WaitOne', 'BeginStop', 'EndInvoke', 'Dispose', 'ComputeHash', 'ToBase64String', 'FromBase64String',
-    'GetFullPath', 'ToLowerInvariant', 'GetBytes', 'Write', 'Min')
+    'GetFullPath', 'ToLowerInvariant', 'GetBytes', 'Write', 'Min', 'Floor', 'ToByte')
   $onlyIn = @{ 'WriteAllText' = @('Save-FixRecord'); 'Move' = @('Save-FixRecord'); 'CreateDirectory' = @('New-FixSecuredDir'); 'Start' = @('Invoke-Native'); 'Kill' = @('Invoke-Native')
     'Remove' = @('Invoke-Native'); 'SetSecurityDescriptorSddlForm' = @('Invoke-FixChange', 'New-FixSecuredDir', 'New-FixSecuredFile'); 'AddScript' = @('Get-FixProcessTable'); 'BeginStop' = @('Get-FixProcessTable')
     'Write' = @('New-FixSecuredFile') }
@@ -273,6 +277,14 @@ $mutants = [ordered]@{
   'L4: AddScript with other commands'        = "function Get-FixProcessTable { `$ps.AddScript('Stop-Computer') }"
   'L4: AddScript with a variable'            = "function Get-FixProcessTable { `$ps.AddScript(`$x) }"
   'L4: Create on another type'               = "function Get-FixProcessTable { [System.Diagnostics.Process]::Create() }"
+  'tune: Add-MpPreference outside FIXES'     = "function Bad-T1 { Add-MpPreference -ExclusionPath C:\ }"
+  'tune: Set-MpPreference outside FIXES'     = "function Bad-T2 { Set-MpPreference -DisableRealtimeMonitoring `$true }"
+  'tune: Disable-ScheduledTask outside'      = "function Bad-T3 { Disable-ScheduledTask -TaskPath '\x\' -TaskName y }"
+  'tune: New-Item outside FIXES'             = "function Bad-T4 { New-Item -Path HKLM:\SOFTWARE\x -Force }"
+  'tune: sc.exe outside FIXES'               = "function Bad-T5 { Invoke-Native `$ScExe @('config', 'WinDefend', 'start=', 'disabled') }"
+  'tune: Remove-MpPreference outside FIXES'  = "function Bad-T6 { Remove-MpPreference -ExclusionPath C:\x }"
+  'tune: Add-Type is banned'                = "function Bad-T8 { Add-Type -TypeDefinition 'public class X {}' }"
+  'tune: SetEnvironmentVariable'             = "function Bad-T7 { [Environment]::SetEnvironmentVariable('PATH', 'x', 'Machine') }"
 }
 foreach ($k in $mutants.Keys) { Test-Mutant $k ($fixText.Replace("#region FIXES`n", $mutants[$k] + "`n#region FIXES`n")) }
 Test-Mutant 'Set-Service after main' ($fixText + "`nSet-Service -Name sshd -StartupType Automatic`n")
@@ -285,14 +297,14 @@ $mt = $fixText.Replace("    'ssh.auto|undo' { Set-Service", "    'ssh.auto|undo'
 Assert-Equal (@(Get-FixGuardViolations $mp) -join '; ') '' 'guard sanity: another mutation inside Invoke-FixChange is allowed'
 $used = @($fast0 = [System.Management.Automation.Language.Parser]::ParseFile($fixPath, [ref]$null, [ref]$null); $fast0.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() } |
   Where-Object { $_ -and $FixFunctionNames -notcontains $_ -and $_ -notmatch '\\' } | Sort-Object -Unique)
-Assert-Equal (@($used | Where-Object { $FixCmdletNames -notcontains $_ }) -join ',') '' 'R4: every cmdlet the script runs is in the shadow check'
+Assert-Equal (@($used | Where-Object { $FixCmdletNames -notcontains $_ -and -not $FixModuleCmds.ContainsKey($_) }) -join ',') '' 'R4: every cmdlet (and module command) the script runs is in the shadow check'
 Remove-Item -LiteralPath $mdir -Recurse -Force
 
 Write-Host 'NoYesFlag'
 $tokens = $null; $perr = $null
 $fast = [System.Management.Automation.Language.Parser]::ParseFile($fixPath, [ref]$tokens, [ref]$perr)
 $pn = @($fast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
-Assert-Equal ($pn -join ',') 'WhatIf,List,Help,Extra' 'parameters: WhatIf, List, Help (and -Undo <file> from the rest); no Yes, Force or Confirm'
+Assert-Equal ($pn -join ',') 'WhatIf,List,Help,Tune,Extra' 'parameters: WhatIf, List, Help, Tune (and -Undo/-Hours from the rest); no Yes, Force, Confirm or DefenderExclusions'
 Assert-True ($fast.ParamBlock.Attributes.Extent.Text -notmatch 'SupportsShouldProcess') 'no SupportsShouldProcess (so no -Confirm:$false)'
 
 # ---------- child processes: argument errors and real refusals (LANQ_MAKEREADY_FIX_LIB=1 safety net) ----------
@@ -321,6 +333,14 @@ $r = Start-Child "$fileArgs -Undo a.json -Undo b.json"; Assert-True ($r.Code -eq
 $r = Start-Child "$fileArgs -WhatIf -List"; Assert-True ($r.Code -eq 2 -and $r.Err -match 'only one of') 'two modes at once: exit 2'
 $r = Start-Child "$fileArgs -WhatIf -Undo a.json"; Assert-True ($r.Code -eq 2 -and $r.Err -match 'only one of') '-WhatIf with -Undo: exit 2'
 $r = Start-Child "$fileArgs -Help"; Assert-True ($r.Code -eq 0 -and $r.Out -match 'usage:') '-Help: usage, exit 0'
+$r = Start-Child "$fileArgs -Tune -DefenderExclusions -WhatIf"; Assert-True ($r.Code -eq 2 -and $r.Err -match 'Defender exclusions are not automated' -and $r.Err -match 'docs/TUNE.md') 'Defender exclusions are not automated: -DefenderExclusions exits 2 and says where to read'
+$r = Start-Child "$fileArgs -DefenderExclusions"; Assert-True ($r.Code -eq 2 -and $r.Err -match 'not automated') '-DefenderExclusions alone: exit 2'
+$r = Start-Child "$fileArgs -Tune -WorkRoot C:/lq -WhatIf"; Assert-True ($r.Code -eq 2 -and $r.Err -match 'unknown argument') '-WorkRoot is gone from the fix script: exit 2'
+$r = Start-Child "$fileArgs -Hours 22:00-07:00 -WhatIf"; Assert-True ($r.Code -eq 2 -and $r.Err -match 'goes with -Tune') '-Hours without -Tune: exit 2'
+$r = Start-Child "$fileArgs -Tune -Hours 25:00-07:00 -WhatIf"; Assert-True ($r.Code -eq 2 -and $r.Err -match '-Hours must') 'tune: a bad -Hours: exit 2'
+$r = Start-Child "$fileArgs -Tune -WhatIf" $null @{ SSH_CONNECTION = '10.20.30.5 50000 10.20.30.6 22' }
+Assert-True ($r.Code -eq 3 -and $r.Err -match 'over SSH') 'tune: RefusesOverSsh (real process, -Tune -WhatIf): exit 3'
+$r = Start-Child "$fileArgs -Tune"; Assert-True ($r.Code -eq 3 -and $r.Err -match 'no interactive console') 'tune: RefusesWithoutConsole (real process, -Tune): exit 3'
 $r = Start-Child "$fileArgs -WhatIf" $null @{ SSH_CONNECTION = '10.20.30.5 50000 10.20.30.6 22' }
 Assert-True ($r.Code -eq 3 -and $r.Err -match 'over SSH') 'RefusesOverSsh (real process, SSH_CONNECTION, dry run): exit 3'
 $r = Start-Child "$fileArgs -List" $null @{ SSH_TTY = '/dev/pts/1' }
@@ -702,6 +722,232 @@ Assert-True ($rc -eq 2 -and $Calls.Count -eq 0 -and (OutText) -match 'reads only
 Remove-Item -LiteralPath $other -Recurse -Force
 Remove-Item -LiteralPath $RecDir -Recurse -Force -ErrorAction SilentlyContinue
 
+# ---------- tune fixes (-Tune): the real state readers over a fake registry, power, services,
+# tasks, disks, adapters and Defender. Every command that could change the PC is a fake (checked below). ----------
+Write-Host 'tune fixes (fakes only)'
+Set-Item -Path Function:\Get-FixState -Value $RealFixState
+$SvcKey = 'HKLM:\lanq-test\Services'; $DoKey = 'HKLM:\lanq-test\DeliveryOptimization'; $DoSettingKey = 'HKLM:\lanq-test\DoSettings'; $EnvKey = 'HKLM:\lanq-test\Environment'
+$ScExe = 'C:\lanq-test-none\sc.exe'
+$RunSources = @{ 'HKCU|Run' = @('HKCU:\lanq-test\Run', 'HKCU:\lanq-test\Approved\Run'); 'HKLM|Run' = @('HKLM:\lanq-test\Run', 'HKLM:\lanq-test\Approved\Run'); 'HKLM|Run32' = @('HKLM:\lanq-test\Wow\Run', 'HKLM:\lanq-test\Approved\Run32') }
+$FixModuleCmds = @{}   # the fakes below are functions over module command names on purpose
+$MeSid = "$([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)"
+function Reset-Tune {
+  Reset-Fake
+  $script:Reg = @{}; $script:RegKeys = New-Object System.Collections.ArrayList
+  $script:Pw = @{ Max = 100; Min = 5; Usb = 0 }; $script:NicUsb = $false
+  $script:Svcs = New-Object System.Collections.ArrayList; $script:Tasks = New-Object System.Collections.ArrayList; $script:TaskDenied = $false
+  $script:Disks = @([pscustomobject]@{ MediaType = 'SSD'; BusType = 'NVMe' })
+  $script:Mp = @{ Mode = 'Normal'; Tamper = $false; Ex = New-Object System.Collections.ArrayList; Readable = $true; Day = 0; Time = [TimeSpan]'02:00:00'; Quick = [TimeSpan]::Zero }
+  $script:FakeSid = $MeSid
+  Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' 'EditionID' 'String' 'Professional'
+  foreach ($k in $EnvKey, $SvcKey) { [void]$RegKeys.Add($k) }
+}
+function Set-Reg([string]$P, [string]$N, [string]$K, $V) { $script:Reg["$P|$N"] = @{ Kind = $K; Value = $V }; if ($RegKeys -notcontains $P) { [void]$RegKeys.Add($P) } }
+function Add-Svc([string]$Name, [int]$Start, [int]$Delayed = 0, [string]$Display = '') { [void]$Svcs.Add([pscustomobject]@{ Name = $Name; DisplayName = $Display }); Set-Reg "$SvcKey\$Name" 'Start' 'DWord' $Start; Set-Reg "$SvcKey\$Name" 'DelayedAutostart' 'DWord' $Delayed }
+function Get-RegVal([string]$Path, [string]$Name) { $e = $script:Reg["$Path|$Name"]; if ($e) { return @{ Has = $true; Kind = $e.Kind; Value = $e.Value } }; return @{ Has = $false } }
+function Get-RegNames([string]$Path) { return @($script:Reg.Keys | Where-Object { $_.StartsWith("$Path|") } | ForEach-Object { $_.Substring($Path.Length + 1) } | Sort-Object) }
+function Test-RegKey([string]$Path) { return ($RegKeys -contains $Path) }
+function Get-UserSid { return $script:FakeSid }
+function New-Item { param($Path, [switch]$Force, $ErrorAction, $ItemType) if ($ItemType) { return (Microsoft.PowerShell.Management\New-Item -ItemType $ItemType -Path $Path) }; Note-Call "New-Item $Path"; [void]$RegKeys.Add($Path) }
+function Set-ItemProperty { param($Path, $LiteralPath, $Name, $Value, $Type, $ErrorAction) $p = "$LiteralPath$Path"; $v = $Value; if ($Type -eq 'Binary') { $v = [byte[]]$Value }; Note-Call "Set-ItemProperty $p $Name $(@($Value) -join ',') $Type"; Set-Reg $p $Name "$Type" $v }
+function Remove-ItemProperty { param($Path, $LiteralPath, $Name, $ErrorAction) $p = "$LiteralPath$Path"; Note-Call "Remove-ItemProperty $p $Name"; $script:Reg.Remove("$p|$Name") }
+function Invoke-Native([string]$Exe, [string[]]$ArgList, [int]$Sec = 60) {
+  $leaf = Split-Path -Leaf $Exe; $a = @($ArgList); $map = @{ PROCTHROTTLEMAX = 'Max'; PROCTHROTTLEMIN = 'Min'; $UsbSet = 'Usb' }
+  if ($leaf -eq 'powercfg.exe' -and $a[0] -eq '/getactivescheme') { return @{ Code = 0; Out = 'Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)' } }
+  if ($leaf -eq 'powercfg.exe' -and $a[0] -eq '/q') { return @{ Code = 0; Out = ('Current AC Power Setting Index: 0x{0:x8}' -f [int]$script:Pw[$map[$a[3]]]) } }
+  Note-Call "$leaf $($a -join ' ')"
+  if ($leaf -eq 'powercfg.exe' -and $a[0] -eq '/setacvalueindex') { $script:Pw[$map[$a[3]]] = [int]$a[4] }
+  if ($leaf -eq 'sc.exe' -and $a[0] -eq 'config') {
+    $st = @{ boot = 0; system = 1; auto = 2; 'delayed-auto' = 2; demand = 3; disabled = 4 }[$a[3]]; Set-Reg "$SvcKey\$($a[1])" 'Start' 'DWord' $st
+    if ($a[3] -eq 'delayed-auto') { Set-Reg "$SvcKey\$($a[1])" 'DelayedAutostart' 'DWord' 1 } elseif ($a[3] -eq 'auto') { Set-Reg "$SvcKey\$($a[1])" 'DelayedAutostart' 'DWord' 0 }
+  }
+  return @{ Code = 0; Out = '' }
+}
+function Get-Service { param($Name, $ErrorAction) return @($Svcs | Where-Object { -not $Name -or $_.Name -eq $Name }) }
+function Get-NetAdapter { param([switch]$Physical, $ErrorAction) $p = 'PCI\VEN_1'; if ($script:NicUsb) { $p = 'USB\VID_1' }; return @([pscustomobject]@{ Status = 'Up'; PnPDeviceID = $p }) }
+function Get-PhysicalDisk { param($ErrorAction) return $script:Disks }
+function Get-ScheduledTask { param($TaskPath, $TaskName, $ErrorAction) if ($script:TaskDenied) { throw 'Access is denied' }; $r = @($Tasks | Where-Object { (-not $TaskPath -or $_.TaskPath -eq $TaskPath) -and (-not $TaskName -or $_.TaskName -eq $TaskName) }); if ($TaskName -and $r.Count -eq 0) { throw 'No MSFT_ScheduledTask objects found' }; return $r }
+function Disable-ScheduledTask { param($TaskPath, $TaskName, $ErrorAction) Note-Call "Disable-ScheduledTask $TaskPath$TaskName"; foreach ($t in @($Tasks | Where-Object { $_.TaskPath -eq $TaskPath -and $_.TaskName -eq $TaskName })) { $t.State = 'Disabled' } }
+function Enable-ScheduledTask { param($TaskPath, $TaskName, $ErrorAction) Note-Call "Enable-ScheduledTask $TaskPath$TaskName"; foreach ($t in @($Tasks | Where-Object { $_.TaskPath -eq $TaskPath -and $_.TaskName -eq $TaskName })) { $t.State = 'Ready' } }
+function Get-MpComputerStatus { param($ErrorAction) return [pscustomobject]@{ AMRunningMode = $Mp.Mode; IsTamperProtected = $Mp.Tamper } }
+function Get-MpPreference { param($ErrorAction) $ex = @($Mp.Ex); if (-not $Mp.Readable) { $ex = @('N/A: Must be an administrator to view exclusions') }; return [pscustomobject]@{ ExclusionPath = $ex; ScanScheduleDay = $Mp.Day; ScanScheduleTime = $Mp.Time; ScanScheduleQuickScanTime = $Mp.Quick } }
+function Set-MpPreference { param($ScanScheduleTime, $ScanScheduleQuickScanTime, $ErrorAction) Note-Call "Set-MpPreference $ScanScheduleTime $ScanScheduleQuickScanTime"; if ($ScanScheduleTime) { $Mp.Time = [TimeSpan]$ScanScheduleTime }; if ($ScanScheduleQuickScanTime) { $Mp.Quick = [TimeSpan]$ScanScheduleQuickScanTime } }
+function Add-MpPreference { param($ExclusionPath, $ErrorAction) Note-Call "Add-MpPreference $ExclusionPath"; [void]$Mp.Ex.Add($ExclusionPath) }
+function Remove-MpPreference { param($ExclusionPath, $ErrorAction) Note-Call "Remove-MpPreference $ExclusionPath"; $Mp.Ex.Remove($ExclusionPath) }
+$unsafe = @(foreach ($n in 'Set-ItemProperty', 'Remove-ItemProperty', 'New-Item', 'Invoke-Native', 'Get-RegVal', 'Test-RegKey', 'Disable-ScheduledTask', 'Enable-ScheduledTask', 'Set-MpPreference', 'Add-MpPreference', 'Remove-MpPreference',
+    'Get-MpPreference', 'Get-ScheduledTask', 'Get-Service', 'Test-FixElevated', 'Initialize-FixRecordDir', 'New-FixSecuredFile', 'Test-FixRecordTrusted', 'Get-FixRecordDir') { if (@(Get-Command $n)[0].CommandType -ne 'Function' -or @(Get-Command $n)[0].ScriptBlock.File -eq $fixPath) { $n } })
+if ($unsafe.Count -gt 0) { Write-Host "ABORT: not faked: $($unsafe -join ', ')" -ForegroundColor Red; exit 1 }
+Assert-True $true 'tune: every command that could change the PC is a fake'
+function Invoke-Tune([string]$Mode = 'apply', [object[]]$Ans = @(), [string]$Set = 'tune', [string]$Hours = '', [string]$WorkRoot = '', [string]$UndoPath = '') {
+  $FixOut.Clear(); $Calls.Clear(); $Snaps.Clear(); $Reads.Clear(); $script:Asked = 0
+  foreach ($x in $Ans) { $script:Answers.Enqueue($x) }
+  $rc = Invoke-FixMain -Mode $Mode -UndoPath $UndoPath -FromFile $true -Set $Set -Hours $Hours
+  $script:Answers.Clear()
+  return , $rc
+}
+function Get-TuneWorld { return ((@($Reg.Keys | Sort-Object | ForEach-Object { "$_=$(@($Reg[$_].Value) -join ',')" }) -join ';') + "|$($Pw.Max),$($Pw.Min),$($Pw.Usb)|" + (@($Tasks | ForEach-Object { "$($_.TaskName)=$($_.State)" }) -join ',') + "|$($Mp.Time),$($Mp.Quick)|$(@($Mp.Ex) -join ',')") }
+
+$approvedCu = 'HKCU:\lanq-test\Approved\Run'
+$tcases = @(
+  @('power.cpu max 90', { $Pw.Max = 90 }, 'powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100|powercfg.exe /setactive SCHEME_CURRENT',
+    'powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 90|powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMIN 5|powercfg.exe /setactive SCHEME_CURRENT', ''),
+  @('power.cpu min 100', { $Pw.Min = 100 }, 'powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMIN 5|powercfg.exe /setactive SCHEME_CURRENT',
+    'powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100|powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMIN 100|powercfg.exe /setactive SCHEME_CURRENT', ''),
+  @('power.usbsuspend on, USB NIC', { $Pw.Usb = 1; $script:NicUsb = $true }, "powercfg.exe /setacvalueindex SCHEME_CURRENT $UsbSub $UsbSet 0|powercfg.exe /setactive SCHEME_CURRENT", "powercfg.exe /setacvalueindex SCHEME_CURRENT $UsbSub $UsbSet 1|powercfg.exe /setactive SCHEME_CURRENT", ''),
+  @('startup.vendor HKCU, no flag', { Set-Reg 'HKCU:\lanq-test\Run' 'SupportAssistTray' 'String' '"C:\x\tray.exe" /s' }, "New-Item $approvedCu|Set-ItemProperty $approvedCu SupportAssistTray 3,0,0,0,0,0,0,0,0,0,0,0 Binary", "Remove-ItemProperty $approvedCu SupportAssistTray", ''),
+  @('startup.vendor HKLM Run32, enabled flag', { Set-Reg 'HKLM:\lanq-test\Wow\Run' 'Updater' 'String' 'C:\x\ArmouryCrate.exe'; Set-Reg 'HKLM:\lanq-test\Approved\Run32' 'Updater' 'Binary' ([byte[]](2, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8)) },
+    'Set-ItemProperty HKLM:\lanq-test\Approved\Run32 Updater 3,0,0,0,0,0,0,0,0,0,0,0 Binary', 'Set-ItemProperty HKLM:\lanq-test\Approved\Run32 Updater 2,0,0,0,1,2,3,4,5,6,7,8 Binary', ''),
+  @('vendor.services delayed auto', { Add-Svc 'DellUpdate' 2 1 }, 'sc.exe config DellUpdate start= disabled', 'sc.exe config DellUpdate start= delayed-auto', ''),
+  @('vendor.services by display name, manual', { Add-Svc 'xsvc' 3 0 'Lenovo Vantage Service' }, 'sc.exe config xsvc start= disabled', 'sc.exe config xsvc start= demand', ''),
+  @('sysmain on an SSD-only PC', { Add-Svc 'SysMain' 2 0 }, 'sc.exe config SysMain start= disabled', 'sc.exe config SysMain start= auto', ''),
+  @('vendor.tasks', { [void]$Tasks.Add([pscustomobject]@{ TaskPath = '\LenovoTools\'; TaskName = 'Lenovo Vantage Update'; State = 'Ready' }) }, 'Disable-ScheduledTask \LenovoTools\Lenovo Vantage Update', 'Enable-ScheduledTask \LenovoTools\Lenovo Vantage Update', ''),
+  @('do.mode (Pro default, no policy)', {}, "New-Item $DoKey|Set-ItemProperty $DoKey DODownloadMode 0 DWord", "Remove-ItemProperty $DoKey DODownloadMode", ''),
+  @('dotnet.env none set', {}, "Set-ItemProperty $EnvKey DOTNET_CLI_TELEMETRY_OPTOUT 1 String|Set-ItemProperty $EnvKey DOTNET_NOLOGO 1 String|Set-ItemProperty $EnvKey DOTNET_GENERATE_ASPNET_CERTIFICATE false String",
+    "Remove-ItemProperty $EnvKey DOTNET_CLI_TELEMETRY_OPTOUT|Remove-ItemProperty $EnvKey DOTNET_NOLOGO|Remove-ItemProperty $EnvKey DOTNET_GENERATE_ASPNET_CERTIFICATE", ''),
+  @('defender.scantime 02:00 in 00:00-07:00', {}, 'Set-MpPreference 08:00:00 ', 'Set-MpPreference 02:00:00 00:00:00', '00:00-07:00')
+)
+# everything else already fine, so each case offers exactly one fix
+function Set-TuneQuiet { Set-Reg $DoKey 'DODownloadMode' 'DWord' 0; foreach ($v in 'DOTNET_CLI_TELEMETRY_OPTOUT', 'DOTNET_NOLOGO') { Set-Reg $EnvKey $v 'String' '1' }; Set-Reg $EnvKey 'DOTNET_GENERATE_ASPNET_CERTIFICATE' 'String' 'false'; $Mp.Day = 8 }
+foreach ($c in $tcases) {
+  $tag = $c[0]; Reset-Tune; Set-TuneQuiet
+  if ($tag -like 'do.mode*') { $script:Reg.Remove("$DoKey|DODownloadMode"); $RegKeys.Remove($DoKey) }
+  if ($tag -like 'dotnet.env*') { foreach ($k in @($Reg.Keys | Where-Object { $_ -like "$EnvKey|*" })) { $Reg.Remove($k) } }
+  if ($tag -like 'defender.scantime*') { $Mp.Day = 0 }
+  & $c[1]
+  $start = Get-TuneWorld
+  $rc = Invoke-Tune 'apply' @('y') 'tune' $c[4]
+  Assert-Equal $rc 0 "tune $tag apply: exit 0"
+  Assert-Equal ($Calls -join '|') $c[2] "tune $tag apply: exact commands"
+  Assert-True ($Snaps.Count -gt 0 -and $Snaps[0] -match '"status": "pending"' -and $Snaps[0] -notmatch '"after": "unknown"') "tune $tag RecordWrittenBeforeChange, with the expected after state"
+  $rp = Get-LatestRecord; $j = Read-Rec $rp
+  Assert-True (@($j.items).Count -eq 1 -and $j.items[0].status -eq 'applied' -and $script:Asked -eq 1) "tune $tag record: one item, applied, one question"
+  Assert-Equal (Read-FixRecord $rp).Error '' "tune $tag record: valid for -Undo"
+  $rc = Invoke-Tune 'undo' @('y') 'base' '' '' $rp
+  Assert-Equal $rc 0 "tune $tag undo: exit 0"
+  Assert-Equal ($Calls -join '|') $c[3] "tune $tag undo: exact commands"
+  Assert-Equal (Get-TuneWorld) $start "tune $tag undo: back to the start"
+}
+Reset-Tune; Set-TuneQuiet; Add-Svc 'DellUpdate' 2 1; [void]$Tasks.Add([pscustomobject]@{ TaskPath = '\LenovoTools\'; TaskName = 'Lenovo Vantage Update'; State = 'Ready' })
+$rc = Invoke-Tune 'apply' @('y', 'y'); Assert-True ((OutText) -match 'stops at the next restart' -and (OutText) -match 'enable their tasks again') 'tune: notes after a service and a task (restart; updaters re-enable tasks)'
+$rp = Get-LatestRecord; Assert-True ((Get-Content -LiteralPath $rp -Raw) -match '"before": "start=2 delayed=1 name=DellUpdate"') 'vendor.services: Start and DelayedAutostart are recorded'
+
+Write-Host 'tune: what is not offered'
+Reset-Tune; Set-TuneQuiet; $rc = Invoke-Tune 'apply' @('y', 'y', 'y')
+Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and $script:Asked -eq 0 -and (OutText) -match 'Nothing to fix here') 'tune: all fine: nothing offered, nothing asked'
+Reset-Tune; Set-TuneQuiet; [void]$Tasks.Add([pscustomobject]@{ TaskPath = '\Microsoft\Windows\SupportAssist\'; TaskName = 'SupportAssistAgent'; State = 'Ready' }); Add-Svc 'wuauserv' 3; Add-Svc 'WSearch' 2
+$rc = Invoke-Tune 'apply' @('y', 'y'); Assert-True ($Calls.Count -eq 0 -and $script:Asked -eq 0) 'tune: tasks under \Microsoft\ and Windows services are never offered'
+Reset-Tune; Set-TuneQuiet; $script:TaskDenied = $true; $rc = Invoke-Tune 'dry'
+Assert-True ($rc -eq 0 -and (OutText) -match 'vendor\.tasks .*not offered: the scheduled tasks could not be read \(access denied\); skipped') 'vendor.tasks: access denied: skipped with a note'
+Reset-Tune; Set-TuneQuiet; Add-Svc 'SysMain' 2; $script:Disks = @([pscustomobject]@{ MediaType = 'SSD'; BusType = 'NVMe' }, [pscustomobject]@{ MediaType = 'Unspecified'; BusType = 'SATA' }); $rc = Invoke-Tune 'dry'
+Assert-True ((OutText) -notmatch '(?m)^sysmain') 'sysmain: a disk of unknown type (Unspecified) is not an SSD: not offered'
+Reset-Tune; Set-TuneQuiet; Set-Reg $DoKey 'DODownloadMode' 'DWord' 3; $rc = Invoke-Tune 'dry'
+Assert-True ((OutText) -match 'do\.mode .*not offered: DODownloadMode is 3 by a policy') 'do.mode: a policy already set is left to whoever set it'
+Reset-Tune; Set-TuneQuiet; Set-Reg $DoSettingKey 'DownloadMode' 'DWord' 0; $script:Reg.Remove("$DoKey|DODownloadMode"); $rc = Invoke-Tune 'dry'
+Assert-True ((OutText) -notmatch '(?m)^do\.mode') 'do.mode: HTTP only in Settings: nothing to do'
+Reset-Tune; Set-TuneQuiet; Set-Reg $EnvKey 'DOTNET_NOLOGO' 'String' 'yes please'; $rc = Invoke-Tune 'dry'
+Assert-True ((OutText) -match 'dotnet\.env .*not offered: DOTNET_NOLOGO has a value this script does not record') 'dotnet.env: an unusual value is not recorded or changed'
+Reset-Tune; Set-TuneQuiet; Set-Reg 'HKCU:\lanq-test\Run' 'SupportAssist Tray' 'String' 'x.exe'; Set-Reg $approvedCu 'SupportAssist Tray' 'Binary' ([byte[]](3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)); $rc = Invoke-Tune 'dry'
+Assert-True ((OutText) -notmatch '(?m)^startup\.vendor') 'startup.vendor: already disabled in Task Manager (odd first byte): not offered'
+Reset-Tune; Set-TuneQuiet; Set-Reg 'HKCU:\lanq-test\Run' 'SupportAssist Tray' 'String' 'x.exe'; Set-Reg $approvedCu 'SupportAssist Tray' 'Binary' ([byte[]](2, 0)); $rc = Invoke-Tune 'dry'
+Assert-True ((OutText) -match 'not offered: SupportAssist Tray: its StartupApproved value is not the usual 12-byte flag') 'startup.vendor: an unusual flag value: a note, not a fix'
+Reset-Tune; Set-TuneQuiet; Set-Reg 'HKCU:\lanq-test\Run' 'OneDrive' 'String' 'C:\x\OneDrive.exe'; Set-Reg 'HKCU:\lanq-test\Run' 'MyTool' 'String' 'C:\x\tool.exe'; $rc = Invoke-Tune 'dry'
+Assert-True ((OutText) -notmatch '(?m)^startup\.vendor') 'startup.vendor: only names on the curated list'
+Reset-Tune; Set-TuneQuiet; $Mp.Day = 0; $rc = Invoke-Tune 'dry'
+Assert-True ((OutText) -match 'defender\.scantime .*not offered: give the job window with -Hours') 'defender.scantime: needs -Hours'
+Reset-Tune; Set-TuneQuiet; $Mp.Day = 0; $Mp.Mode = 'Passive Mode'; $rc = Invoke-Tune 'dry' @() 'tune' '00:00-07:00'
+Assert-True ((OutText) -match 'not offered: Defender is not the active antivirus \(AMRunningMode: Passive Mode\)') 'defender.scantime: SKIP when AMRunningMode is not Normal'
+Reset-Tune; Set-TuneQuiet; $Mp.Day = 0; $Mp.Time = [TimeSpan]'12:00:00'; $Mp.Quick = [TimeSpan]'03:30:00'; $rc = Invoke-Tune 'apply' @('y') 'tune' '22:00-07:00'
+Assert-Equal ($Calls -join '|') 'Set-MpPreference  08:00:00' 'defender.scantime: only the quick scan inside the window is moved (an hour after the window ends)'
+Reset-Tune; Set-TuneQuiet; Add-Svc 'DellUpdate' 2; $script:Elev = $false; $rc = Invoke-Tune 'apply' @('y')
+Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and $script:Asked -eq 0 -and (OutText) -match 'needs an elevated PowerShell') 'tune: not elevated: shown, skipped, nothing asked'
+Reset-Tune; Set-TuneQuiet; Add-Svc 'DellUpdate' 2; $Pw.Max = 50; $script:Console = $false; $before = Get-TuneWorld; $rc = Invoke-Tune 'dry' @('y', 'y')
+Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and $script:Asked -eq 0 -and (Get-TuneWorld) -eq $before -and $null -eq (Get-LatestRecord) -and (OutText) -match '(?m)^vendor\.services DellUpdate' -and (OutText) -match 'undo: +sc\.exe config DellUpdate start= auto') 'tune -WhatIf: shown with the undo, nothing changed or asked'
+Reset-Tune; Set-TuneQuiet; Add-Svc 'DellUpdate' 2; $rc = Invoke-Tune 'apply' @('n')
+Assert-True ($Calls.Count -eq 0 -and $null -eq (Get-LatestRecord)) 'tune: DefaultIsNo'
+
+Write-Host 'tune: record cap, SID, curated names on undo'
+Reset-Tune; Set-TuneQuiet; for ($i = 1; $i -le 66; $i++) { Add-Svc ("DellUpdate$i") 3 }
+$rc = Invoke-Tune 'apply' @(1..66 | ForEach-Object { 'y' })
+$j = Read-Rec (Get-LatestRecord)
+Assert-True (@($j.items).Count -eq 64 -and $script:Asked -eq 64 -and ([regex]::Matches((OutText), 'record is full')).Count -eq 2) 'record cap: at most 64 changes per record; the rest are not offered (run again)'
+Reset-Tune; Set-TuneQuiet; Set-Reg 'HKCU:\lanq-test\Run' 'SupportAssistTray' 'String' 'x.exe'
+$rc = Invoke-Tune 'apply' @('y'); $rp = Get-LatestRecord
+Assert-True ((Get-Content -LiteralPath $rp -Raw) -match "sid=$MeSid") 'startup.vendor: the account SID is recorded'
+$script:FakeSid = 'S-1-5-21-1-2-3-1002'; $rc = Invoke-Tune 'undo' @('y') 'base' '' '' $rp
+Assert-True ($Calls.Count -eq 0 -and $script:Asked -eq 0 -and (OutText) -match "left alone: this entry belongs to the account $MeSid") 'startup.vendor: undo under another account (SID) refused for HKCU'
+$script:FakeSid = $MeSid; $rc = Invoke-Tune 'undo' @('y') 'base' '' '' $rp
+Assert-True ($rc -eq 0 -and $Calls.Count -eq 1 -and (Read-Rec $rp).items[0].status -eq 'undone') 'startup.vendor: undo by the same account'
+Reset-Tune; Set-TuneQuiet; Add-Svc 'DellUpdate' 2; $rc = Invoke-Tune 'apply' @('y'); $rp = Get-LatestRecord
+$t = (Get-Content -LiteralPath $rp -Raw).Replace('DellUpdate', 'Spooler'); [System.IO.File]::WriteAllText($rp, $t); Add-Svc 'Spooler' 4
+$rc = Invoke-Tune 'undo' @('y') 'base' '' '' $rp
+Assert-True ($Calls.Count -eq 0 -and (OutText) -match 'left alone: Spooler is not a known PC-maker service') 'undo: a valid-shaped name that is not on the curated list is left alone'
+$VendorRetiredPatterns = @('^Spooler$'); $rc = Invoke-Tune 'undo' @('y') 'base' '' '' $rp
+Assert-True (($Calls -join '|') -eq 'sc.exe config Spooler start= auto') 'undo: a name on the append-only retired list is still undone'
+$VendorRetiredPatterns = @()
+foreach ($bad in @(@('vendor.tasks', 'enabled=1 path=\Microsoft\Windows\ name=SupportAssist'), @('vendor.services', 'start=2 delayed=0 name=a b'), @('sysmain', 'start=2 delayed=0 name=DellUpdate'),
+    @('startup.vendor', 'hive=HKCU key=Run32 sid=S-1-5-21-1 flag=- name=SupportAssist'), @('startup.vendor', 'hive=HKCU key=Run sid=S-1-5-21-1 flag=- name=x;y'),
+    @('defender.scantime', 'day=0 time=1440 quick=0'), @('power.cpu', 'scheme=381b4222-f694-41f0-9685-ff5bb260df2e max=101 min=5'), @('dotnet.env', 'telemetry=$(x) nologo=- aspnetcert=-'))) {
+  Assert-True ($null -eq (ConvertFrom-StateText $bad[0] $bad[1])) "tune state shape rejected: $($bad[0]) '$($bad[1])'"
+}
+Reset-Tune; Set-TuneQuiet; $Pw.Max = 90; $rc = Invoke-Tune 'apply' @('y'); $rp = Get-LatestRecord
+[System.IO.File]::WriteAllText($rp, ([System.IO.File]::ReadAllText($rp) -replace '"id": "power.cpu"', '"id": "defender.exclude"'))
+$rc = Invoke-Tune 'undo' @('y') 'base' '' '' $rp
+Assert-True ($rc -eq 2 -and $Calls.Count -eq 0 -and (OutText) -match 'record rejected \(unknown fix id\)') 'a record holding the removed id defender.exclude is rejected (exit 2)'
+Assert-True (Test-SameState 'vendor.services' 'start=3 delayed=1 name=X' 'start=3 delayed=0 name=X') 'services: the delayed flag does not count for a manual service'
+Assert-True (-not (Test-SameState 'vendor.services' 'start=2 delayed=1 name=X' 'start=2 delayed=0 name=X')) 'services: the delayed flag counts for an automatic service'
+
+Reset-Tune; Set-TuneQuiet; $Mp.Day = 0; $rc = Invoke-Tune 'dry' @() 'tune' '00:00-23:30'
+Assert-True ((OutText) -match 'defender\.scantime .*not offered: the job window 00:00-23:30 leaves no hour') 'defender.scantime: not offered when an hour after the window is still inside it'
+Reset-Tune; Set-TuneQuiet; ${function:Get-ScheduledTask} = { param($TaskPath, $TaskName, $ErrorAction) throw 'The RPC server is unavailable' }; $rc = Invoke-Tune 'dry'
+Assert-True ((OutText) -match 'vendor\.tasks .*not offered: the scheduled tasks could not be read; skipped' -and (OutText) -notmatch 'access denied') 'vendor.tasks: another error is not called "access denied"'
+${function:Get-ScheduledTask} = { param($TaskPath, $TaskName, $ErrorAction) if ($script:TaskDenied) { throw 'Access is denied' }; $r = @($Tasks | Where-Object { (-not $TaskPath -or $_.TaskPath -eq $TaskPath) -and (-not $TaskName -or $_.TaskName -eq $TaskName) }); if ($TaskName -and $r.Count -eq 0) { throw 'No MSFT_ScheduledTask objects found' }; return $r }
+
+$esc = [string][char]27
+$ss = Get-StateSummary 'startup.vendor' @{ Hive = 'HKCU'; Key = 'Run'; Name = "SupportAssist${esc}[2J"; Exe = (('x' * 500) + "${esc}]0;t.exe"); Flag = '-' }
+$sv = Get-StateSummary 'vendor.services' @{ Name = 'DellUpdate'; Display = ("Dell Update${esc}[31m" + ('y' * 900)); Start = 2; Delayed = 0 }
+Assert-True ($ss -notmatch '[\x00-\x1F\x7F]' -and $sv -notmatch '[\x00-\x1F\x7F]' -and $ss.Length -lt 250 -and $sv.Length -lt 200) 'the consent prompt shows Run entry, program and service display names without control characters, capped'
+
+Write-Host 'tune arguments'
+Assert-Equal (Get-UndoArg @('-Hours', '22:00-07:00')).Hours '22:00-07:00' 'Get-UndoArg: -Hours value'
+Assert-True ((Get-UndoArg @('-Hours')).Error -match '-Hours needs') 'Get-UndoArg: -Hours without a value'
+Assert-Equal ((Get-UndoArg @('-WorkRoot', 'C:/lq')).Rest -join ' ') '-WorkRoot C:/lq' 'Get-UndoArg: -WorkRoot is not an argument any more'
+foreach ($e in @(@(@{ Hours = '22:00-07:00' }, $false, 'apply', 'goes with -Tune'), @(@{ Hours = $null }, $true, 'undo', '-Undo and -List'), @(@{ Hours = '7-9' }, $true, 'apply', '-Hours must'))) {
+  Assert-True ((Get-TuneArgError $e[0] $e[1] $e[2]) -match [regex]::Escape($e[3])) "tune arguments refused: $($e[3])"
+}
+Assert-Equal (Get-TuneArgError @{ Hours = '22:00-07:00' } $true 'dry') '' 'tune arguments accepted'
+
+Write-Host 'curated vendor list'
+# Every pattern shipped in a release (0.5.0). Append the next release's patterns here; each must stay in the current
+# list or move to $VendorRetiredPatterns, so records written by that release can still be undone.
+$ShippedPatterns = @(
+  '^Dell ?SupportAssist', '^SupportAssist', '^Dell ?(Update|Command ?Update|Digital ?Delivery|Data ?Vault|TechHub|Optimizer|Core ?Services)', '^DDV(DataCollector|RulesProcessor|CollectorSvcApi)$',
+  '^HP ?(Support ?Assistant|Support ?Solutions|Analytics|App ?Helper|Diagnostics|Insights|Touchpoint|System ?Info|Network ?Cap|Comm ?Recovery|JumpStart)', '^HP(AppHelperCap|DiagsCap|NetworkCap|SysInfoCap)$', '^HpTouchpointAnalyticsService$',
+  '^Lenovo ?(Vantage|Service ?Bridge|Smart ?Standby|Utility|Welcome|System ?Update)', '^ImControllerService$', '^LITSSVC$',
+  '^ASUS ?(Optimization|Software ?Manager|System ?Analysis|System ?Diagnosis|Link|Update|App ?Service)', '^ArmouryCrate', '^AsusUpdateCheck$',
+  '^Acer ?(Quick ?Access|Care ?Center|Jumpstart|Collection|Product ?Registration)', '^MSI ?(Center|Dragon ?Center)', '^Samsung ?(Update|Settings)',
+  '^Intel\(R\) ?(Driver ?(&|and) ?Support|Computing ?Improvement)', '^DSA(Update)?Service$', '^NvTelemetryContainer$', '^NVIDIA ?(GeForce ?Experience|Telemetry)'
+)
+foreach ($p in $ShippedPatterns) { Assert-True (@($VendorPatterns) + @($VendorRetiredPatterns) -ccontains $p) "shipped pattern '$p' is still in the list or the retired list" }
+function Get-ListValues([string]$Path, [string]$Var) {
+  $a = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
+  $as = @($a.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq $Var }, $true))
+  if ($as.Count -ne 1) { return $null }
+  return @($as[0].Right.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true) | ForEach-Object { $_.Value })
+}
+$lf = Get-ListValues $fixPath '$VendorPatterns'; $lt = Get-ListValues (Join-Path $root 'lanq-makeready-tune.ps1') '$VendorPatterns'
+Assert-True ($lf.Count -gt 10 -and ($lf -join "`n") -ceq ($lt -join "`n")) 'the vendor list in the fix script and the tune script are identical'
+Assert-Equal (@(Get-ListValues $fixPath '$VendorRetiredPatterns') -join ',') '' 'the retired list starts empty (append-only from here)'
+foreach ($p in $lf) {
+  $ok = $true; try { [void][regex]::new($p) } catch { $ok = $false }
+  Assert-True ($ok -and $p -notmatch '\.\*|\.\+|^\.|\|\||^\||\|$' -and $p -match '[A-Za-z]{4}') "vendor pattern '$p': a valid regex with a literal name, no bare wildcard"
+}
+$core = @('wuauserv', 'WinDefend', 'BITS', 'sshd', 'WSearch', 'SysMain', 'Dnscache', 'EventLog', 'Schedule', 'mpssvc', 'Spooler', 'UsoSvc', 'DoSvc', 'Windows Update', 'Microsoft Defender Antivirus Service',
+  'OneDrive', 'MicrosoftEdgeUpdateTaskMachineCore', 'GoogleUpdateTaskMachineCore', 'SecurityHealth', 'Docker Desktop Service', 'docker', 'ssh-agent', 'Update', 'Service', 'Updater', 'Helper', 'Intel', 'NVIDIA Display Container LS', 'HP', 'Dell', 'Lenovo')
+foreach ($n in $core) { Assert-True (-not (Test-Vendor $n)) "vendor list does not match '$n'" }
+foreach ($n in 'SupportAssistAgent', 'Dell SupportAssist Remediation', 'HP Support Assistant Service', 'HpTouchpointAnalyticsService', 'ImControllerService', 'Lenovo Vantage Service', 'ArmouryCrateService', 'NvTelemetryContainer', 'DSAService') {
+  Assert-True (Test-Vendor $n) "vendor list matches '$n'"
+}
+
 Write-Host 'ScannerUnchangedAndStillReadOnly'
 $scanPs = [System.IO.File]::ReadAllText((Join-Path $root 'lanq-makeready.ps1')); $scanSh = [System.IO.File]::ReadAllText((Join-Path $root 'lanq-makeready.sh'))
 Assert-True ($scanPs -notmatch 'region FIXES' -and $scanSh -notmatch 'region FIXES' -and $scanPs -notmatch 'lanq-makeready-fix' -and $scanSh -notmatch 'lanq-makeready-fix') 'scanners have no fix table and do not call the fix script'
@@ -713,7 +959,7 @@ foreach ($pat in 'Set-ItemProperty', 'Remove-ItemProperty', 'Set-Service', 'Star
 Assert-True ($scanPs -match "param\(\[string\]\`$Json, \[string\]\`$Out, \[switch\]\`$Redact, \[string\]\`$Hours, \[switch\]\`$Quiet," ) 'scanner parameters unchanged (no fix switch)'
 
 Write-Host 'files'
-foreach ($f in 'lanq-makeready.ps1', 'lanq-makeready.sh', 'lanq-makeready-fix.ps1', 'lanq-makeready-fix.sh', 'tests/run.ps1', 'tests/run.sh', 'tests/fix.ps1', 'tests/fix.sh') {
+foreach ($f in 'lanq-makeready.ps1', 'lanq-makeready.sh', 'lanq-makeready-fix.ps1', 'lanq-makeready-fix.sh', 'tests/run.ps1', 'tests/run.sh', 'tests/fix.ps1', 'tests/fix.sh', 'lanq-makeready-tune.ps1', 'tests/tune.ps1', 'tests/real-fix.ps1') {
   $b = [System.IO.File]::ReadAllBytes((Join-Path $root $f))
   Assert-Equal @($b | Where-Object { ($_ -lt 32 -and $_ -ne 9 -and $_ -ne 10 -and $_ -ne 13) -or $_ -eq 127 }).Count 0 "$f has no control bytes (BEL, backspace, ...)"
 }
