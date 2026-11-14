@@ -74,6 +74,36 @@ foreach ($d in @(@('O:S-1-5-21-1-2-3-1001G:SYD:PAI(A;;FA;;;BA)', 'owned by S-1-5
 }
 Assert-True ($RecordDirSddl -cmatch '^O:BA' -and $RecordDirSddl -cmatch 'D:PAI') 'the record folder is owned by Administrators and protected (no inheritance)'
 
+Write-Host 'M-B (round 4): the folder above the record folder and the drive root are checked too (every elevated fix)'
+$PdDefault = 'O:SYG:SYD:PAI(A;OICIIO;GA;;;CO)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;CI;0x116;;;BU)'   # the Windows default C:\ProgramData
+$RootDef = 'O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464G:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464D:(A;;LC;;;AU)(A;OICIIO;SDGXGWGR;;;AU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)'
+Assert-Equal (Get-ParentRisk $PdDefault).Why '' 'M-B: the default C:\ProgramData passes (Users may add files and folders; CREATOR OWNER is inherit-only)'
+foreach ($c in @(@('O:SYG:SYD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)', 'S-1-1-0', 'Everyone full control (this dev PC)'), @('O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x10000;;;AU)', 'S-1-5-11', 'DELETE for Authenticated Users'),
+    @('O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;CI;0x40;;;BU)', 'S-1-5-32-545', 'DELETE_CHILD for Users'), @('O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;CI;WD;;;BU)', 'S-1-5-32-545', 'WRITE_DAC for Users'))) {
+  $pr = Get-ParentRisk $c[0]; Assert-True ($pr.Why -match 'may delete or rename' -and $pr.Sid -eq $c[1]) "M-B: refused: $($c[2]) (names $($c[1]))"
+}
+Assert-True ((Get-ParentRisk 'O:S-1-5-21-1-2-3-1001G:SYD:PAI(A;OICI;FA;;;BA)').Why -match 'owned by') 'M-B: a C:\ProgramData owned by a user is refused'
+Assert-True ((Get-ParentRisk '').Why -ne '' -and (Get-ParentRisk 'O:SYG:SYD:PAI(A;OICI;FA;;;BA)(XA;;0x1;;;WD;(@User.x == "y"))').Why -ne '') 'M-B: unreadable or conditional: refused'
+$realPathSddl = ${function:Get-PathSddl}; $realRecDir = ${function:Get-FixRecordDir}
+$script:Psd = @{}
+function Get-PathSddl([string]$Path) { $v = $script:Psd[$Path.TrimEnd('\')]; if ($null -eq $v) { return '' }; return $v }
+$rdT = 'C:\ProgramData\lanq-makeready'
+$script:Psd = @{ 'C:\ProgramData\lanq-makeready' = $RecordDirSddl; 'C:\ProgramData' = $PdDefault; 'C:' = $RootDef }
+Assert-Equal (Test-FixRecordDirTrusted $rdT) '' 'M-B: the record folder under the default C:\ProgramData on the default C:\ is trusted'
+$script:Psd['C:\ProgramData'] = 'O:SYG:SYD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
+$w = Test-FixRecordDirTrusted $rdT
+Assert-True ($w -match 'C:\\ProgramData' -and $w -match 'rename or replace' -and $w -match 'Everyone' -and $w -match [regex]::Escape('icacls "C:\ProgramData" /remove:g *S-1-1-0')) 'M-B: C:\ProgramData with Everyone full control: refused, says what is wrong and how to restore the default (text only)'
+$script:Psd['C:\ProgramData'] = ''
+Assert-True ((Test-FixRecordDirTrusted $rdT) -match 'link or its permissions cannot be read') 'M-B: C:\ProgramData a link (or unreadable): refused'
+$script:Psd['C:\ProgramData'] = $PdDefault; $script:Psd['C:'] = 'O:SYG:SYD:PAI(A;OICI;FA;;;BA)(A;;0x40;;;AU)'
+Assert-True ((Test-FixRecordDirTrusted $rdT) -match 'drive root') 'M-B: a drive root others may rename in: refused'
+$script:Psd['C:'] = $RootDef; $script:Psd['C:\ProgramData'] = 'O:SYG:SYD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
+function Get-FixRecordDir { return 'C:\ProgramData\lanq-test-none-0f3c' }
+Assert-True ((Get-FixRecordDirProblem) -match 'rename or replace') 'M-B: the record folder does not exist yet: the folder above it is checked before it is made'
+$script:Psd['C:\ProgramData'] = $PdDefault
+Assert-Equal (Get-FixRecordDirProblem) '' 'M-B: missing record folder under a default C:\ProgramData: fine (it is made later)'
+Set-Item -Path Function:\Get-PathSddl -Value $realPathSddl; Set-Item -Path Function:\Get-FixRecordDir -Value $realRecDir
+
 Write-Host 'L5 key lines are shown before asking'
 $ks = Get-AuthKeySummary @('# comment', '', 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample build@build-01', 'command="x" ssh-rsa AAAAB3NzaC1yc2E= old-key', 'garbage')
 Assert-Equal @($ks).Count 3 'three non-comment lines'
@@ -1296,6 +1326,8 @@ Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and (OutText) -match 'not offere
 Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and (OutText) -match 'not offered: .*\.lanq-pin') 'H-A: a .lanq-pin that is not the admin-only one this script made: not used'
 $script:NotOurs = @(); $rc = Invoke-Dx 'apply' @('C:\lanq-work')
 Assert-True ($rc -eq 0 -and ($Calls -join '|') -eq $MatrixCalls) 'H-A: with its .lanq-pin back the folder is used again'
+$fx3 = [System.IO.File]::ReadAllText($fixPath)
+Assert-True ($fx3 -match '(?s)New-FixSecuredDir \$stage \$AdminOnlySddl; New-FixSecuredDir "\$stage\\\$PinName" \$AdminOnlySddl.{0,400}SetAccessControl') 'L-3 (round 4): lanq-work is staged admin-only, gets its pin, and only then its own permissions'
 Assert-True (Test-MpResource @('file:_C:\a\eicar-1.com') 'C:\a\eicar-1.com') 'L-1: a threat-history resource that is exactly file:_<path> counts'
 foreach ($r in @('file:_C:\a\eicar-1.com->x.zip', 'file:_C:\x\C:\a\eicar-1.com', 'containerfile:_C:\a\eicar-1.com', 'file:_C:\a\eicar-1.com.zip', 'C:\a\eicar-1.com')) {
   Assert-True (-not (Test-MpResource @($r) 'C:\a\eicar-1.com')) "L-1: a resource that only contains the path does not count: $r"
@@ -1433,6 +1465,11 @@ $dotAt = $poolText.IndexOf('. $fixPath'); $trustAt = $poolText.IndexOf('Test-Poo
 Assert-True ($dotAt -gt 0 -and $trustAt -gt 0 -and $trustAt -lt $dotAt) 'M-2: the pool harness checks its folder, its parents and both files before it dot-sources the fix script'
 # M-1/L-c: the L2 junction lives in an admin-only folder of ours (staged and moved), and is tracked for clean-up
 Assert-True ($poolText -match 'New-PoolDir \(.*pool-jp-' -and $poolText -match '\$script:Links' -and $poolText -notmatch 'mklink.*\$work\\pool-jn') 'M-1/L-c: the L2 junction is made inside an admin-only folder of ours and removed even on interrupt'
+Assert-True ($poolText -match '\$why = Initialize-FixRecordDir' -and $poolText -notmatch '\[void\]\(Initialize-FixRecordDir\)') 'M-A (round 4): the pool harness makes the record folder and stops when it is not trusted (never discards the result)'
+Assert-True ($poolText -match '(?s)finally \{.{0,200}Get-FixRecordDirProblem') 'M-A (round 4): the clean-up re-checks the record folder before it deletes anything'
+Assert-True ($poolText -match '(?s)foreach \(\$l in @\(\$script:Links\)\).{0,300}Test-SelfTestDir.{0,200}Test-WorkDirSame') 'L-1 (round 4): the link is removed only while its folder and lanq-work are still ours'
+$docT = [System.IO.File]::ReadAllText((Join-Path $root 'docs/TUNE.md'))
+Assert-True ($docT -match 'SHA256SUMS' -and $docT -match 'gh attestation verify') 'L-2 (round 4): the procedure says to verify the release candidate before copying it'
 Assert-True ($poolText -notmatch 'Test-WorkDirSame \$work \(Get-WorkDirFacts \$work\)\.FileId') 'L-e: the pool clean-up compares lanq-work with the file id it saw at the start, not the current one'
 # M-3: the documented procedure (a copy under C:\ProgramData, icacls /inheritance:r with Administrators and SYSTEM) passes
 $ptAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tests/pool-defender.ps1'), [ref]$null, [ref]$null)
@@ -1458,6 +1495,13 @@ if ($ptFn.Count -eq 1) {
     @('O:BAG:SYD:PAI(A;OICI;FA;;;BA)(XA;;0x1;;;WD;(@User.x == "y"))', $false, 'a conditional entry'),
     @('', $true, 'unreadable'))
   foreach ($c in $badPairs) { Assert-True ((Test-PoolTrust $c[0] $c[1]) -ne '') "M-3: refused: $($c[2])" }
+  $ppFn = @($ptAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-PoolPath' }, $true))
+  Assert-Equal $ppFn.Count 1 'L-4 (round 4): Test-PoolPath is defined in the pool harness'
+  if ($ppFn.Count -eq 1) {
+    . ([scriptblock]::Create($ppFn[0].Extent.Text))
+    foreach ($x in '\\server\share\lanq-rc', '\\?\UNC\server\share\x', '//server/share/x', 'Z:x') { Assert-True ((Test-PoolPath $x) -ne '') "L-4: refused: $x" }
+    foreach ($x in 'C:\ProgramData\lanq-rc', 'C:\ProgramData\lanq-rc\tests\pool-defender.ps1', 'C:\') { Assert-Equal (Test-PoolPath $x) '' "L-4: a local path passes: $x" }
+  }
 }
 Assert-True ($poolText -match 'exactly one new record' -and $poolText -match 'INTERRUPTED' -and $poolText -match 'finally' -and $poolText -match 'Test-SelfTestDir' -and $poolText -match 'Test-WorkDirSame' -and $poolText -match 'Test-PoolTrust' -and $poolText -match 'Get-FixRecordDirProblem' -and $poolText -notmatch 'Sort-Object -Property LastWriteTimeUtc') 'M-A/M-B/L-6: the pool harness undoes only the one record its own apply wrote, is interrupt-safe, re-checks every folder, refuses a checkout others may change'
 Assert-True ($poolText -notmatch 'DisableRealtimeMonitoring' -and $poolText -match 'OPEN QUESTION 1' -and $poolText -match 'OPEN QUESTION 2' -and $poolText -match 'GITHUB_ACTIONS') 'MEDIUM-3: the pool harness never touches real-time protection, reports both open questions, and refuses in CI'
