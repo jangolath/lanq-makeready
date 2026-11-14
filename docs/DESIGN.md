@@ -443,8 +443,13 @@ that already runs as admin or root on the PC.
   user, vendor or `$` folder and which is not in, at or above any ProfileList profile, Windows, Program Files,
   ProgramData or TEMP, or (B) exactly this account's `.nuget\packages`; never `~`, device names, `.`/`..`, a drive
   root or a junction on the existing path (the tune scan uses the same function, checked equal by a test, but only
-  to say whether a folder could be excluded). The fix also requires the folder to exist and be owned by
-  Administrators, SYSTEM or the current user, and checks again after the answer and right before the change. The
+  to say whether a folder could be excluded). The fix also requires the folder to exist, to be on a local fixed volume of
+  its own (QueryDosDevice, through a small Add-Type helper that only opens a handle with no access rights, reads its
+  final path with GetFinalPathNameByHandle and a DOS device name; the AST guard allows Add-Type only for that
+  constant source), to really be where its name says, to be owned by Administrators, SYSTEM or the current user, and
+  to let nobody else write to it or delete folders in its parent (by SID). The tune scan checks the drive without
+  native calls (DriveType and the partition letters). Everything is checked again after the answer and right before
+  the change. The
   NuGet cache is offered only when the process user SID equals the console user's (`Win32_ComputerSystem.UserName`),
   since `%USERPROFILE%` is otherwise another account's. A folder already
   covered is skipped and never recorded; nothing is offered unless AMRunningMode is Normal; undo removes exactly the

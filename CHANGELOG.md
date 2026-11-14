@@ -31,8 +31,12 @@
   only an allow-listed folder is offered: a top-level build folder such as `C:\lq` or `D:\build` (not a Windows,
   program, user, vendor or `$` folder, and not in, at or above any ProfileList profile, Windows, Program Files,
   ProgramData or TEMP), or exactly your own `<profile>\.nuget\packages`; never `~`, reserved device names, `.`/`..`,
-  a drive root or a junction on the path; the folder must exist and be owned by Administrators, SYSTEM or you, and is
-  checked again right before the change; a work_root inside a profile still scans, but is not offered for exclusion; the NuGet cache is offered only
+  a drive root or a junction on the path; the folder must exist, be owned by Administrators, SYSTEM or you, and
+  only they (plus CREATOR OWNER and TrustedInstaller) may change it or delete folders in its parent (the note shows an
+  `icacls` command; permissions are never changed); it must be on a local fixed volume of its own (no subst or mapped
+  drive, checked with QueryDosDevice) and really be where its name says (GetFinalPathNameByHandle); tool folders
+  (Python*, msys*, cygwin*, nvm*, php*, tools, hostedtoolcache, Temp, ...) and anything at, under or above a PATH
+  entry are refused, and an unreadable ProfileList fails closed; everything is checked again right before the change; a work_root inside a profile still scans, but is not offered for exclusion; the NuGet cache is offered only
   when the elevated account is the one logged on at the console;
   folders already covered by an exclusion are skipped and never recorded; nothing is offered unless AMRunningMode is
   Normal. Undo removes exactly the folders the record says were added.

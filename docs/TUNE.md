@@ -91,18 +91,36 @@ problems and the `administrators_authorized_keys` ACL (fix `ssh.aclkeys`). The t
 
 Inside a Windows container the host-level checks report SKIP.
 
-**Build folders (Defender exclusions).** Only two kinds of folder can ever be excluded: (A) a top-level build
-folder such as `C:\lq` or `D:\build`, or (B) exactly this account's NuGet cache, `<profile>\.nuget\packages`
-(a `NUGET_PACKAGES` override must itself qualify as (A)). For (A) the top-level folder must not be a Windows, program,
-user, vendor or hidden one (`Windows*`, `Program Files*`, `ProgramData`, `Users`, `Documents and Settings`, `PerfLogs`,
-`inetpub`, `ESD`, `Recovery`, `Boot`, `System Volume Information`, any `$...` folder, `OneDrive*`, `Intel`, `AMD`,
-`NVIDIA`, `Drivers`, `MSOCache`), and the folder must not be in, at or above any user profile Windows knows (the
-ProfileList, so profiles on other drives too), `%SystemRoot%`, any Program Files folder, ProgramData or TEMP/TMP. So a
-folder inside a profile, such as `<profile>\lq`, is not offered: use a top-level build folder such as `C:\lq` or
-`D:\build`. Always refused: a drive root, `.` or `..`, `~` (8.3 short names), reserved device names (`CON`, `NUL`,
-`COM1`, `LPT1`, ...), a part ending in a dot or space, a path Windows would read differently, and a junction or
-symbolic link anywhere on the existing path. The fix also requires the folder to exist and to be owned by
-Administrators, SYSTEM or you ("create the folder first"), and checks all of this again right before the change.
+**Build folders (Defender exclusions).** A folder is offered for an exclusion only when it is **an existing local
+folder, not a system/profile/tool area or on PATH, that only Administrators, SYSTEM and you can change**. In detail:
+
+- It is (A) a top-level build folder such as `C:\lq` or `D:\build`, or (B) exactly this account's NuGet cache,
+  `<profile>\.nuget\packages` (a `NUGET_PACKAGES` override must itself qualify as (A)). A folder inside a profile, such
+  as `<profile>\lq`, is not offered: use a top-level build folder such as `C:\lq` or `D:\build`.
+- For (A) the top-level folder is not a Windows, program, user, tool, vendor or hidden one (`Windows*`,
+  `Program Files*`, `ProgramData`, `Users`, `Documents and Settings`, `PerfLogs`, `inetpub`, `ESD`, `Recovery`, `Boot`,
+  `EFI`, `System Volume Information`, `Config.Msi`, any `$...` folder, `OneDrive*`, `Intel`, `AMD`, `NVIDIA`, `Dell`,
+  `HP`, `SWSetup`, `Drivers`, `MSOCache`, `XboxGames`, `Temp`, `tmp`, `tools`, `hostedtoolcache`, `Python*`, `msys*`,
+  `cygwin*`, `nvm*`, `php*`), and the folder is not in, at or above any user profile Windows knows (the ProfileList,
+  so profiles on other drives too; if that list cannot be read, only (B) is possible), `%SystemRoot%`, any Program
+  Files folder, ProgramData, TEMP/TMP, or any folder on the machine or user PATH.
+- It is on a local fixed disk with a volume of its own: not a network, removable, `subst` or mapped drive (the fix asks
+  Windows with `QueryDosDevice`, the scan checks the partitions), and the fix opens it and asks Windows where it really
+  is (`GetFinalPathNameByHandle`); that must be the same folder.
+- Always refused: a drive root, `.` or `..`, `~` (8.3 short names), reserved device names (`CON`, `NUL`, `COM1`,
+  `LPT1`, ...), a part ending in a dot or space, a path Windows would read differently, and a junction or symbolic link
+  anywhere on the existing path.
+- The fix also requires the folder to exist ("create the folder first") and to be owned by Administrators, SYSTEM or
+  you, and its permissions to let nobody else write, append, delete, change permissions or take ownership (CREATOR
+  OWNER and TrustedInstaller are fine), with nobody else allowed to delete folders in its parent. A new folder in a
+  drive root usually inherits "Authenticated Users: Modify", so it is refused until you tighten it yourself; the
+  script never changes permissions, it shows the command:
+
+  ```text
+  icacls "C:\lq" /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F "<your-account>:(OI)(CI)F"
+  ```
+
+  All of this is checked when the item is shown, again after your answer, and again right before the change.
 
 `-WorkRoot` itself only has to be a valid LanQueue work_root for the scan (a drive path with no `.` part, not a whole
 drive), in the scan and in the fix script, so a work_root inside a profile still scans and the other fixes still run;

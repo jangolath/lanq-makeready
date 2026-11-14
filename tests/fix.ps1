@@ -143,7 +143,7 @@ function Get-FixGuardViolations([string]$Path) {
   if (($regionFns -join ',') -ne 'Get-FixCommand,Assert-Native,Invoke-FixChange') { [void]$bad.Add("functions in FIXES must be exactly Get-FixCommand, Assert-Native, Invoke-FixChange (found: $($regionFns -join ', '))") }
   $fnOf = { param($Node) $p = $Node.Parent; while ($p) { if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $p.Name }; $p = $p.Parent }; return '' }
   $read = @('Get-Service', 'Get-CimInstance', 'Get-Command', 'Get-Item', 'Get-Acl', 'Get-ChildItem', 'Get-Content', 'Get-Alias', 'Test-Path', 'Join-Path', 'Split-Path',
-    'Get-NetAdapter', 'Get-PhysicalDisk', 'Get-ScheduledTask', 'Get-MpComputerStatus', 'Get-MpPreference',
+    'Get-NetAdapter', 'Get-PhysicalDisk', 'Get-ScheduledTask', 'Get-MpComputerStatus', 'Get-MpPreference', 'Add-Type',
     'Select-Object', 'Where-Object', 'ForEach-Object', 'Sort-Object', 'ConvertFrom-Json', 'Write-Host', 'New-Object', 'Get-Location',
     'Microsoft.PowerShell.Utility\Get-Alias', 'Microsoft.PowerShell.Core\Get-Command')
   $mut = @('Set-Service', 'Start-Service', 'Stop-Service', 'Set-ItemProperty', 'Remove-ItemProperty', 'Set-Acl', 'New-Item', 'Disable-ScheduledTask', 'Enable-ScheduledTask',
@@ -154,7 +154,7 @@ function Get-FixGuardViolations([string]$Path) {
     "`$PowercfgExe|@('/q', 'SCHEME_CURRENT', `$Sub, `$Setting)")
   $okTypes = @('System.Diagnostics.ProcessStartInfo', 'Security.Principal.WindowsPrincipal', 'System.Text.UTF8Encoding', 'System.Collections.ArrayList', 'System.IO.FileInfo',
     'System.Security.AccessControl.RawSecurityDescriptor', 'System.Security.AccessControl.DirectorySecurity', 'System.Security.AccessControl.FileSecurity', 'System.IO.DirectoryInfo',
-    'System.IO.FileStream', 'System.Security.Principal.NTAccount')
+    'System.IO.FileStream', 'System.Security.Principal.NTAccount', 'System.IO.DriveInfo')
   foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
     $n = $c.GetCommandName(); $in = & $inR $c; $fn = & $fnOf $c
     if (-not $n) { [void]$bad.Add("dynamic command: $($c.Extent.Text)"); continue }
@@ -173,13 +173,14 @@ function Get-FixGuardViolations([string]$Path) {
       }
     }
     if ($n -eq 'ForEach-Object' -and -not ($c.CommandElements.Count -gt 1 -and $c.CommandElements[1] -is [System.Management.Automation.Language.ScriptBlockExpressionAst])) { [void]$bad.Add("ForEach-Object without a script block: $($c.Extent.Text)") }
+    if ($n -eq 'Add-Type' -and ($fn -ne 'Initialize-FixNative' -or $c.Extent.Text -cne 'Add-Type -TypeDefinition $NativeSrc -ErrorAction Stop')) { [void]$bad.Add("Add-Type other than the native read helper: $($c.Extent.Text)") }
     if ($n -eq 'New-Object' -and $okTypes -notcontains $c.CommandElements[1].Extent.Text.Trim("'`"")) { [void]$bad.Add("New-Object $($c.CommandElements[1].Extent.Text)") }
   }
   $okMembers = @('Add', 'RemoveAt', 'Remove', 'Close', 'ReadToEndAsync', 'WaitForExit', 'Wait', 'Kill', 'Start', 'Trim', 'TrimEnd', 'Split', 'Replace', 'StartsWith', 'Substring',
     'ToString', 'GetSecurityDescriptorSddlForm', 'SetSecurityDescriptorSddlForm', 'GetOwner', 'Translate', 'IsInRole', 'GetCurrent', 'GetCurrentProcess', 'GetFolderPath', 'Matches',
     'ToInt64', 'Exists', 'ReadAllText', 'WriteAllText', 'Move', 'CreateDirectory', 'WriteLine', 'ReadLine', 'IsPathRooted', 'ContainsKey', 'Round', 'ToUniversalTime',
     'GetValueNames', 'GetValueKind', 'GetValue', 'Create', 'AddScript', 'BeginInvoke', 'WaitOne', 'BeginStop', 'EndInvoke', 'Dispose', 'ComputeHash', 'ToBase64String', 'FromBase64String',
-    'GetFullPath', 'ToLowerInvariant', 'GetBytes', 'Write', 'Min', 'Floor', 'ToByte', 'ExpandEnvironmentVariables', 'EndsWith', 'GetAttributes', 'GetTempPath', 'GetEnvironmentVariable', 'Contains')
+    'GetFullPath', 'ToLowerInvariant', 'GetBytes', 'Write', 'Min', 'Floor', 'ToByte', 'ExpandEnvironmentVariables', 'EndsWith', 'GetAttributes', 'GetTempPath', 'GetEnvironmentVariable', 'Contains', 'FinalPath', 'DosDevice')
   $onlyIn = @{ 'WriteAllText' = @('Save-FixRecord'); 'Move' = @('Save-FixRecord'); 'CreateDirectory' = @('New-FixSecuredDir'); 'Start' = @('Invoke-Native'); 'Kill' = @('Invoke-Native')
     'Remove' = @('Invoke-Native'); 'SetSecurityDescriptorSddlForm' = @('Invoke-FixChange', 'New-FixSecuredDir', 'New-FixSecuredFile'); 'AddScript' = @('Get-FixProcessTable'); 'BeginStop' = @('Get-FixProcessTable')
     'Write' = @('New-FixSecuredFile') }
@@ -731,7 +732,10 @@ $RunSources = @{ 'HKCU|Run' = @('HKCU:\lanq-test\Run', 'HKCU:\lanq-test\Approved
 $FixModuleCmds = @{}   # the fakes below are functions over module command names on purpose
 $TR = "$env:SystemDrive\lanq-fixtest-$([Guid]::NewGuid().ToString('N'))"; $WRP = "$TR\lq"; $WRF = $WRP.Replace('\', '/'); $NGP = "$TR\nuget\packages"
 foreach ($d in $WRP, $NGP) { [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path $d -Force) }   # real top-level build folders (they must exist)
+$MeSid = "$([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)"
+& "$env:SystemRoot\System32\icacls.exe" $TR /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' "*${MeSid}:(OI)(CI)F" | Out-Null   # only Administrators, SYSTEM and me
 $env:NUGET_PACKAGES = $NGP
+try {
 function Reset-Tune {
   Reset-Fake
   $script:Reg = @{}; $script:RegKeys = New-Object System.Collections.ArrayList
@@ -739,7 +743,7 @@ function Reset-Tune {
   $script:Svcs = New-Object System.Collections.ArrayList; $script:Tasks = New-Object System.Collections.ArrayList; $script:TaskDenied = $false
   $script:Disks = @([pscustomobject]@{ MediaType = 'SSD'; BusType = 'NVMe' })
   $script:Mp = @{ Mode = 'Normal'; Tamper = $false; Ex = New-Object System.Collections.ArrayList; Readable = $true; Day = 0; Time = [TimeSpan]'02:00:00'; Quick = [TimeSpan]::Zero }
-  $script:FakeSid = 'S-1-5-21-1-2-3-1001'; $script:ConsoleSid = 'S-1-5-21-1-2-3-1001'; $script:DirOwner = 'S-1-5-21-1-2-3-1001'
+  $script:FakeSid = $MeSid; $script:ConsoleSid = $MeSid; $script:DirOwner = $MeSid
   Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' 'EditionID' 'String' 'Professional'
   foreach ($k in $EnvKey, $SvcKey) { [void]$RegKeys.Add($k) }
 }
@@ -751,6 +755,7 @@ function Test-RegKey([string]$Path) { return ($RegKeys -contains $Path) }
 function Get-UserSid { return $script:FakeSid }
 function Get-ConsoleUserSid { return $script:ConsoleSid }
 function Get-PathOwnerSid([string]$Path) { return $script:DirOwner }
+function Get-DirSddl([string]$Path) { try { return "$((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path -ErrorAction Stop).Sddl)" } catch { return '' } }   # the real ACL (Get-Acl is faked above)
 function New-Item { param($Path, [switch]$Force, $ErrorAction, $ItemType) if ($ItemType) { return (Microsoft.PowerShell.Management\New-Item -ItemType $ItemType -Path $Path) }; Note-Call "New-Item $Path"; [void]$RegKeys.Add($Path) }
 function Set-ItemProperty { param($Path, $LiteralPath, $Name, $Value, $Type, $ErrorAction) $p = "$LiteralPath$Path"; $v = $Value; if ($Type -eq 'Binary') { $v = [byte[]]$Value }; Note-Call "Set-ItemProperty $p $Name $(@($Value) -join ',') $Type"; Set-Reg $p $Name "$Type" $v }
 function Remove-ItemProperty { param($Path, $LiteralPath, $Name, $ErrorAction) $p = "$LiteralPath$Path"; Note-Call "Remove-ItemProperty $p $Name"; $script:Reg.Remove("$p|$Name") }
@@ -875,10 +880,10 @@ $j = Read-Rec (Get-LatestRecord)
 Assert-True (@($j.items).Count -eq 64 -and $script:Asked -eq 64 -and ([regex]::Matches((OutText), 'record is full')).Count -eq 2) 'record cap: at most 64 changes per record; the rest are not offered (run again)'
 Reset-Tune; Set-TuneQuiet; Set-Reg 'HKCU:\lanq-test\Run' 'SupportAssistTray' 'String' 'x.exe'
 $rc = Invoke-Tune 'apply' @('y'); $rp = Get-LatestRecord
-Assert-True ((Get-Content -LiteralPath $rp -Raw) -match 'sid=S-1-5-21-1-2-3-1001') 'startup.vendor: the account SID is recorded'
+Assert-True ((Get-Content -LiteralPath $rp -Raw) -match "sid=$MeSid") 'startup.vendor: the account SID is recorded'
 $script:FakeSid = 'S-1-5-21-1-2-3-1002'; $rc = Invoke-Tune 'undo' @('y') 'base' '' '' $rp
-Assert-True ($Calls.Count -eq 0 -and $script:Asked -eq 0 -and (OutText) -match 'left alone: this entry belongs to the account S-1-5-21-1-2-3-1001') 'startup.vendor: undo under another account (SID) refused for HKCU'
-$script:FakeSid = 'S-1-5-21-1-2-3-1001'; $rc = Invoke-Tune 'undo' @('y') 'base' '' '' $rp
+Assert-True ($Calls.Count -eq 0 -and $script:Asked -eq 0 -and (OutText) -match "left alone: this entry belongs to the account $MeSid") 'startup.vendor: undo under another account (SID) refused for HKCU'
+$script:FakeSid = $MeSid; $rc = Invoke-Tune 'undo' @('y') 'base' '' '' $rp
 Assert-True ($rc -eq 0 -and $Calls.Count -eq 1 -and (Read-Rec $rp).items[0].status -eq 'undone') 'startup.vendor: undo by the same account'
 Reset-Tune; Set-TuneQuiet; Add-Svc 'DellUpdate' 2; $rc = Invoke-Tune 'apply' @('y'); $rp = Get-LatestRecord
 $t = (Get-Content -LiteralPath $rp -Raw).Replace('DellUpdate', 'Spooler'); [System.IO.File]::WriteAllText($rp, $t); Add-Svc 'Spooler' 4
@@ -914,26 +919,59 @@ Assert-True (@($Calls | Where-Object { $_ -match 'MpPreference' }).Count -eq 0) 
 
 Write-Host 'tune: build folders (work_root, NuGet) are checked before an exclusion'
 $upf = Get-CurrentProfile
-$realProfiles = ${function:Get-ProfileRoots}; $realCurrent = ${function:Get-CurrentProfile}
-${function:Get-ProfileRoots} = { @('C:\Users', 'C:\Users\Default', 'C:\Users\Public', 'D:\Users\bob', $upf) + @(& $realProfiles) }   # test seam: a profile on another drive
+$realProfiles = ${function:Get-ProfileRoots}; $realCurrent = ${function:Get-CurrentProfile}; $realPathDirs = ${function:Get-PathDirs}; $realDriveType = ${function:Get-DriveTypeName}
+${function:Get-ProfileRoots} = { , (@('C:\Users', 'C:\Users\Default', 'C:\Users\Public', 'D:\Users\bob', $upf) + @(& $realProfiles)) }   # test seam: a profile on another drive
 $badDirs = @('C:/.', 'C:/lq/.', 'C:/lq/..', 'C:/', 'C:', 'C:/Windows', 'C:/Users', 'C:/ProgramData', 'C:/Program Files', 'C:/lq./x', 'C:/lq /x',
   "$env:SystemRoot\System32", "$env:SystemRoot\Temp", "$([Environment]::GetFolderPath('ProgramFiles'))\x", "$env:ProgramData\Microsoft", "$env:PUBLIC\x",
   "$env:SystemDrive\`$Recycle.Bin", "$env:SystemDrive\System Volume Information", "$env:SystemDrive\Recovery\x", "$env:TEMP\x", "$env:TMP",
   $upf, "$upf\lq", "$upf\AppData", "$upf\Downloads", "$upf\Pictures\x", "$upf\.ssh", "$upf\Org - SharePoint\lib", "$upf\OneDrive - Org\lq",
   'C:\Users\Default\lq', 'D:\Users\bob\AppData', 'D:\Users\bob\lq', 'C:\Program Files (Arm)\x', 'C:\Windows.old\x', 'C:\PerfLogs', 'C:\inetpub\wwwroot', 'D:\Windows\x',
-  'C:\$Recycle.Bin', 'C:\$WinREAgent\x', 'C:\ESD\x', 'C:\Intel\x', 'C:\OneDrive\lq', 'C:\con', 'C:\lq\aux', 'C:\lq\com1.txt', 'C:\PROGRA~1\x', 'C:\lq\LPT9')
+  'C:\$Recycle.Bin', 'C:\$WinREAgent\x', 'C:\ESD\x', 'C:\Intel\x', 'C:\OneDrive\lq', 'C:\con', 'C:\lq\aux', 'C:\lq\com1.txt', 'C:\PROGRA~1\x', 'C:\lq\LPT9',
+  'C:\Config.Msi\x', 'C:\tools\x', 'C:\Python312', 'C:\msys64\home', 'C:\cygwin64\bin', 'C:\hostedtoolcache\windows', 'C:\Dell\x', 'C:\HP\x', 'C:\SWSetup',
+  'C:\EFI\x', 'C:\Temp\x', 'C:\tmp', 'C:\XboxGames\x', 'C:\nvm4w\nodejs', 'C:\php\x', 'Z:\never-a-drive\lq')
 if (Test-Path -LiteralPath "$env:SystemDrive\Documents and Settings") { $badDirs += "$env:SystemDrive\Documents and Settings\x" }   # a junction Windows creates
 foreach ($bad in $badDirs) { Assert-True ((Get-BuildDirProblem $bad) -ne '') "build folder refused: '$bad' ($(Get-BuildDirProblem $bad))" }
-foreach ($good in @('C:/lq', 'C:\lq', 'D:/build/lq', 'D:\build', "$upf\.nuget\packages")) { Assert-Equal (Get-BuildDirProblem $good) '' "build folder accepted: '$good'" }
+foreach ($good in @('C:/lq', 'C:\lq', 'C:\build\lq', "$upf\.nuget\packages")) { Assert-Equal (Get-BuildDirProblem $good) '' "build folder accepted: '$good'" }
 Assert-True ((Get-BuildDirProblem "$upf\lq") -match 'top-level build folder such as C:\\lq or D:\\build') 'a refusal says to use a top-level build folder'
+${function:Get-PathDirs} = { , @('C:\lanq-pathdir\bin') }   # test seam: a folder on PATH
+Assert-True ((Get-BuildDirProblem 'C:\lanq-pathdir') -match 'on PATH' -and (Get-BuildDirProblem 'C:\lanq-pathdir\bin\x') -match 'on PATH' -and (Get-BuildDirProblem 'C:\lq') -eq '') 'a folder at, under or above a PATH entry is refused'
+${function:Get-PathDirs} = $realPathDirs
+${function:Get-ProfileRoots} = { $null }   # test seam: ProfileList cannot be read
+Assert-True ((Get-BuildDirProblem 'C:\lq') -match 'profile list could not be read' -and (Get-BuildDirProblem "$upf\.nuget\packages") -eq '') 'ProfileList unreadable: (A) fails closed, only the own NuGet cache (B) can pass'
+${function:Get-ProfileRoots} = $realProfiles
+${function:Get-DriveTypeName} = { param($L) if ($L -eq 'C:') { 'Network' } else { & $realDriveType $L } }   # test seam: a mapped network drive
+Assert-True ((Get-BuildDirProblem 'C:\lq') -match 'not a local fixed disk \(Network\)') 'a mapped network drive is refused'
+${function:Get-DriveTypeName} = $realDriveType
 ${function:Get-CurrentProfile} = { "$env:SystemRoot\System32\config\systemprofile" }   # test seam: running as SYSTEM
 Assert-True ((Get-BuildDirProblem "$env:SystemRoot\System32\config\systemprofile\.nuget\packages") -match 'system folder' -and (Get-BuildDirProblem "$upf\lq") -ne '' -and (Get-BuildDirProblem 'D:\Users\bob\.nuget\packages') -ne '') 'as SYSTEM: its own NuGet cache and every user profile are refused'
-${function:Get-ProfileRoots} = $realProfiles; ${function:Get-CurrentProfile} = $realCurrent
+${function:Get-CurrentProfile} = $realCurrent
 $jt = Join-Path ([IO.Path]::GetTempPath()) ('lanq-junc-' + [Guid]::NewGuid().ToString('N')); [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path "$jt\real\sub")
-[void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path "$jt\j" -Target "$jt\real")
-Assert-True ((Get-ReparseProblem "$jt\j") -match 'junction or link' -and (Get-ReparseProblem "$jt\j\sub") -match 'junction or link' -and (Get-ReparseProblem "$jt\j\not-yet") -match 'junction or link') 'a junction anywhere on the path is refused (also for a folder not created yet)'
-Assert-Equal (Get-ReparseProblem "$jt\real\sub") '' 'a plain folder passes the junction check'
-[System.IO.Directory]::Delete("$jt\j"); Remove-Item -LiteralPath $jt -Recurse -Force
+$sl = $null
+try {
+  [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path "$jt\j" -Target "$jt\real")
+  Assert-True ((Get-ReparseProblem "$jt\j") -match 'junction or link' -and (Get-ReparseProblem "$jt\j\sub") -match 'junction or link' -and (Get-ReparseProblem "$jt\j\not-yet") -match 'junction or link') 'a junction anywhere on the path is refused (also for a folder not created yet)'
+  Assert-Equal (Get-ReparseProblem "$jt\real\sub") '' 'a plain folder passes the junction check'
+  # a real subst drive over a fake profile: Z:\AppData must not pass as a top-level folder
+  [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path "$jt\prof\AppData")
+  $sl = @('Q:', 'R:', 'S:', 'T:', 'U:', 'V:', 'W:', 'Y:') | Where-Object { -not [System.IO.Directory]::Exists("$_\") } | Select-Object -First 1
+  ${function:Get-ProfileRoots} = { , (@("$jt\prof") + @(& $realProfiles)) }
+  & "$env:SystemRoot\System32\subst.exe" $sl "$jt\prof" | Out-Null
+  Assert-True ([System.IO.Directory]::Exists("$sl\AppData") -and (Get-BuildDirProblem "$sl\AppData") -match "drive $sl") "a subst drive ($sl over a profile) is refused: $(Get-BuildDirProblem "$sl\AppData")"
+} finally {
+  if ($sl) { & "$env:SystemRoot\System32\subst.exe" $sl /d | Out-Null }
+  ${function:Get-ProfileRoots} = $realProfiles
+  if ([System.IO.Directory]::Exists("$jt\j")) { [System.IO.Directory]::Delete("$jt\j") }
+  Remove-Item -LiteralPath $jt -Recurse -Force
+}
+Assert-Equal (Get-CleanName "a$([char]0xD800)b$([char]0x200E)c$([char]0x85)d") 'abcd' 'lone surrogates, LRM and C1 controls are removed from names'
+$open = "$TR\open"; [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path $open)
+& "$env:SystemRoot\System32\icacls.exe" $open /grant '*S-1-5-11:(OI)(CI)M' | Out-Null   # Authenticated Users: Modify
+Assert-True ((Get-AclProblem $open) -match 'may change what is in it' -and (Get-AclProblem $open) -match 'icacls ".*open" /inheritance:r /grant:r \*S-1-5-32-544:\(OI\)\(CI\)F \*S-1-5-18:\(OI\)\(CI\)F') 'ACL: Authenticated Users may modify: refused, with the icacls command that would harden it'
+Assert-Equal (Get-AclProblem $WRP) '' 'ACL: only Administrators, SYSTEM and this account: accepted'
+Assert-True ((Get-ExcludeProblem $open) -match 'may change what is in it') 'an exclusion folder others may change is not offered'
+Assert-Equal (Get-ExcludeProblem $WRP) '' 'a hardened top-level folder that exists and is yours: eligible'
+$ns = $NativeSrc
+Assert-True ([regex]::Matches($ns, 'DllImport').Count -eq 4 -and $ns -match 'CreateFileW\(path, 0, 7, IntPtr\.Zero, 3, 0x02000000' -and $ns -notmatch '(?i)WriteFile|DeleteFile|SetFile|MoveFile|CreateProcess|CreateDirectory|RegSet|ShellExecute') 'the native helper only opens a handle with no access rights, reads its final path and a DOS device name'
 Reset-Tune; Set-TuneQuiet; $rc = Invoke-Tune 'dry' @() 'defender' '' "$TR/missing"
 Assert-True ((OutText) -match 'missing is refused: it does not exist: create the folder first') 'an exclusion folder must exist (create the folder first)'
 Reset-Tune; Set-TuneQuiet; $script:DirOwner = 'S-1-5-21-9-9-9-1234'; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' $WRF
@@ -986,7 +1024,7 @@ foreach ($e in @(@(@{ Hours = $null; WorkRoot = 'C:/lq' }, $false, $false, 'appl
   Assert-True ((Get-TuneArgError $e[0] $e[1] $e[2] $e[3]) -match [regex]::Escape($e[4])) "tune arguments refused: $($e[4])"
 }
 Assert-Equal (Get-TuneArgError @{ Hours = '22:00-07:00'; WorkRoot = 'D:/lq' } $true $true 'dry') '' 'tune arguments accepted'
-Remove-Item Env:\NUGET_PACKAGES; Remove-Item -LiteralPath $TR -Recurse -Force
+} finally { Remove-Item Env:\NUGET_PACKAGES -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $TR -Recurse -Force -ErrorAction SilentlyContinue }   # the test folders go even when a test throws
 
 Write-Host 'curated vendor list'
 # Every pattern shipped in a release (0.5.0). Append the next release's patterns here; each must stay in the current

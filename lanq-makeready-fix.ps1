@@ -84,12 +84,12 @@ $FixFunctionNames = @('Write-FixLine', 'Write-FixErr', 'Get-FixSessionId', 'Get-
   'Test-Props', 'Test-Str', 'ConvertTo-TimeText', 'New-RecordError', 'Read-FixRecord', 'Show-Fix', 'Invoke-FixApply', 'Invoke-FixUndo', 'Show-FixRecords', 'Invoke-FixMain',
   'Get-UndoArg', 'Test-Vendor', 'Test-VendorUndo', 'Test-InWindow', 'Get-HoursMin', 'Format-Min', 'Get-RegVal', 'Get-RegNames', 'Test-RegKey', 'Get-UserSid', 'Get-ActiveScheme',
   'Get-PowerAc', 'Test-UsbNic', 'Test-FixAllSsd', 'Get-SvcState', 'Get-TaskState', 'Get-StartupState', 'Get-DefenderInfo', 'ConvertTo-Minutes', 'Get-ExcludeState',
-  'Get-DotnetState', 'Get-DoState', 'Get-FixTargets', 'Get-StateTarget', 'Get-UndoRefusal', 'Get-TargetLabel', 'Get-ScanTarget', 'Get-SvcNorm', 'Get-FixApplyNote', 'Get-TuneArgError', 'Get-NugetDir', 'Get-ConsoleUserSid', 'Get-ProtectedDirs', 'Get-BuildDirProblem', 'Get-ReparseProblem', 'Get-CleanName', 'Get-ProfileRoots', 'Get-CurrentProfile', 'Test-AtOrUnder', 'Get-PathOwnerSid', 'Get-ExcludeProblem')
+  'Get-DotnetState', 'Get-DoState', 'Get-FixTargets', 'Get-StateTarget', 'Get-UndoRefusal', 'Get-TargetLabel', 'Get-ScanTarget', 'Get-SvcNorm', 'Get-FixApplyNote', 'Get-TuneArgError', 'Get-NugetDir', 'Get-ConsoleUserSid', 'Get-ProtectedDirs', 'Get-BuildDirProblem', 'Get-ReparseProblem', 'Get-CleanName', 'Get-ProfileRoots', 'Get-CurrentProfile', 'Test-AtOrUnder', 'Get-PathOwnerSid', 'Get-ExcludeProblem', 'Get-PathDirs', 'Get-DriveTypeName', 'Get-DriveProblem', 'Initialize-FixNative', 'Get-DosDevice', 'Get-FinalPath', 'Get-DirSddl', 'Get-AclProblem')
 # Every cmdlet this file runs. A function or alias with one of these names would run instead of the cmdlet, so the
 # script refuses to start when any of them does not resolve to the cmdlet itself (Get-FixCommandShadow).
 $FixCmdletNames = @('Get-Service', 'Set-Service', 'Start-Service', 'Stop-Service', 'Get-Item', 'Set-ItemProperty', 'Remove-ItemProperty', 'Get-Acl', 'Set-Acl',
   'Get-Content', 'Get-ChildItem', 'Test-Path', 'Join-Path', 'Split-Path', 'Get-Command', 'Get-CimInstance', 'Select-Object', 'Where-Object', 'ForEach-Object', 'Sort-Object',
-  'ConvertFrom-Json', 'Write-Host', 'New-Object', 'Get-Location', 'Get-Alias', 'New-Item')
+  'ConvertFrom-Json', 'Write-Host', 'New-Object', 'Get-Location', 'Get-Alias', 'New-Item', 'Add-Type')
 # Commands from Windows modules (CDXML functions, not cmdlets) the tune fixes run, and the module each must come from:
 # a function or alias of the same name from anywhere else would run instead, so the script refuses then too.
 $FixModuleCmds = @{ 'Get-NetAdapter' = @('NetAdapter'); 'Get-PhysicalDisk' = @('Storage'); 'Get-ScheduledTask' = @('ScheduledTasks'); 'Disable-ScheduledTask' = @('ScheduledTasks')
@@ -113,6 +113,24 @@ $RecordFileSddl = 'O:BAD:PAI(A;;FA;;;BA)(A;;FA;;;SY)'
 # The DACL icacls leaves on the keys file (used to predict a pending record's after state).
 $TightDacl = 'D:PAI(A;;FA;;;BA)(A;;FA;;;SY)'
 $FixOut = New-Object System.Collections.ArrayList
+# Reads only: where a folder really is (GetFinalPathNameByHandle on a handle opened with no access rights) and what a
+# drive letter stands for (QueryDosDevice). Compiled once, only when -Tune -DefenderExclusions checks a folder.
+$NativeSrc = @'
+using System; using System.Runtime.InteropServices; using System.Text;
+public static class LanqFixNative {
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sec, uint disposition, uint flags, IntPtr template);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern uint GetFinalPathNameByHandleW(IntPtr handle, StringBuilder path, uint size, uint flags);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern uint QueryDosDeviceW(string device, StringBuilder target, uint size);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr handle);
+  public static string FinalPath(string path) {
+    IntPtr h = CreateFileW(path, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+    if (h == new IntPtr(-1)) { return ""; }
+    try { StringBuilder b = new StringBuilder(32768); uint n = GetFinalPathNameByHandleW(h, b, 32768, 0); return (n > 0 && n < 32768) ? b.ToString() : ""; }
+    finally { CloseHandle(h); }
+  }
+  public static string DosDevice(string device) { StringBuilder b = new StringBuilder(4096); return QueryDosDeviceW(device, b, 4096) > 0 ? b.ToString() : ""; }
+}
+'@
 # Tune: fixed names, never taken from a record file (names and paths in a record are checked against these shapes).
 $ScExe = Join-Path $SysDir 'sc.exe'
 $SvcKey = 'HKLM:\SYSTEM\CurrentControlSet\Services'
@@ -534,18 +552,27 @@ function Get-ProtectedDirs {
   return @($l | Where-Object { $_ } | ForEach-Object { "$_".Replace('/', '\').TrimEnd('\') })
 }
 # Every user profile folder Windows knows (ProfileList: ProfilesDirectory, Default, Public and each ProfileImagePath,
-# on any drive), plus this account's.
+# on any drive), plus this account's. $null when the list cannot be read (then only this account's NuGet cache can pass).
 function Get-ProfileRoots {
   $k = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'; $l = @()
   try {
     $pl = Get-Item -LiteralPath $k -ErrorAction Stop
     foreach ($n in 'ProfilesDirectory', 'Default', 'Public') { $l += "$($pl.GetValue($n))" }
     foreach ($pk in @(Get-ChildItem -LiteralPath $k -ErrorAction Stop)) { $l += "$($pk.GetValue('ProfileImagePath'))" }
-  } catch { }
+  } catch { return $null }
   $l += @($env:PUBLIC, (Get-CurrentProfile), $env:USERPROFILE)
-  return @($l | Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables("$_").Replace('/', '\').TrimEnd('\') })
+  return , @($l | Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables("$_").Replace('/', '\').TrimEnd('\') })
 }
 function Get-CurrentProfile { return "$([Environment]::GetFolderPath('UserProfile'))".TrimEnd('\') }
+# The folders on the machine and user PATH (registry Environment values, expanded); drive roots are left out.
+function Get-PathDirs {
+  $l = @()
+  foreach ($k in 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment', 'HKCU:\Environment') {
+    try { $l += @("$((Get-Item -LiteralPath $k -ErrorAction Stop).GetValue('Path', '', 'DoNotExpandEnvironmentNames'))".Split(';')) } catch { }
+  }
+  return , @($l | ForEach-Object { [Environment]::ExpandEnvironmentVariables("$_").Trim().Trim('"').Replace('/', '\').TrimEnd('\') } | Where-Object { $_ -match '^[A-Za-z]:\\[^%]' })
+}
+function Get-DriveTypeName([string]$Letter) { try { return "$((New-Object System.IO.DriveInfo($Letter)).DriveType)" } catch { return '' } }
 function Test-AtOrUnder([string]$P, [string]$Q) { return [bool]($Q -and ($P -ieq $Q -or $P.StartsWith($Q + '\', [System.StringComparison]::OrdinalIgnoreCase))) }
 # '' when no existing part of $Path, from the drive down, is a junction or symbolic link (it could point anywhere).
 function Get-ReparseProblem([string]$Path) {
@@ -557,11 +584,12 @@ function Get-ReparseProblem([string]$Path) {
   }
   return ''
 }
-# '' only for (A) a build folder: <drive>:\<top>\... where <top> is not a Windows, program, user, vendor or hidden ($)
-# folder, and the path is not in, at or above a system folder or any user profile; or (B) exactly this account's
-# NuGet cache, <profile>\.nuget\packages (not for a profile inside a system folder, such as SYSTEM's). Always refused:
-# a drive root, '.' or '..', ~ (8.3 short names), reserved device names, a part ending in a dot or space, a path
-# Windows would read differently (GetFullPath), and a junction or link on the existing part of the path.
+# '' only for (A) a build folder: <drive>:\<top>\... on a local disk volume (Get-DriveProblem), where <top> is not a
+# Windows, program, user, tool, vendor or hidden ($) folder, and the path is not in, at or above a system folder, any
+# user profile or any folder on PATH; or (B) exactly this account's NuGet cache, <profile>\.nuget\packages (not for a
+# profile inside a system folder, such as SYSTEM's). Always refused: a drive root, '.' or '..', ~ (8.3 short names),
+# reserved device names, a part ending in a dot or space, a path Windows would read differently (GetFullPath), and a
+# junction or link on the existing part of the path.
 function Get-BuildDirProblem([string]$Path) {
   $p = "$Path".Replace('/', '\').TrimEnd('\'); $use = 'use a top-level build folder such as C:\lq or D:\build'
   if ($p -notmatch '^[A-Za-z]:(\\[^\\]+)+$') { return "it is not a folder on a drive (a whole drive is never used); $use" }
@@ -575,27 +603,72 @@ function Get-BuildDirProblem([string]$Path) {
   }
   $full = ''; try { $full = [System.IO.Path]::GetFullPath($p).TrimEnd('\') } catch { return 'it is not a valid path' }
   if ($full -ine $p) { return "it is not in canonical form (Windows reads it as $full)" }
+  $dp = Get-DriveProblem $parts[0]; if ($dp) { return $dp }
   $sys = @(Get-ProtectedDirs); $prof = Get-CurrentProfile
   if ($prof -and $p -ieq "$prof\.nuget\packages") {
     foreach ($q in $sys) { if (Test-AtOrUnder $prof $q) { return "the profile $prof is inside the system folder $q (SYSTEM or a service account); $use" } }
     return (Get-ReparseProblem $p)
   }
-  if ($parts[1] -match '^(?i)(Windows.*|Program Files.*|ProgramData|Users|Documents and Settings|PerfLogs|inetpub|ESD|Recovery|Boot|System Volume Information|\$.*|OneDrive.*|Intel|AMD|NVIDIA|Drivers|MSOCache)$') {
-    return "$($parts[0])\$($parts[1]) is a Windows, program, user, vendor or hidden folder; $use"
+  if ($parts[1] -match '^(?i)(Windows.*|Program Files.*|ProgramData|Users|Documents and Settings|PerfLogs|inetpub|ESD|Recovery|Boot|EFI|System Volume Information|Config\.Msi|\$.*|OneDrive.*|Intel|AMD|NVIDIA|Dell|HP|SWSetup|Drivers|MSOCache|XboxGames|Temp|tmp|tools|hostedtoolcache|Python.*|msys.*|cygwin.*|nvm.*|php.*)$') {
+    return "$($parts[0])\$($parts[1]) is a Windows, program, user, tool, vendor or hidden folder; $use"
   }
-  foreach ($q in @($sys) + @(Get-ProfileRoots)) { if ((Test-AtOrUnder $p $q) -or (Test-AtOrUnder $q $p)) { return "it is in, at or above $q; $use" } }
+  $roots = Get-ProfileRoots
+  if ($null -eq $roots) { return "the profile list could not be read, so it cannot be told apart from a user profile; $use" }
+  foreach ($q in @($sys) + @($roots)) { if ((Test-AtOrUnder $p $q) -or (Test-AtOrUnder $q $p)) { return "it is in, at or above $q; $use" } }
+  foreach ($q in @(Get-PathDirs)) { if ((Test-AtOrUnder $p $q) -or (Test-AtOrUnder $q $p)) { return "it is in, at or above $q, a folder on PATH (programs run from there); $use" } }
   return (Get-ReparseProblem $p)
 }
+# Fix only: the drive must be a local fixed disk with a volume of its own (QueryDosDevice: \Device\HarddiskVolumeN;
+# a subst drive answers \??\C:\..., a mapped drive is not Fixed).
+function Get-DriveProblem([string]$Letter) {
+  $t = Get-DriveTypeName $Letter
+  if ($t -ne 'Fixed') { return "the drive $Letter is not a local fixed disk ($t); use a top-level build folder such as C:\lq or D:\build on a local disk" }
+  $dd = Get-DosDevice $Letter
+  if ($dd -notlike '\Device\HarddiskVolume*') { return "the drive $Letter is not a disk volume of its own ($($dd): a subst or mapped drive); use the real folder" }
+  return ''
+}
+function Initialize-FixNative { if (-not ('LanqFixNative' -as [type])) { Add-Type -TypeDefinition $NativeSrc -ErrorAction Stop } }
+function Get-DosDevice([string]$Letter) { try { Initialize-FixNative; return "$([LanqFixNative]::DosDevice($Letter))" } catch { return '' } }
+function Get-FinalPath([string]$Path) { try { Initialize-FixNative; return "$([LanqFixNative]::FinalPath($Path))" } catch { return '' } }
+function Get-DirSddl([string]$Path) { try { return "$((Get-Acl -LiteralPath $Path -ErrorAction Stop).Sddl)" } catch { return '' } }
+# '' when only Administrators, SYSTEM, this account, CREATOR OWNER and TrustedInstaller may change the folder (or what is
+# in it), and nobody else may delete or rename folders in its parent. SIDs, so localized Windows reads the same.
+function Get-AclProblem([string]$Path) {
+  $me = Get-UserSid; $ok = @($BaSid, $SySid, $me, 'S-1-3-0', $TiSid)
+  $mask = 0x2 -bor 0x4 -bor 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
+  $hint = "icacls `"$Path`" /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F *${me}:(OI)(CI)F"
+  $sd = ConvertFrom-Sddl (Get-DirSddl $Path)
+  if (-not $sd -or $null -eq $sd.DiscretionaryAcl) { return "its permissions cannot be read, or it has no DACL. To let only Administrators, SYSTEM and you change it: $hint" }
+  foreach ($a in $sd.DiscretionaryAcl) {
+    if ("$($a.AceQualifier)" -eq 'AccessAllowed' -and $ok -notcontains "$($a.SecurityIdentifier)" -and ($a.AccessMask -band $mask) -ne 0) {
+      return "$(Get-AccountName "$($a.SecurityIdentifier)") may change what is in it. To let only Administrators, SYSTEM and you change it (nothing is changed for you): $hint"
+    }
+  }
+  $parent = $Path.Replace('/', '\').TrimEnd('\') -replace '\\[^\\]+$', ''; if ($parent -match '^[A-Za-z]:$') { $parent += '\' }
+  $pd = ConvertFrom-Sddl (Get-DirSddl $parent)
+  if (-not $pd -or $null -eq $pd.DiscretionaryAcl) { return "the permissions of $parent cannot be read" }
+  foreach ($a in $pd.DiscretionaryAcl) {
+    if ("$($a.AceQualifier)" -eq 'AccessAllowed' -and $ok -notcontains "$($a.SecurityIdentifier)" -and "$($a.AceFlags)" -notmatch 'InheritOnly' -and ($a.AccessMask -band (0x40 -bor 0x10000000)) -ne 0) {
+      return "$(Get-AccountName "$($a.SecurityIdentifier)") may delete or rename folders in $parent; use a folder whose parent only Administrators, SYSTEM and you control"
+    }
+  }
+  return ''
+}
 function Get-PathOwnerSid([string]$Path) { try { return "$((Get-Acl -LiteralPath $Path -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]))" } catch { return '' } }
-# '' when a folder may become a Defender exclusion: a build folder (Get-BuildDirProblem) that exists, and is owned by
-# Administrators, SYSTEM or this account (anyone else would control what is never scanned). Checked when it is shown
-# and again just before the change.
+# '' when a folder may become a Defender exclusion: a build folder (Get-BuildDirProblem) that exists, really is where
+# its name says (no subst, mapped or linked drive in between), is owned by Administrators, SYSTEM or this account, and
+# only they may change (Get-AclProblem). Checked when it is shown, after the answer, and right before the change.
 function Get-ExcludeProblem([string]$Path) {
   $why = Get-BuildDirProblem $Path; if ($why) { return $why }
   if (-not [System.IO.Directory]::Exists($Path)) { return 'it does not exist: create the folder first, then run this again' }
+  $fp = Get-FinalPath $Path
+  if (-not $fp) { return 'where it really is cannot be read' }
+  if ($fp -match '^\\\\\?\\UNC\\') { return "it is really on the network ($fp)" }
+  $fp = ($fp -replace '^\\\\\?\\', '').TrimEnd('\')
+  if ($fp -ine $Path.Replace('/', '\').TrimEnd('\')) { return "it is really $fp (through a subst, mapped or linked drive or folder); use the real folder, if it qualifies" }
   $o = Get-PathOwnerSid $Path
   if (@($BaSid, $SySid, (Get-UserSid)) -notcontains $o) { return "it is owned by $(Get-AccountName $o), not Administrators, SYSTEM or you, so someone else decides what is in it" }
-  return ''
+  return (Get-AclProblem $Path)
 }
 function Get-DotnetState {
   $s = @{ Readable = (Test-RegKey $EnvKey); Vals = [ordered]@{}; Odd = '' }
@@ -993,7 +1066,7 @@ function Get-ExpectedAfter([string]$Id, $S) {
 # A name from the PC (Run entry, service, task, driver, product) made safe to print: control and bidi characters
 # removed (any user process can write a Run entry), at most 80 characters.
 function Get-CleanName([string]$S) {
-  $c = [regex]::Replace("$S", '[\p{Cc}\p{Cf}\u2028\u2029]', '')
+  $c = [regex]::Replace("$S", '[\p{Cc}\p{Cf}\p{Cs}\u2028\u2029]', '')
   if ($c.Length -gt 80) { $c = $c.Substring(0, 77) + '...' }
   return $c
 }

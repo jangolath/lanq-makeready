@@ -414,9 +414,11 @@ Windows tune fixes: `power.cpu`, `power.usbsuspend`, `startup.vendor`, `vendor.s
 `do.mode`, `dotnet.env` and `defender.scantime` (needs `-Hours`). `-Tune -DefenderExclusions` offers only
 `defender.exclude`, for work_root (`-WorkRoot`) plus the NuGet package cache, never temp, after a screen that suggests
 a Dev Drive first; folders already excluded are skipped, nothing is offered when Defender is not the active
-antivirus, only a top-level build folder such as `C:\lq` or `D:\build` (or your own `.nuget\packages`) that exists
-and is owned by Administrators, SYSTEM or you is offered (a folder inside a profile is not), and the NuGet cache is
-offered only when the elevated account is the one logged on at the console. What each one changes and how it is undone is in [docs/TUNE.md](docs/TUNE.md). A record holds at most 64
+antivirus, and only an existing local folder, not a system/profile/tool area or on PATH, that only Administrators,
+SYSTEM and you can change is offered: a top-level build folder such as `C:\lq` or `D:\build`, or your own
+`.nuget\packages` (a folder inside a profile is not; no subst or mapped drives; the script shows the `icacls` command
+to tighten a folder but never changes permissions). The NuGet cache is offered only when the elevated account is the
+one logged on at the console. What each one changes and how it is undone is in [docs/TUNE.md](docs/TUNE.md). A record holds at most 64
 changes; run the script again for the rest.
 
 On Linux, `sudo sh lanq-makeready-fix.sh --tune --dry-run` shows the tune fixes (it also works inside a container,

@@ -170,28 +170,53 @@ Test-Case 'defender.schedule' @{ Defender = $dfOn; Hours = '00:00-23:30' } 'INFO
 Test-Case 'vendor.tasks' @{ Tasks = 'nomodule' } 'SKIP' 'no ScheduledTasks module (not "access denied")' '' 'module is not available'
 Test-Case 'vendor.tasks' @{ Tasks = 'error' } 'SKIP' 'another error' '' 'could not be read$'
 $upf = Get-CurrentProfile
-$realProfiles = ${function:Get-ProfileRoots}; $realCurrent = ${function:Get-CurrentProfile}
-${function:Get-ProfileRoots} = { @('C:\Users', 'C:\Users\Default', 'C:\Users\Public', 'D:\Users\bob', $upf) + @(& $realProfiles) }   # test seam: a profile on another drive
+$realProfiles = ${function:Get-ProfileRoots}; $realCurrent = ${function:Get-CurrentProfile}; $realPathDirs = ${function:Get-PathDirs}; $realDriveType = ${function:Get-DriveTypeName}
+${function:Get-ProfileRoots} = { , (@('C:\Users', 'C:\Users\Default', 'C:\Users\Public', 'D:\Users\bob', $upf) + @(& $realProfiles)) }   # test seam: a profile on another drive
 $badDirs = @('C:/.', 'C:/lq/.', 'C:/lq/..', 'C:/', 'C:', 'C:/Windows', 'C:/Users', 'C:/ProgramData', 'C:/Program Files', 'C:/lq./x', 'C:/lq /x',
   "$env:SystemRoot\System32", "$env:SystemRoot\Temp", "$([Environment]::GetFolderPath('ProgramFiles'))\x", "$env:ProgramData\Microsoft", "$env:PUBLIC\x",
   "$env:SystemDrive\`$Recycle.Bin", "$env:SystemDrive\System Volume Information", "$env:SystemDrive\Recovery\x", "$env:TEMP\x", "$env:TMP",
   $upf, "$upf\lq", "$upf\AppData", "$upf\Downloads", "$upf\Pictures\x", "$upf\.ssh", "$upf\Org - SharePoint\lib", "$upf\OneDrive - Org\lq",
   'C:\Users\Default\lq', 'D:\Users\bob\AppData', 'D:\Users\bob\lq', 'C:\Program Files (Arm)\x', 'C:\Windows.old\x', 'C:\PerfLogs', 'C:\inetpub\wwwroot', 'D:\Windows\x',
-  'C:\$Recycle.Bin', 'C:\$WinREAgent\x', 'C:\ESD\x', 'C:\Intel\x', 'C:\OneDrive\lq', 'C:\con', 'C:\lq\aux', 'C:\lq\com1.txt', 'C:\PROGRA~1\x', 'C:\lq\LPT9')
+  'C:\$Recycle.Bin', 'C:\$WinREAgent\x', 'C:\ESD\x', 'C:\Intel\x', 'C:\OneDrive\lq', 'C:\con', 'C:\lq\aux', 'C:\lq\com1.txt', 'C:\PROGRA~1\x', 'C:\lq\LPT9',
+  'C:\Config.Msi\x', 'C:\tools\x', 'C:\Python312', 'C:\msys64\home', 'C:\cygwin64\bin', 'C:\hostedtoolcache\windows', 'C:\Dell\x', 'C:\HP\x', 'C:\SWSetup',
+  'C:\EFI\x', 'C:\Temp\x', 'C:\tmp', 'C:\XboxGames\x', 'C:\nvm4w\nodejs', 'C:\php\x', 'Z:\never-a-drive\lq')
 if (Test-Path -LiteralPath "$env:SystemDrive\Documents and Settings") { $badDirs += "$env:SystemDrive\Documents and Settings\x" }   # a junction Windows creates
 foreach ($bad in $badDirs) { Assert-True ((Get-BuildDirProblem $bad) -ne '') "build folder refused: '$bad' ($(Get-BuildDirProblem $bad))" }
-foreach ($good in @('C:/lq', 'C:\lq', 'D:/build/lq', 'D:\build', "$upf\.nuget\packages")) { Assert-Equal (Get-BuildDirProblem $good) '' "build folder accepted: '$good'" }
+foreach ($good in @('C:/lq', 'C:\lq', 'C:\build\lq', "$upf\.nuget\packages")) { Assert-Equal (Get-BuildDirProblem $good) '' "build folder accepted: '$good'" }
 Assert-True ((Get-BuildDirProblem "$upf\lq") -match 'top-level build folder such as C:\\lq or D:\\build') 'a refusal says to use a top-level build folder'
+${function:Get-PathDirs} = { , @('C:\lanq-pathdir\bin') }   # test seam: a folder on PATH
+Assert-True ((Get-BuildDirProblem 'C:\lanq-pathdir') -match 'on PATH' -and (Get-BuildDirProblem 'C:\lanq-pathdir\bin\x') -match 'on PATH' -and (Get-BuildDirProblem 'C:\lq') -eq '') 'a folder at, under or above a PATH entry is refused'
+${function:Get-PathDirs} = $realPathDirs
+${function:Get-ProfileRoots} = { $null }   # test seam: ProfileList cannot be read
+Assert-True ((Get-BuildDirProblem 'C:\lq') -match 'profile list could not be read' -and (Get-BuildDirProblem "$upf\.nuget\packages") -eq '') 'ProfileList unreadable: (A) fails closed, only the own NuGet cache (B) can pass'
+${function:Get-ProfileRoots} = $realProfiles
+${function:Get-DriveTypeName} = { param($L) if ($L -eq 'C:') { 'Network' } else { & $realDriveType $L } }   # test seam: a mapped network drive
+Assert-True ((Get-BuildDirProblem 'C:\lq') -match 'not a local fixed disk \(Network\)') 'a mapped network drive is refused'
+${function:Get-DriveTypeName} = $realDriveType
 ${function:Get-CurrentProfile} = { "$env:SystemRoot\System32\config\systemprofile" }   # test seam: running as SYSTEM
 Assert-True ((Get-BuildDirProblem "$env:SystemRoot\System32\config\systemprofile\.nuget\packages") -match 'system folder' -and (Get-BuildDirProblem "$upf\lq") -ne '' -and (Get-BuildDirProblem 'D:\Users\bob\.nuget\packages') -ne '') 'as SYSTEM: its own NuGet cache and every user profile are refused'
-${function:Get-ProfileRoots} = $realProfiles; ${function:Get-CurrentProfile} = $realCurrent
+${function:Get-CurrentProfile} = $realCurrent
 $jt = Join-Path ([IO.Path]::GetTempPath()) ('lanq-junc-' + [Guid]::NewGuid().ToString('N')); [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path "$jt\real\sub")
-[void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path "$jt\j" -Target "$jt\real")
-Assert-True ((Get-ReparseProblem "$jt\j") -match 'junction or link' -and (Get-ReparseProblem "$jt\j\sub") -match 'junction or link' -and (Get-ReparseProblem "$jt\j\not-yet") -match 'junction or link') 'a junction anywhere on the path is refused (also for a folder not created yet)'
-Assert-Equal (Get-ReparseProblem "$jt\real\sub") '' 'a plain folder passes the junction check'
-[System.IO.Directory]::Delete("$jt\j"); Remove-Item -LiteralPath $jt -Recurse -Force
+$sl = $null
+try {
+  [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path "$jt\j" -Target "$jt\real")
+  Assert-True ((Get-ReparseProblem "$jt\j") -match 'junction or link' -and (Get-ReparseProblem "$jt\j\sub") -match 'junction or link' -and (Get-ReparseProblem "$jt\j\not-yet") -match 'junction or link') 'a junction anywhere on the path is refused (also for a folder not created yet)'
+  Assert-Equal (Get-ReparseProblem "$jt\real\sub") '' 'a plain folder passes the junction check'
+  # a real subst drive over a fake profile: Z:\AppData must not pass as a top-level folder
+  [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path "$jt\prof\AppData")
+  $sl = @('Q:', 'R:', 'S:', 'T:', 'U:', 'V:', 'W:', 'Y:') | Where-Object { -not [System.IO.Directory]::Exists("$_\") } | Select-Object -First 1
+  ${function:Get-ProfileRoots} = { , (@("$jt\prof") + @(& $realProfiles)) }
+  & "$env:SystemRoot\System32\subst.exe" $sl "$jt\prof" | Out-Null
+  Assert-True ([System.IO.Directory]::Exists("$sl\AppData") -and (Get-BuildDirProblem "$sl\AppData") -match "drive $sl") "a subst drive ($sl over a profile) is refused: $(Get-BuildDirProblem "$sl\AppData")"
+} finally {
+  if ($sl) { & "$env:SystemRoot\System32\subst.exe" $sl /d | Out-Null }
+  ${function:Get-ProfileRoots} = $realProfiles
+  if ([System.IO.Directory]::Exists("$jt\j")) { [System.IO.Directory]::Delete("$jt\j") }
+  Remove-Item -LiteralPath $jt -Recurse -Force
+}
+Assert-Equal (Get-CleanName "a$([char]0xD800)b$([char]0x200E)c$([char]0x85)d") 'abcd' 'lone surrogates, LRM and C1 controls are removed from names'
 $fx = [System.IO.File]::ReadAllText((Join-Path $root 'lanq-makeready-fix.ps1'))
-foreach ($fn in 'Get-BuildDirProblem', 'Get-ProtectedDirs', 'Get-ReparseProblem', 'Get-CleanName', 'Get-ProfileRoots', 'Get-CurrentProfile', 'Test-AtOrUnder') { $re = "(?ms)^function $fn\b.*?^}"; Assert-True ([regex]::Match($text0, $re).Value -ceq [regex]::Match($fx, $re).Value -and [regex]::Match($fx, $re).Success) "$fn is the same in the tune and fix scripts" }
+foreach ($fn in 'Get-BuildDirProblem', 'Get-ProtectedDirs', 'Get-ReparseProblem', 'Get-CleanName', 'Get-ProfileRoots', 'Get-CurrentProfile', 'Test-AtOrUnder', 'Get-PathDirs', 'Get-DriveTypeName') { $re = "(?ms)^function $fn\b.*?^}"; Assert-True ([regex]::Match($text0, $re).Value -ceq [regex]::Match($fx, $re).Value -and [regex]::Match($fx, $re).Success) "$fn is the same in the tune and fix scripts" }
 $saved = $TotalSec; $TotalSec = 0; $z = Get-DirSizeMB $env:SystemRoot 30; $TotalSec = $saved
 Assert-True ($z.Capped -and $z.MB -eq 0) 'Get-DirSizeMB stops at the scan deadline'
 
@@ -285,7 +310,7 @@ function Get-TuneGuardViolations($Ast) {
     if (-not $n) { if (-not (($c.Extent.Text -match '^& \$(add|why)\b' -and $fn -eq 'Get-TuneItems') -or ($c.Extent.Text -match '^& \$min\b'))) { $bad += "dynamic command: $($c.Extent.Text)" }; continue }
     if ($ok -notcontains $n -and $funcNames -notcontains $n) { $bad += "command $n" }
     if ($n -eq 'Write-Host' -and $fn -ne 'Write-Out') { $bad += 'Write-Host outside Write-Out' }
-    if ($n -eq 'New-Object' -and @('System.Diagnostics.ProcessStartInfo', 'System.Collections.Generic.Stack[string]', 'System.IO.FileInfo', 'System.IO.DirectoryInfo', 'System.Collections.ArrayList', 'System.Text.UTF8Encoding', 'Security.Principal.WindowsPrincipal') -notcontains $c.CommandElements[1].Extent.Text.Trim("'`"")) { $bad += "New-Object $($c.CommandElements[1].Extent.Text)" }
+    if ($n -eq 'New-Object' -and @('System.Diagnostics.ProcessStartInfo', 'System.Collections.Generic.Stack[string]', 'System.IO.FileInfo', 'System.IO.DirectoryInfo', 'System.Collections.ArrayList', 'System.Text.UTF8Encoding', 'Security.Principal.WindowsPrincipal', 'System.IO.DriveInfo') -notcontains $c.CommandElements[1].Extent.Text.Trim("'`"")) { $bad += "New-Object $($c.CommandElements[1].Extent.Text)" }
     if ($n -eq 'Invoke-Exe' -and $fn -ne 'Invoke-Exe') {
       $arg = $c.CommandElements[2].Extent.Text
       if ($c.CommandElements[1].Extent.Text -notmatch '^(\$pc|\(Join-Path \(\[Environment\]::GetFolderPath\(''System''\)\) ''fsutil\.exe''\))$' -or ($arg -notmatch "^'/q SCHEME_CURRENT [A-Za-z0-9_ -]+'$" -and $arg -ne "'behavior query DisableDeleteNotify'")) { $bad += "Invoke-Exe other than powercfg /q or fsutil behavior query: $($c.Extent.Text)" }
