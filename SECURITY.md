@@ -104,7 +104,7 @@ controls, for one folder it makes itself, and proves it. Reviewers check every c
 - **The script makes the folder.** `lanq-work` is created with its owner (Administrators) and its permissions in one
   call, then read back: owner, exact permissions, empty, not a link, its file id. The build user can add and change
   files inside but cannot rename, delete or re-permission the folder, and OWNER RIGHTS takes away its right to
-  re-permission its own files. An existing folder is used only when a trusted fix record matches its volume GUID,
+  re-permission its own files later (not to choose the permissions of a new one: see H3 below). An existing folder is used only when a trusted fix record matches its volume GUID,
   file id and permissions hash (no marker file, which anyone could copy).
 - **The drive root is checked** (nobody but Administrators, SYSTEM and TrustedInstaller may delete or rename what is
   in it, or change its permissions or owner), and so are the drive (fixed, internal, NTFS, not a Dev Drive) and case
@@ -112,14 +112,20 @@ controls, for one folder it makes itself, and proves it. Reviewers check every c
 - **Proven, not assumed.** Before the exclusion: a positive control (the EICAR test file in an admin-only folder
   must be caught). After it: exactly one new entry, exactly that string; the test file must stay inside lanq-work and
   must still be caught in every sibling form anyone could create (`lanq-work-x`, `lanq-workx`, `lanq-work.x`,
-  `lanq-work.`, `lanq-work` with a trailing space, a stream). Any miss removes the exclusion again (exit 1).
+  `lanq-work.`, `lanq-work` with a trailing space, a stream: this run's tagged file in Defender's threat history).
+  Any miss, error or interruption after the exclusion was added removes it again and reads the list back; if it is
+  still there the run says FAILED with the command to run (exit 1). A failed item never counts as done.
+- **Self-test folders cannot be swapped.** Each is made admin-only in the record folder and moved into place (a move
+  fails when the name exists), and checked again before every write and delete; a folder that is not ours is never
+  written to or deleted.
 - **Undo** removes only that exclusion string. The folder and a Dev Drive are never deleted.
 - **No P/Invoke or Add-Type** in the product scripts (the non-admin checks are done in the CI test with LogonUser).
 
 New places the fix script writes, all only after you type the path to confirm: `%SystemDrive%\lanq-work` (or
 `<Dev Drive>:\lanq-work`); the Defender exclusion `<drive>:\lanq-work\`; self-test folders on the drive root
 (`lanq-selftest-<id>`, `lanq-work-<id>`, `lanq-work<id>`, `lanq-work.<id>`, `lanq-work.`, `lanq-work` with a trailing space,
-`lanq-work-<id>-ads`) and `lanq-work\lanq-selftest-<id>`, each created admin-only and removed again (a sibling name that
+`lanq-work-<id>-ads`) and `lanq-work\lanq-selftest-<id>`, each created admin-only in the record folder (as
+`stage-<id>-<n>`), moved into place and removed again (a sibling name that
 already exists is never touched: the run stops); Defender's threat history (the EICAR detections); and for the Dev
 Drive, `%ProgramData%\lanq-makeready\devdrive\lanq-devdrive.vhdx` (folder Administrators and SYSTEM only) and the new
 volume.
@@ -128,9 +134,10 @@ Residual risks, stated plainly:
 
 - **The build user's own output is not scanned.** That account already runs the build code, so the exclusion adds no
   new exposure for it. Administrators must not run files from lanq-work.
-- **The build user can let others in** (accepted, review H3). It cannot change permissions, but it can move in a
-  file from elsewhere on the same drive that carries its own permissions, or make a hard link to a file it can
-  write, and then another account could change that file, unscanned. Use a **dedicated** build account that runs
+- **The build user can let others in** (accepted, review H3). OWNER RIGHTS stops it from changing permissions
+  later, but it can give a new file or folder any permissions when it creates it, move in a file from elsewhere on
+  the same drive that carries its own permissions, or make a hard link to a file it can write; then another account
+  could change that file, unscanned. Use a **dedicated** build account that runs
   nothing else; the tune scan's `defender.drift` samples the top two levels for entries others may change. Only a
   dedicated volume (a Dev Drive, rung 1, needs no exclusion at all) closes this fully.
 - **`NUGET_PACKAGES` per job only.** Setting it for the whole machine would make an administrator's `dotnet build`

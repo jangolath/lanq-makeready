@@ -125,7 +125,8 @@ O:BAG:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200af;;;<build user>)(A;OICI
   delete, rename, permissions, owner, attributes or delete-child: it cannot move lanq-work away or swap it.
 - The build user, on what is created inside: Modify without permissions or owner rights.
 - OWNER RIGHTS (`OW`), inherited: the same Modify. This takes away the owner's usual right to change the permissions of
-  its own files, so the build user cannot let anyone else in that way.
+  its own files later. It does not stop the build user from giving a new file or folder its own permissions when it
+  creates it (or from moving or hard-linking one in): see the residual risks in SECURITY.md.
 
 Point work_root at it (`C:/lanq-work`, LanQueue machines.yml). Set `NUGET_PACKAGES=C:\lanq-work\.nuget\packages`
 **per job only** (machines.yml `env:`, or the build account's own environment), **never for the whole machine**: then an
@@ -162,11 +163,24 @@ Elevated, at the PC, `-WhatIf` first. You type the path (`C:\lanq-work`) to conf
    Defender, or listed in its threat history, within 30 s; otherwise nothing is added (exit 1);
 4. `Add-MpPreference -ExclusionPath '<drive>:\lanq-work\'` (with the trailing backslash), then read back: exactly one new
    entry, exactly that string;
-5. **the matrix**: the EICAR test file inside lanq-work must stay for 15 s; in each sibling form anyone could create on
-   the drive root (`lanq-work-<id>`, `lanq-work<id>`, `lanq-work.<id>`, and through `\\?\` `lanq-work.` and `lanq-work` with a trailing space,
-   and a stream on a file in a sibling) it must still be caught. Any miss: `Remove-MpPreference`, the item is
-   `failed`, exit 1;
-6. `applied`. The self-test folders are removed in every case.
+5. **the matrix**: the EICAR test file inside lanq-work must stay for 15 s. Defender may take a moment to apply a new
+   exclusion, so a file it still catches is tried again under a new name for up to 30 s after the exclusion was added.
+   In each sibling form anyone could create on the drive root (`lanq-work-<id>`, `lanq-work<id>`, `lanq-work.<id>`, and
+   through `\\?\` `lanq-work.` and `lanq-work` with a trailing space, and a stream on a file in a sibling) the test file,
+   named with this run's id, must show up in Defender's threat history;
+6. `applied`.
+
+**How the self-test folders are made.** Each one is created admin-only in the record folder
+(`%ProgramData%\lanq-makeready`, where only Administrators and SYSTEM may write) and then moved into place. A move fails
+when the name already exists (a folder, a file or a link someone made first), so nobody can put a folder of their own
+under the test file or under the clean-up. Before every write and every delete the folder is checked again (owner
+Administrators, only Administrators and SYSTEM, not a link); a folder that is not ours is never written to or deleted,
+and the run says so. This needs the record folder on the same drive as lanq-work; otherwise the fix is not offered.
+
+**Any failure rolls back.** A failed check, an error or Ctrl+C after `Add-MpPreference` removes the exclusion again,
+reads the list back, and the item is `failed` (exit 1). If the exclusion is still there afterwards, the run says FAILED
+and prints the `Remove-MpPreference` command to run. A failed item never counts as done: the next run reports the
+leftover exclusion as "not offered: ... remove it". The self-test folders are removed in every case.
 
 The EICAR file is harmless by design; Defender shows notifications and keeps threat-history entries for the self-test.
 The script builds it at run time and never contains it.
@@ -216,15 +230,16 @@ run). **CI** = `tests/real-defender.ps1`, Pass 4 of the `real-fix-windows` job (
 | B4, B7 | the folder read back after creating it is not ours (a race), or not empty: no exclusion, exit 1 | F |
 | B5 | a case-sensitive drive root, `ObCaseInsensitive` not 1 | F |
 | B6 | `-BuildUser`: unknown, a group, a built-in account, disabled; an administrator warns | F |
-| B8 | as the build user (LogonUser): it can add files and folders, cannot rename, delete, re-permission or set attributes on lanq-work, cannot let others into its own file (OWNER RIGHTS); another user cannot write or rename | CI, build-02 |
+| B8 | as the build user (LogonUser): it can add files and folders, cannot rename, delete, re-permission or set attributes on lanq-work, cannot re-permission its own file later (OWNER RIGHTS); another user cannot write or rename | CI |
 | C1 | record shapes accepted and rejected; the schema | F |
 | C2 | apply, record before the change, undo removes only the exclusion, the folder stays | F, CI |
 | C3 | an existing folder is used again only with a matching trusted record | F, CI |
 | C4 | read-back: no new entry, a variant, two entries: rolled back, exit 1 | F |
 | D1-D7 | Dev Drive: build, `-SizeGB`, VHDX exists, free space, the exact steps, an untrusted or antivirus-disallowed result, undo leaves it, WhatIf | F |
-| E1-E8 | for real: positive control; the test file stays inside lanq-work; caught in `lanq-work-x`, `lanq-workx`, `lanq-work.x`, `lanq-work.`, `lanq-work` with a trailing space, and a stream | CI (best effort: the runner image turns real-time protection off and the script prints a `::notice::` when it has to simulate the scan results) and **build-02 (required)** |
+| E1-E8 | for real: positive control; the test file stays inside lanq-work; caught in `lanq-work-x`, `lanq-workx`, `lanq-work.x`, `lanq-work.`, `lanq-work` with a trailing space, and a stream | CI (best effort: the runner image turns real-time protection off and the script prints a `::notice::` when it has to simulate the scan results) and **build-02 (required, `tests/pool-defender.ps1`)** |
+| E9+ | review round 1: an error mid-matrix still rolls back; a failed record with the exclusion left vouches for nothing; a pre-made or tampered self-test folder is never written to or deleted; the rollback is read back; the settle wait | F |
 | E9 | the self-test failure paths: positive control missed, a sibling not caught, the inside one caught, a sibling form that exists already: rolled back, exit 1, cleaned up | F |
-| G1 | the Dev Drive is attached again after a restart | **build-02** |
+| G1 | the Dev Drive is attached again after a restart | **build-02** (`tests/pool-defender.ps1 -DevDrive`, twice) |
 | G2 | the AST guard: EICAR written, folders created or deleted, disks changed, diskpart or fsutil writes only inside `Invoke-FixChange`; no Add-Type or P/Invoke | F |
 | G3 | `defender.drift` and `devdrive` in the tune scan; the functions it copies from the fix script stay identical | F, CI (drift) |
 | G4 | Linux: `--defender-exclusions` exits 2 | F |
@@ -346,3 +361,28 @@ settings. `--tune --dry-run` still works there, since it changes nothing. WSL 2 
 
 Undo takes unit, file and sysctl names only from fixed tables in the script. A service name in a record must be on
 the script's append-only list and have the name shape, or the record is rejected.
+
+#### Before a release: build-02
+
+`tests/pool-defender.ps1` runs E1-E8 (and, with `-DevDrive`, G1) on a real pool PC. Unlike the CI script it creates no
+accounts, removes no existing exclusion and never touches real-time protection or any other Defender setting. It runs
+the real fix script (you type the path, as always), checks the result, undoes it (you answer `y`), and prints a
+PASS/FAIL summary (exit 1 on any FAIL). It also prints the answers to two open questions: the exact form Defender
+stores `C:\lanq-work\` in, and whether `fsutil devdrv query` shows WdFilter attached right after the format.
+
+1. At build-02 itself (not over SSH), in an elevated PowerShell, from a checkout of the release candidate:
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File tests\pool-defender.ps1 -BuildUser <the build account>
+   ```
+
+   It needs `C:\lanq-work\` not yet excluded. lanq-work itself stays afterwards (the fix never deletes it).
+2. For the Dev Drive (optional; it leaves the Dev Drive in place):
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File tests\pool-defender.ps1 -BuildUser <the build account> -DevDrive
+   ```
+
+   Then restart the PC, do not attach anything by hand, and run the same command again: the second run checks G1
+   (attached again by itself, `<letter>:\lanq-work` there, still trusted with WdFilter attached).
+3. Send the summary lines and the two "OPEN QUESTION" lines with the release review.

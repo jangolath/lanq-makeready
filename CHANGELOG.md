@@ -18,6 +18,16 @@
     reads it back (exactly one new entry, exactly that string), and checks that the test file stays inside lanq-work
     and is still caught in `lanq-work-x`, `lanq-workx`, `lanq-work.x`, `lanq-work.`, `lanq-work` with a trailing space
     and a stream. Any miss rolls the exclusion back (exit 1). Undo removes only the exclusion; the folder is kept.
+  - Review round 1:
+    - Any failure, error or interruption after `Add-MpPreference` rolls the exclusion back; the remove is read back,
+      and a leftover says FAILED with the command to run. A failed item never counts as done.
+    - The self-test folders are made admin-only in the record folder and moved into place, so a folder someone made
+      first fails the run; each is re-checked before every write and delete.
+    - The test files carry the run's id, and the siblings need a threat-history hit.
+    - The inside test is retried for up to 30 s while Defender applies the new exclusion (seen in CI).
+    - Fail-closed reads: scan direction and case sensitivity in any language. The tune scan orders and checks the
+      records it reads, and drift re-checks the drive root, the bus and Dev Drive.
+    - New `tests/pool-defender.ps1`: the pool-safe E1-E8 and G1 run for build-02.
   - **Not offered** (report only, exit 0) on any doubt: Defender not active, real-time protection off or one-way,
     exclusions hidden, managed by policy or MDM, Defender for Endpoint onboarded, an existing exclusion that covers
     lanq-work (reported, never recorded or undone) or a variant of it, a drive that is not fixed, internal and NTFS,
