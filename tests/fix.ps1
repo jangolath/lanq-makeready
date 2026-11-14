@@ -951,7 +951,7 @@ foreach ($pat in 'Set-ItemProperty', 'Remove-ItemProperty', 'Set-Service', 'Star
 Assert-True ($scanPs -match "param\(\[string\]\`$Json, \[string\]\`$Out, \[switch\]\`$Redact, \[string\]\`$Hours, \[switch\]\`$Quiet," ) 'scanner parameters unchanged (no fix switch)'
 
 Write-Host 'files'
-foreach ($f in 'lanq-makeready.ps1', 'lanq-makeready.sh', 'lanq-makeready-fix.ps1', 'lanq-makeready-fix.sh', 'tests/run.ps1', 'tests/run.sh', 'tests/fix.ps1', 'tests/fix.sh') {
+foreach ($f in 'lanq-makeready.ps1', 'lanq-makeready.sh', 'lanq-makeready-fix.ps1', 'lanq-makeready-fix.sh', 'tests/run.ps1', 'tests/run.sh', 'tests/fix.ps1', 'tests/fix.sh', 'lanq-makeready-tune.ps1', 'tests/tune.ps1', 'tests/real-fix.ps1') {
   $b = [System.IO.File]::ReadAllBytes((Join-Path $root $f))
   Assert-Equal @($b | Where-Object { ($_ -lt 32 -and $_ -ne 9 -and $_ -ne 10 -and $_ -ne 13) -or $_ -eq 127 }).Count 0 "$f has no control bytes (BEL, backspace, ...)"
 }

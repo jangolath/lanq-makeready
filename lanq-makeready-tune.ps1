@@ -190,10 +190,10 @@ function Get-TuneItems($F) {
   if ($null -eq $d) { & $add (New-TuneItem 'defender.paths' $t 'SKIP' (& $why 'defender' 'Defender') '' $true '' $true) }
   elseif ($d.Mode -and $d.Mode -ne 'Normal') { & $add (New-TuneItem 'defender.paths' $t 'SKIP' "Defender is not the active antivirus (AMRunningMode: $($d.Mode))" '' $true '' $true) }
   elseif (-not $d.Rtp) { & $add (New-TuneItem 'defender.paths' $t 'OK' 'real-time protection is off' '' $true '' $true) }
-  elseif ($null -eq $d.Covered) { & $add (New-TuneItem 'defender.paths' $t 'SKIP' 'needs admin (exclusions are readable only elevated; the list is never printed)' '' $true '' $true) }
+  elseif ($null -eq $d.Scanned) { & $add (New-TuneItem 'defender.paths' $t 'SKIP' 'needs admin (exclusions are readable only elevated; the list is never printed)' '' $true '' $true) }
   else {
     $rows = @(); $scan = 0
-    foreach ($k in @('work_root', 'NuGet packages', 'temp')) { if ($d.Covered.Contains($k)) { $s = 'scanned'; if (-not $d.Covered[$k]) { $s = 'excluded' } elseif ($k -ne 'temp') { $scan++ }; $rows += "$k $s" } }
+    foreach ($k in @('work_root', 'NuGet packages', 'temp')) { if ($d.Scanned.Contains($k)) { $s = 'scanned'; if (-not $d.Scanned[$k]) { $s = 'excluded' } elseif ($k -ne 'temp') { $scan++ }; $rows += "$k $s" } }
     $adv = 'A Dev Drive (Windows 11, performance mode) is the better choice: Defender scans it asynchronously. An exclusion is a trade-off: nothing in that folder is ever scanned. The fix offers work_root and the NuGet packages only (lanq-makeready-fix.ps1 -Tune -DefenderExclusions), never temp.'
     if ($scan -gt 0) { & $add (New-TuneItem 'defender.paths' $t 'INFO' "real-time scanning: $($rows -join ', ')" $adv $true 'defender.exclude' $true) }
     else { & $add (New-TuneItem 'defender.paths' $t 'OK' "real-time scanning: $($rows -join ', ')" '' $true '' $true) }
@@ -456,11 +456,11 @@ function Get-TuneFacts([string]$H, [string]$W) {
   $df = Invoke-Probe 'defender' 15 { param($paths)
     $s = Get-MpComputerStatus -ErrorAction Stop; $p = Get-MpPreference -ErrorAction Stop
     $min = { param($v) if ($v -is [TimeSpan]) { [int]$v.TotalMinutes } elseif ($v -is [DateTime]) { [int]$v.TimeOfDay.TotalMinutes } else { $null } }
-    $h = @{ Mode = "$($s.AMRunningMode)"; Rtp = [bool]$s.RealTimeProtectionEnabled; Day = [int]$p.ScanScheduleDay; Time = (& $min $p.ScanScheduleTime); Quick = (& $min $p.ScanScheduleQuickScanTime); Idle = [bool]$p.ScanOnlyIfIdleEnabled; Covered = $null }
+    $h = @{ Mode = "$($s.AMRunningMode)"; Rtp = [bool]$s.RealTimeProtectionEnabled; Day = [int]$p.ScanScheduleDay; Time = (& $min $p.ScanScheduleTime); Quick = (& $min $p.ScanScheduleQuickScanTime); Idle = [bool]$p.ScanOnlyIfIdleEnabled; Scanned = $null }
     $ex = @($p.ExclusionPath | Where-Object { $_ })
     if (-not ($ex.Count -eq 1 -and "$($ex[0])" -match '^N/A')) {
-      $h.Covered = [ordered]@{}
-      foreach ($k in $paths.Keys) { $t = "$($paths[$k])".TrimEnd('\') + '\'; $h.Covered[$k] = -not (@($ex | Where-Object { $t.StartsWith(([Environment]::ExpandEnvironmentVariables("$_")).TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) } }
+      $h.Scanned = [ordered]@{}
+      foreach ($k in $paths.Keys) { $t = "$($paths[$k])".TrimEnd('\') + '\'; $h.Scanned[$k] = -not (@($ex | Where-Object { $t.StartsWith(([Environment]::ExpandEnvironmentVariables("$_")).TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) } }
     $h } $paths
   if ($null -ne $df) { $F.Defender = @($df)[0] }
   $av = Invoke-Probe 'av' 10 { param($x) @(Get-CimInstance -Namespace 'root/SecurityCenter2' -ClassName AntiVirusProduct -OperationTimeoutSec 8 -ErrorAction Stop |
