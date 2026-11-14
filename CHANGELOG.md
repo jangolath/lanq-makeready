@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.0 (unreleased)
+## 0.5.0 (2026-11-14)
 
 - **Tune scan**, in new, separate, read-only scripts: `lanq-makeready-tune.ps1` (Windows PowerShell 5.1 and
   PowerShell 7) and `lanq-makeready-tune.sh`. It reports what slows a worker down or keeps it busy during the job

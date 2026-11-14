@@ -885,10 +885,14 @@ $VendorRetiredPatterns = @('^Spooler$'); $rc = Invoke-Tune 'undo' @('y') 'base' 
 Assert-True (($Calls -join '|') -eq 'sc.exe config Spooler start= auto') 'undo: a name on the append-only retired list is still undone'
 $VendorRetiredPatterns = @()
 foreach ($bad in @(@('vendor.tasks', 'enabled=1 path=\Microsoft\Windows\ name=SupportAssist'), @('vendor.services', 'start=2 delayed=0 name=a b'), @('sysmain', 'start=2 delayed=0 name=DellUpdate'),
-    @('startup.vendor', 'hive=HKCU key=Run32 sid=S-1-5-21-1 flag=- name=SupportAssist'), @('startup.vendor', 'hive=HKCU key=Run sid=S-1-5-21-1 flag=- name=x;y'), @('defender.exclude', 'excluded=0 path=C:\lq\..\Windows'),
-    @('defender.exclude', 'excluded=0 path=C:\'), @('defender.scantime', 'day=0 time=1440 quick=0'), @('power.cpu', 'scheme=381b4222-f694-41f0-9685-ff5bb260df2e max=101 min=5'), @('dotnet.env', 'telemetry=$(x) nologo=- aspnetcert=-'))) {
+    @('startup.vendor', 'hive=HKCU key=Run32 sid=S-1-5-21-1 flag=- name=SupportAssist'), @('startup.vendor', 'hive=HKCU key=Run sid=S-1-5-21-1 flag=- name=x;y'),
+    @('defender.scantime', 'day=0 time=1440 quick=0'), @('power.cpu', 'scheme=381b4222-f694-41f0-9685-ff5bb260df2e max=101 min=5'), @('dotnet.env', 'telemetry=$(x) nologo=- aspnetcert=-'))) {
   Assert-True ($null -eq (ConvertFrom-StateText $bad[0] $bad[1])) "tune state shape rejected: $($bad[0]) '$($bad[1])'"
 }
+Reset-Tune; Set-TuneQuiet; $Pw.Max = 90; $rc = Invoke-Tune 'apply' @('y'); $rp = Get-LatestRecord
+[System.IO.File]::WriteAllText($rp, ([System.IO.File]::ReadAllText($rp) -replace '"id": "power.cpu"', '"id": "defender.exclude"'))
+$rc = Invoke-Tune 'undo' @('y') 'base' '' '' $rp
+Assert-True ($rc -eq 2 -and $Calls.Count -eq 0 -and (OutText) -match 'record rejected \(unknown fix id\)') 'a record holding the removed id defender.exclude is rejected (exit 2)'
 Assert-True (Test-SameState 'vendor.services' 'start=3 delayed=1 name=X' 'start=3 delayed=0 name=X') 'services: the delayed flag does not count for a manual service'
 Assert-True (-not (Test-SameState 'vendor.services' 'start=2 delayed=1 name=X' 'start=2 delayed=0 name=X')) 'services: the delayed flag counts for an automatic service'
 

@@ -96,6 +96,7 @@ Test-Case 'defender.paths' @{} 'INFO' 'work_root and NuGet scanned (report only,
 $dpa = (Get-It (New-TFacts) 'defender.paths').advice
 Assert-True ($dpa -match 'Not automated' -and $dpa -match 'Dev Drive' -and $dpa -match 'top-level build folder' -and $dpa -match 'never temp' -and $dpa -match 'icacls' -and $dpa -match 'Add-MpPreference -ExclusionPath' -and $dpa -match 'Remove-MpPreference' -and $dpa -match 'docs/TUNE.md' -and $dpa.Length -le 1024) 'defender.paths: the advice is the manual procedure (Dev Drive first, top-level folder, lock down, Add-MpPreference, undo) and points at docs/TUNE.md'
 Test-Case 'defender.paths' @{ Defender = @{ Mode = 'Normal'; Rtp = $true; Scanned = [ordered]@{ work_root = $false; 'NuGet packages' = $false; temp = $true } } } 'OK' 'build folders excluded, temp scanned (temp is never offered)'
+Test-Case 'defender.paths' @{ Defender = @{ Mode = 'Normal'; Rtp = $true; Scanned = [ordered]@{ work_root = $false; 'NuGet packages' = $false; temp = $false } } } 'WARN' 'temp excluded (the advice says never)' '' 'temp should never be excluded'
 Test-Case 'defender.paths' @{ Defender = @{ Mode = 'Normal'; Rtp = $true; Scanned = $null } } 'SKIP' 'not elevated' '' 'needs admin'
 Test-Case 'defender.paths' @{ Defender = @{ Mode = 'Passive Mode'; Rtp = $true } } 'SKIP' 'AMRunningMode not Normal' '' 'Passive Mode'
 Test-Case 'defender.paths' @{ Defender = @{ Mode = 'Normal'; Rtp = $false } } 'OK' 'real-time protection off'

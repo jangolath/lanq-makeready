@@ -207,7 +207,8 @@ function Get-TuneItems($F) {
     $rows = @(); $scan = 0
     foreach ($k in @('work_root', 'NuGet packages', 'temp')) { if ($d.Scanned.Contains($k)) { $s = 'scanned'; if (-not $d.Scanned[$k]) { $s = 'excluded' } elseif ($k -ne 'temp') { $scan++ }; $rows += "$k $s" } }
     $adv = 'Not automated (report only). Prefer a Dev Drive (performance mode) for build folders. To exclude by hand: only a top-level build folder (like C:\lq) and your own %USERPROFILE%\.nuget\packages, never temp, a profile, system or program folder, or a folder on PATH. First let only Administrators, SYSTEM and you change it (icacls /inheritance:r /grant:r, /setowner), then in an elevated PowerShell: Add-MpPreference -ExclusionPath <folder> (undo: Remove-MpPreference). Steps: docs/TUNE.md.'
-    if ($scan -gt 0) { & $add (New-TuneItem 'defender.paths' $t 'INFO' "real-time scanning: $($rows -join ', ')" $adv $true '' $true) }
+    if ($d.Scanned.Contains('temp') -and -not $d.Scanned['temp']) { & $add (New-TuneItem 'defender.paths' $t 'WARN' "real-time scanning: $($rows -join ', '): temp should never be excluded (downloads and archives are unpacked there)" 'Remove that exclusion in an elevated PowerShell: Remove-MpPreference -ExclusionPath <the temp folder>. Use a Dev Drive or a locked-down top-level build folder instead (docs/TUNE.md).' $true '' $true) }
+    elseif ($scan -gt 0) { & $add (New-TuneItem 'defender.paths' $t 'INFO' "real-time scanning: $($rows -join ', ')" $adv $true '' $true) }
     else { & $add (New-TuneItem 'defender.paths' $t 'OK' "real-time scanning: $($rows -join ', ')" '' $true '' $true) }
   }
 

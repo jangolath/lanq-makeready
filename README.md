@@ -345,7 +345,7 @@ Then read it. This matters more than for the scanner, because this script change
    ```
 
    ```text
-   lanq-makeready-fix 0.4.0: changes only what you confirm, one fix at a time (default no)
+   lanq-makeready-fix 0.5.0: changes only what you confirm, one fix at a time (default no)
 
    power.sleep  (check power.sleep): the PC sleeps or hibernates on AC power
      now:     power scheme 381b4222-f694-41f0-9685-ff5bb260df2e: sleeps after 30 min, hibernates after 180 min (0 = never)

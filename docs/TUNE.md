@@ -76,7 +76,7 @@ problems and the `administrators_authorized_keys` ACL (fix `ssh.aclkeys`). The t
 | `visual.fx` | INFO: Remote Desktop is on | none | "Adjust for best performance" is per user |
 | `dotnet.env` | INFO: `DOTNET_CLI_TELEMETRY_OPTOUT`, `DOTNET_NOLOGO` or `DOTNET_GENERATE_ASPNET_CERTIFICATE` is not set for the machine | `dotnet.env` | LanQueue's machines.yml `env:` does the same per job without touching the PC; after a machine-level change restart sshd |
 | `wsl.reclaim` | INFO: WSL is installed and `%USERPROFILE%\.wslconfig` has no `autoMemoryReclaim` | none | a per-user file; `wsl --shutdown` after editing |
-| `defender.paths` | INFO (admin): real-time scanning covers work_root or the NuGet packages folder. SKIP when not elevated, or when Defender is not the active antivirus (AMRunningMode not Normal) | none (report only) | says scanned/excluded per folder (and for temp); the exclusion list is compared inside the probe and never printed. The advice is the manual procedure below |
+| `defender.paths` | INFO (admin): real-time scanning covers work_root or the NuGet packages folder. SKIP when not elevated, or when Defender is not the active antivirus (AMRunningMode not Normal) | none (report only) | says scanned/excluded per folder (and for temp: an excluded temp folder is WARN); the exclusion list is compared inside the probe and never printed. The advice is the manual procedure below |
 | `defender.schedule` | INFO: the scheduled scan (or the daily quick scan) falls inside `-Hours` | `defender.scantime` (not for a window of 23 hours or more, where an hour after it is still inside) | replaces the plan's "Defender CPU load" check: the scan's timing is what matters on a build box |
 | `av.other` | INFO: another antivirus is active (Security Center; not on Windows Server) | none | its real-time scanning slows builds too; use its own exclusions or a Dev Drive |
 | `pagefile` | INFO: the page file is on a spinning disk while an SSD exists, or a fixed size is below the RAM | none | the scanner checks that one exists (swap) |
@@ -96,22 +96,27 @@ Inside a Windows container the host-level checks report SKIP.
 Defender exclusions are not automated in 0.5.0: whether a folder can be trusted (who can write to it, where it really is, what runs from it) is hard to verify safely from a script, and a wrong exclusion silently turns off scanning. The tune scan reports, per folder, whether real-time scanning covers it (`defender.paths`); the
 fix script has no exclusion fix (`-DefenderExclusions` exits 2). To speed up builds:
 
-1. **Prefer a Dev Drive.** On Windows 11, a Dev Drive in performance mode keeps protection on and scans
-   asynchronously: Settings > System > Storage > Disks & volumes > Create Dev Drive, then put work_root and
-   `NUGET_PACKAGES` there.
+1. **Prefer a Dev Drive.** On Windows 11 22H2 or later, a Dev Drive (at least 50 GB) in performance mode keeps
+   protection on and scans asynchronously: Settings > System > Storage > Advanced storage settings > Disks & volumes >
+   Create Dev Drive, then put work_root and `NUGET_PACKAGES` there.
 2. **If you exclude, exclude only** a top-level build folder (for example `C:\lq` or `D:\build`) and your own
    `%USERPROFILE%\.nuget\packages`. Never temp, a profile folder (Desktop, Documents, Downloads, AppData, ...), a
    Windows, program, tool or vendor folder, a folder on PATH, a network or `subst` drive, or a whole drive.
-3. **Lock the folder down first**, so only Administrators, SYSTEM and your account can change what is never scanned.
-   In an elevated PowerShell:
+3. **Lock the folder down first**, on a new, empty folder, so only Administrators, SYSTEM and the account LanQueue
+   builds as (the SSH worker account) can change what is never scanned. In an elevated PowerShell (the grants are in
+   single quotes, because PowerShell would read `(OI)` as a command):
 
-   ```text
-   icacls C:\lq /setowner *S-1-5-32-544 /T
-   icacls C:\lq /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F <your-account>:(OI)(CI)F /T
+   ```powershell
+   New-Item -ItemType Directory C:\lq
+   icacls C:\lq /setowner '*S-1-5-32-544'
+   icacls C:\lq /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '<worker-account>:(OI)(CI)F'
    ```
 
-   Then check it: `icacls C:\lq` should list only Administrators, SYSTEM and you (and inherited-only entries for
-   them). Do the same for the folder that holds it if others could rename it.
+   In an elevated cmd the same grant needs no quotes:
+   `icacls C:\lq /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F <worker-account>:(OI)(CI)F`.
+   `<worker-account>` is the account LanQueue builds as (the SSH worker account). Then check it: `icacls C:\lq` should
+   list only Administrators, SYSTEM and that account. Files created in the folder later inherit these entries. A
+   top-level folder needs nothing more. Never run these commands on a drive root.
 4. **Add the exclusion** in an elevated PowerShell: `Add-MpPreference -ExclusionPath C:\lq`
 5. **Undo** at any time: `Remove-MpPreference -ExclusionPath C:\lq`
 
