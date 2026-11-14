@@ -119,7 +119,8 @@ Test-Case 'defender.schedule' @{ Defender = @{ Mode = 'SxS Passive Mode'; Day = 
 $Bu = 'S-1-5-21-1111-2222-3333-1005'
 $rec = @{ User = $Bu; Vol = '{11111111-2222-3333-4444-555555555555}'; FileId = '0x1'; Sd = ('a' * 64) }
 function New-Drift([hashtable]$Over = @{}) {
-  $d = @{ Entry = $true; Variant = $false; Record = $rec; Exists = $true; Reparse = $false; Sddl = ($WorkDirSddl -f $Bu); FileId = '0x1'; Vol = $rec.Vol; CaseSens = $false; ObCi = 1; Sample = @{ Count = 12; Bad = @(); Capped = $false } }
+  $d = @{ Entry = $true; Variant = $false; Record = $rec; Exists = $true; Reparse = $false; Sddl = ($WorkDirSddl -f $Bu); FileId = '0x1'; Vol = $rec.Vol; CaseSens = $false; ObCi = 1; Sample = @{ Count = 12; Bad = @(); Capped = $false }
+    RootSddl = 'O:SYG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)(A;OICIIO;SDGXGWGR;;;AU)(A;;0x4;;;AU)'; Bus = 'NVMe'; DevDrv = 'no' }
   foreach ($k in $Over.Keys) { $d[$k] = $Over[$k] }; return $d
 }
 Test-Case 'defender.drift' @{} 'OK' 'no lanq-work exclusion' '' 'no lanq-work exclusion'
@@ -131,13 +132,14 @@ foreach ($c in @(@(@{ Variant = $true }, 'not exactly'), @(@{ Entry = $false; Va
     @(@{ Sddl = "O:BAG:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200af;;;$Bu)(A;OICIIO;0x1301bf;;;$Bu)(A;OICIIO;0x1301bf;;;OW)(A;OICI;FA;;;WD)" }, 'owner or permissions changed'),
     @(@{ Sddl = "O:$($Bu)G:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200af;;;$Bu)(A;OICIIO;0x1301bf;;;$Bu)(A;OICIIO;0x1301bf;;;OW)" }, 'owner or permissions changed'),
     @(@{ FileId = '0x2' }, 'another file id or volume'), @(@{ Vol = '{99999999-2222-3333-4444-555555555555}' }, 'another file id or volume'), @(@{ CaseSens = $true }, 'case-sensitive'), @(@{ ObCi = 0 }, 'ObCaseInsensitive'),
-    @(@{ Sample = @{ Count = 40; Bad = @('C:\lanq-work\x\evil'); Capped = $false } }, '1 of 40 sampled entries'))) {
+    @(@{ Sample = @{ Count = 40; Bad = @('C:\lanq-work\x\evil'); Capped = $false } }, '1 of 40 sampled entries'),
+    @(@{ RootSddl = 'O:SYG:SYD:PAI(A;OICI;FA;;;BA)(A;;0x40;;;AU)' }, 'drive root'), @(@{ RootSddl = '' }, 'drive root'), @(@{ Bus = 'USB' }, 'USB'), @(@{ DevDrv = 'trusted' }, 'Dev Drive'))) {
   $i = Get-It (New-TFacts @{ Drift = (New-Drift $c[0]) }) 'defender.drift'
   Assert-True ($i.status -eq 'WARN' -and $i.security -and $i.detail -match $c[1] -and $i.advice -match '-Undo' -and $i.advice -match 'Remove-MpPreference') "G3/H4/M3: drift ($(($c[0].Keys) -join ',')): WARN (security) with the undo advice: $($c[1])"
 }
 Assert-Equal (Test-SampleSddl ($WorkDirSddl -f $Bu) $Bu) '' 'G3/H3: a sampled entry with the inherited permissions is fine'
 Assert-Equal (Test-SampleSddl "O:$($Bu)G:SYD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1301bf;;;$Bu)(A;ID;0x1301bf;;;OW)" $Bu) '' 'G3: a file the build user owns, inheriting the folder entries, is fine'
-foreach ($b in @("O:S-1-5-21-9-9-9-1001G:SYD:AI(A;ID;FA;;;SY)", "O:$($Bu)G:SYD:AI(A;;FA;;;WD)(A;ID;FA;;;SY)", "O:$($Bu)G:SYD:AI(A;;0x2;;;S-1-5-21-9-9-9-1001)", 'O:BAG:SYD:NO_ACCESS_CONTROL', '')) {
+foreach ($b in @("O:$($Bu)G:SYD:AI(A;ID;FA;;;SY)(XA;;0x1;;;WD;(@User.x == `"y`"))", "O:S-1-5-21-9-9-9-1001G:SYD:AI(A;ID;FA;;;SY)", "O:$($Bu)G:SYD:AI(A;;FA;;;WD)(A;ID;FA;;;SY)", "O:$($Bu)G:SYD:AI(A;;0x2;;;S-1-5-21-9-9-9-1001)", 'O:BAG:SYD:NO_ACCESS_CONTROL', '')) {
   Assert-True ((Test-SampleSddl $b $Bu) -ne '') "G3/H3: a sampled entry another account owns or may change is drift: $b"
 }
 # G3: Dev Drive
@@ -163,16 +165,22 @@ Assert-True ($text0 -notmatch 'ExpandEnvironmentVariables') 'L4: the tune scan e
 # the functions the tune scan copies from the fix script are the same there (record trust, permissions, Dev Drive)
 $fx0 = [System.IO.File]::ReadAllText((Join-Path $root 'lanq-makeready-fix.ps1'))
 $fxAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'lanq-makeready-fix.ps1'), [ref]$null, [ref]$null)
-foreach ($fn in 'ConvertFrom-Sddl', 'Get-AccountName', 'Test-TrustedSddl', 'Get-PathSddl', 'Test-FixRecordTrusted', 'Get-SdCanon', 'Get-DevDrvInfo', 'Test-DevDriveBuild') {
+foreach ($fn in 'ConvertFrom-Sddl', 'Get-AccountName', 'Test-TrustedSddl', 'Get-PathSddl', 'Test-FixRecordTrusted', 'Get-SdCanon', 'Get-DevDrvInfo', 'Test-DevDriveBuild', 'Test-RootSddl', 'Get-CaseSens', 'Get-RecordSortKey') {
   $a1 = @($past.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fn }, $true))
   $a2 = @($fxAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fn }, $true))
   Assert-True ($a1.Count -eq 1 -and $a2.Count -eq 1 -and $a1[0].Extent.Text -ceq $a2[0].Extent.Text) "$fn is the same in the tune and fix scripts"
 }
-foreach ($v in '$WorkDirSddl', '$WriteMask', '$BaSid', '$SySid') {
+foreach ($v in '$WorkDirSddl', '$WriteMask', '$BaSid', '$SySid', '$RootRiskMask') {
   $re = '(?m)^' + [regex]::Escape($v) + ' = .*$'; $m1 = [regex]::Match($text0, $re); $m2 = [regex]::Match($fx0, $re)
   if (-not $m1.Success) { $re = '(?m)' + [regex]::Escape($v) + ' = ''[^'']*'''; $m1 = [regex]::Match($text0, $re); $m2 = [regex]::Match($fx0, $re) }
   Assert-True ($m1.Success -and $m2.Success -and $m1.Value -ceq $m2.Value) "$v is the same in the tune and fix scripts"
 }
+# LOW: the newest record wins by time, then by number (fix-...Z-2.json after fix-...Z.json, -10 after -9); only well-formed records count
+$names = @('fix-20261114T100000Z-10.json', 'fix-20261114T100000Z.json', 'fix-20261114T100000Z-2.json', 'fix-20261113T235959Z-9.json')
+Assert-Equal (@($names | Sort-Object { Get-RecordSortKey $_ }) -join ',') 'fix-20261113T235959Z-9.json,fix-20261114T100000Z.json,fix-20261114T100000Z-2.json,fix-20261114T100000Z-10.json' 'LOW: records are ordered by time and number, not by name'
+$goodRec = "{`n  `"schema`": `"lanq-makeready-fix/v1`",`n  `"tool`": {`"name`": `"lanq-makeready-fix`", `"version`": `"0.6.0`"},`n  `"os`": `"windows`",`n  `"items`": []`n}`n"
+Assert-True ((Test-RecordText $goodRec) -and -not (Test-RecordText $goodRec.Replace('windows', 'linux')) -and -not (Test-RecordText $goodRec.Replace('fix/v1', 'fix/v2')) -and -not (Test-RecordText ($goodRec + [char]0xE9)) -and -not (Test-RecordText ($goodRec + (' ' * 300000)))) 'LOW: the tune scan reads a record only when it has the fix record schema, Windows, plain ASCII, at most 256 KB'
+Assert-True ((Get-CaseSens 'Case sensitive attribute on directory C:\ is disabled.') -eq $false -and $null -eq (Get-CaseSens 'Gross- und Kleinschreibung: deaktiviert')) 'LOW: case sensitivity read fails closed in another language'
 foreach ($ok in 'behavior query DisableDeleteNotify', 'devdrv query D:', 'file queryfileid C:\lanq-work', 'file queryCaseSensitiveInfo C:\') { Assert-True ((Test-FsutilArg $ok)) "fsutil read allowed: $ok" }
 foreach ($no in 'behavior set DisableDeleteNotify 0', 'devdrv trust D:', 'devdrv query D: & del x', 'file queryfileid C:\Windows', 'file setCaseSensitiveInfo C:\ enable', 'devdrv enable /disallowAv') { Assert-True (-not (Test-FsutilArg $no)) "fsutil refused: $no" }
 Test-Case 'av.other' @{ AvOther = @('Another AV') } 'INFO' 'another antivirus (report only)' '' 'Another AV'

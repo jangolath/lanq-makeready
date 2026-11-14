@@ -186,10 +186,10 @@ function Get-FixGuardViolations([string]$Path) {
     'ToString', 'GetSecurityDescriptorSddlForm', 'SetSecurityDescriptorSddlForm', 'GetOwner', 'Translate', 'IsInRole', 'GetCurrent', 'GetCurrentProcess', 'GetFolderPath', 'Matches',
     'ToInt64', 'Exists', 'ReadAllText', 'WriteAllText', 'Move', 'CreateDirectory', 'WriteLine', 'ReadLine', 'IsPathRooted', 'ContainsKey', 'Round', 'ToUniversalTime',
     'GetValueNames', 'GetValueKind', 'GetValue', 'Create', 'AddScript', 'BeginInvoke', 'WaitOne', 'BeginStop', 'EndInvoke', 'Dispose', 'ComputeHash', 'ToBase64String', 'FromBase64String',
-    'GetFullPath', 'ToLowerInvariant', 'GetBytes', 'Write', 'Min', 'Floor', 'ToByte', 'WriteAllBytes', 'Delete', 'GetFileSystemEntries', 'Sleep', 'NewGuid', 'ToUpperInvariant', 'AddSeconds', 'IndexOf', 'StartNew')
+    'GetFullPath', 'ToLowerInvariant', 'GetBytes', 'Write', 'Min', 'Floor', 'ToByte', 'WriteAllBytes', 'Delete', 'GetFileSystemEntries', 'Sleep', 'NewGuid', 'ToUpperInvariant', 'AddSeconds', 'IndexOf', 'StartNew', 'GetAccessControl')
   # 0.6.0: the EICAR test file is written, and the self-test folders deleted, only in Invoke-FixChange; lanq-work and the
   # self-test folders are created (with their permissions, in one call) only there too.
-  $onlyIn = @{ 'WriteAllText' = @('Save-FixRecord'); 'Move' = @('Save-FixRecord'); 'CreateDirectory' = @('New-FixSecuredDir', 'Invoke-FixChange'); 'Start' = @('Invoke-Native'); 'Kill' = @('Invoke-Native')
+  $onlyIn = @{ 'WriteAllText' = @('Save-FixRecord'); 'Move' = @('Save-FixRecord', 'Invoke-FixChange'); 'CreateDirectory' = @('New-FixSecuredDir'); 'Start' = @('Invoke-Native'); 'Kill' = @('Invoke-Native')
     'Remove' = @('Invoke-Native'); 'SetSecurityDescriptorSddlForm' = @('Invoke-FixChange', 'New-FixSecuredDir', 'New-FixSecuredFile'); 'AddScript' = @('Get-FixProcessTable'); 'BeginStop' = @('Get-FixProcessTable')
     'Write' = @('New-FixSecuredFile', 'Invoke-Native'); 'WriteAllBytes' = @('Invoke-FixChange'); 'Delete' = @('Invoke-FixChange'); 'Sleep' = @('Wait-MpDetection') }
   foreach ($m in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
@@ -197,8 +197,13 @@ function Get-FixGuardViolations([string]$Path) {
     if ($okMembers -notcontains $mn) { [void]$bad.Add("member call $ex.$mn"); continue }
     if ($onlyIn.ContainsKey($mn) -and $onlyIn[$mn] -notcontains $fn) { [void]$bad.Add("$mn outside $($onlyIn[$mn] -join '/') ('$fn')") }
     if ($mn -eq 'Replace' -and $ex -match 'IO\.File' -and $fn -ne 'Save-FixRecord') { [void]$bad.Add('File.Replace outside Save-FixRecord') }
+    # HIGH-2: in Invoke-FixChange a folder is moved only from the staging folder into place, and the test file is written
+    # and folders deleted only through the variables the checked code sets ($f/$h after Test-SelfTestDir, $q)
+    if ($fn -eq 'Invoke-FixChange' -and $mn -eq 'Move' -and ($ex -ne '[System.IO.Directory]' -or ($m.Arguments | ForEach-Object { $_.Extent.Text }) -join ',' -ne '$stage,$dst')) { [void]$bad.Add("Move other than Directory.Move(`$stage, `$dst): $($m.Extent.Text)") }
+    if ($mn -eq 'WriteAllBytes' -and @('$f', '$h') -notcontains $m.Arguments[0].Extent.Text) { [void]$bad.Add("WriteAllBytes to other than `$f or `$h: $($m.Extent.Text)") }
+    if ($mn -eq 'Delete' -and ($ex -ne '[System.IO.Directory]' -or $m.Arguments[0].Extent.Text -ne '$q')) { [void]$bad.Add("Delete other than Directory.Delete(`$q): $($m.Extent.Text)") }
     if ($mn -eq 'Create' -and -not (($ex -eq '[System.Management.Automation.PowerShell]' -and $fn -eq 'Get-FixProcessTable') -or ($ex -eq '[System.Security.Cryptography.SHA256]' -and @('Get-AuthKeySummary', 'Get-SdHash') -contains $fn) -or
-        ($ex -eq '[System.IO.FileSystemAclExtensions]' -and @('New-FixSecuredDir', 'New-FixSecuredFile', 'Invoke-FixChange') -contains $fn))) { [void]$bad.Add("Create on $ex in '$fn'") }
+        ($ex -eq '[System.IO.FileSystemAclExtensions]' -and @('New-FixSecuredDir', 'New-FixSecuredFile') -contains $fn))) { [void]$bad.Add("Create on $ex in '$fn'") }
     if ($mn -eq 'SetSecurityDescriptorSddlForm' -and $fn -ne 'Invoke-FixChange' -and @('$RecordDirSddl', '$RecordFileSddl') -notcontains $m.Arguments[0].Extent.Text -and -not ($fn -eq 'New-FixSecuredDir' -and $m.Arguments[0].Extent.Text -eq '$Sddl')) { [void]$bad.Add("SetSecurityDescriptorSddlForm with $($m.Arguments[0].Extent.Text) in '$fn'") }
     if ($mn -eq 'AddScript') {
       $arg = $m.Arguments[0]
@@ -305,6 +310,17 @@ $mutants = [ordered]@{
   'G2: fsutil devdrv trust outside FIXES'    = "function Bad-D9 { Invoke-Native `$FsutilExe @('devdrv', 'trust', 'C:') }"
   'G2: FileSystemAclExtensions elsewhere'    = "function Bad-D10 { [System.IO.FileSystemAclExtensions]::Create(`$d, `$ds) }"
   'G2: Sleep outside Wait-MpDetection'       = "function Bad-D11 { [System.Threading.Thread]::Sleep(1000) }"
+}
+$mutantsIn = [ordered]@{
+  'G2: Delete of another path in FIXES'      = @('[System.IO.Directory]::Delete($q, $true)', "[System.IO.Directory]::Delete('C:\Windows', `$true)")
+  'G2: a file deleted in FIXES'              = @('[System.IO.Directory]::Delete($q, $true)', '[System.IO.File]::Delete($q)')
+  'G2: WriteAllBytes to another path'        = @('[System.IO.File]::WriteAllBytes($f, $bytes)', "[System.IO.File]::WriteAllBytes('C:\Windows\x.dll', `$bytes)")
+  'G2: a folder moved from elsewhere'        = @('[System.IO.Directory]::Move($stage, $dst)', "[System.IO.Directory]::Move('C:\x', `$dst)")
+  'G2: CreateDirectory in FIXES'             = @('[System.IO.Directory]::Move($stage, $dst)', '[void][System.IO.Directory]::CreateDirectory($dst)')
+}
+foreach ($k in $mutantsIn.Keys) {
+  Assert-True ($fixText.Contains($mutantsIn[$k][0])) "mutant anchor present: $k"
+  Test-Mutant $k ($fixText.Replace($mutantsIn[$k][0], $mutantsIn[$k][1]))
 }
 foreach ($k in $mutants.Keys) { Test-Mutant $k ($fixText.Replace("#region FIXES`n", $mutants[$k] + "`n#region FIXES`n")) }
 Test-Mutant 'Set-Service after main' ($fixText + "`nSet-Service -Name sshd -StartupType Automatic`n")
@@ -800,7 +816,7 @@ function Get-MpComputerStatus { param($ErrorAction) return [pscustomobject]@{ AM
 function Get-MpPreference { param($ErrorAction) $ex = @($Mp.Ex); if (-not $Mp.Readable) { $ex = @('N/A: Must be an administrator to view exclusions') }; return [pscustomobject]@{ ExclusionPath = $ex; ScanScheduleDay = $Mp.Day; ScanScheduleTime = $Mp.Time; ScanScheduleQuickScanTime = $Mp.Quick; RealTimeScanDirection = $Mp.Rtsd } }
 function Set-MpPreference { param($ScanScheduleTime, $ScanScheduleQuickScanTime, $ErrorAction) Note-Call "Set-MpPreference $ScanScheduleTime $ScanScheduleQuickScanTime"; if ($ScanScheduleTime) { $Mp.Time = [TimeSpan]$ScanScheduleTime }; if ($ScanScheduleQuickScanTime) { $Mp.Quick = [TimeSpan]$ScanScheduleQuickScanTime } }
 function Add-MpPreference { param($ExclusionPath, $ErrorAction) Note-Call "Add-MpPreference $ExclusionPath"; [void]$Mp.Ex.Add($ExclusionPath) }
-function Remove-MpPreference { param($ExclusionPath, $ErrorAction) Note-Call "Remove-MpPreference $ExclusionPath"; $Mp.Ex.Remove($ExclusionPath) }
+function Remove-MpPreference { param($ExclusionPath, $ErrorAction) Note-Call "Remove-MpPreference $ExclusionPath"; if (-not $script:RemoveBroken) { $Mp.Ex.Remove($ExclusionPath) } }
 $unsafe = @(foreach ($n in 'Set-ItemProperty', 'Remove-ItemProperty', 'New-Item', 'Invoke-Native', 'Get-RegVal', 'Test-RegKey', 'Disable-ScheduledTask', 'Enable-ScheduledTask', 'Set-MpPreference', 'Add-MpPreference', 'Remove-MpPreference',
     'Get-MpPreference', 'Get-ScheduledTask', 'Get-Service', 'Test-FixElevated', 'Initialize-FixRecordDir', 'New-FixSecuredFile', 'Test-FixRecordTrusted', 'Get-FixRecordDir') { if (@(Get-Command $n)[0].CommandType -ne 'Function' -or @(Get-Command $n)[0].ScriptBlock.File -eq $fixPath) { $n } })
 if ($unsafe.Count -gt 0) { Write-Host "ABORT: not faked: $($unsafe -join ', ')" -ForegroundColor Red; exit 1 }
@@ -944,6 +960,7 @@ Assert-True ($ss -notmatch '[\x00-\x1F\x7F]' -and $sv -notmatch '[\x00-\x1F\x7F]
 Write-Host 'defender.exclude and devdrive.create: pure checks'
 $Bu = 'S-1-5-21-1111-2222-3333-1005'
 $RealWorkDirSddl = $WorkDirSddl
+$RealSelfTest = ${function:Test-SelfTestDir}
 $wsd = ConvertFrom-Sddl ($RealWorkDirSddl -f $Bu)
 Assert-True ($null -ne $wsd -and "$($wsd.Owner)" -eq $BaSid -and (([int]$wsd.ControlFlags -band 0x1000) -ne 0)) 'B1: lanq-work is owned by Administrators and protected (nothing inherited from the drive root)'
 $wa = @($wsd.DiscretionaryAcl)
@@ -1051,10 +1068,16 @@ function Get-SystemDriveLetter { return 'C' }
 function Get-EicarBytes { return [System.Text.Encoding]::ASCII.GetBytes('lanq-makeready fake test file, not a virus') }
 function Get-Rel([string]$P) { return (($P -replace '^\\\\\?\\', '').Replace($Sandbox + '\', '') -replace '[0-9a-f]{32}', '<id>') }
 function Wait-MpDetection([string]$Path, $Since, [int]$Sec, [switch]$HistoryOnly) {
-  $rel = Get-Rel $Path; Note-Call "detect $rel"
+  $rel = Get-Rel $Path; $hn = ''; if ($HistoryOnly) { $hn = ' (history)' }; Note-Call "detect $rel$hn"
+  if ($script:ThrowAt -and $rel -like $script:ThrowAt) { throw 'interrupted (a fake failure in the middle of the matrix)' }
+  if ($script:SquatInside -and $rel -like 'C\lanq-selftest-*') {   # the build user guesses the tag and makes the inside folder first (HIGH-2)
+    $tg = [regex]::Match($Path, '[0-9a-f]{32}').Value; [void][System.IO.Directory]::CreateDirectory((Join-Path (Get-DriveRoot 'C') "lanq-work\lanq-selftest-$tg"))
+  }
   foreach ($p in @($script:Undetected)) { if ($rel -like $p) { return $false } }
   return $true
 }
+# the self-test folders: owner Administrators, admin-only, no link (a test cannot set that owner, so it is faked; NotOurs = tampered)
+function Test-SelfTestDir([string]$Path) { $rel = Get-Rel $Path; foreach ($p in @($script:NotOurs)) { if ($rel -like $p) { return $false } }; return [System.IO.Directory]::Exists($Path) }
 function Get-BuildUser([string]$Name) { $u = $script:Users[$Name]; if ($u) { return $u.Clone() }; return @{ Given = $Name; Name = $Name; Found = $false; Sid = ''; Local = $false; Type = 0; Disabled = $false; Admin = $false } }
 function New-Vol([string]$L, [hashtable]$Over = @{}) {
   $v = @{ Known = $true; Letter = $L; Fixed = $true; Fs = 'NTFS'; Bus = 'NVMe'; Guid = '{11111111-2222-3333-4444-555555555555}'; DevDrv = 'no'; DevAv = '-'; DevFilter = $false; FreeGB = 300; CaseSens = $false; RootSddl = $RootDefault }
@@ -1088,7 +1111,7 @@ function Invoke-Native([string]$Exe, [string[]]$ArgList, [int]$Sec = 60, [string
   Note-Call "$leaf $($a -join ' ')"
   return @{ Code = 0; Out = '' }
 }
-$unsafe = @(foreach ($n in 'New-FixSecuredDir', 'Add-MpPreference', 'Remove-MpPreference', 'Wait-MpDetection', 'Get-EicarBytes', 'Get-DriveRoot', 'Get-SystemDriveLetter', 'Invoke-Native', 'Initialize-Disk', 'New-Partition', 'Format-Volume', 'Get-DiskImage',
+$unsafe = @(foreach ($n in 'New-FixSecuredDir', 'Test-SelfTestDir', 'Add-MpPreference', 'Remove-MpPreference', 'Wait-MpDetection', 'Get-EicarBytes', 'Get-DriveRoot', 'Get-SystemDriveLetter', 'Invoke-Native', 'Initialize-Disk', 'New-Partition', 'Format-Volume', 'Get-DiskImage',
     'Get-BuildUser', 'Get-VolumeFacts', 'Get-WorkDirFacts', 'Get-DevVhdFacts', 'Get-MpPreference', 'Get-MpComputerStatus', 'Test-FixRecordTrusted', 'Initialize-FixRecordDir', 'New-FixSecuredFile', 'Get-FixRecordDir') {
     if (@(Get-Command $n)[0].CommandType -ne 'Function' -or @(Get-Command $n)[0].ScriptBlock.File -eq $fixPath) { $n } })
 if ($unsafe.Count -gt 0 -or -not (Get-DriveRoot 'C').StartsWith([IO.Path]::GetTempPath()) -or -not $DevVhdFile.StartsWith($Sandbox) -or "$(Get-EicarBytes)" -match 'EICAR') { Write-Host "ABORT: not faked: $($unsafe -join ', ')" -ForegroundColor Red; exit 1 }
@@ -1101,7 +1124,8 @@ function Reset-Dx {
   $script:Vols = @{ C = (New-Vol 'C') }; $script:WdOver = @{}; $script:WdSid = $Bu; $script:SddlAfterCreate = ''; $script:NotEmptyAfterCreate = $false
   $script:FileIds = @{ 'C\lanq-work' = '0x000000000000000000010000000ed741'; 'L\lanq-work' = '0x0000000000000000000a000000000005' }
   $script:Undetected = @('C\lanq-work\lanq-selftest-*'); $script:Vhd = @{ Exists = $false; Attached = $false; Letter = '' }; $script:FormatDev = 'trusted'; $script:FormatAv = 'ok'; $script:DiskpartCode = 0
-  $script:FixMade = ''; $script:AddVariant = $null
+  $script:FixMade = ''; $script:AddVariant = $null; $script:ThrowAt = ''; $script:SquatInside = $false; $script:NotOurs = @(); $script:RemoveBroken = $false
+  $script:ExclusionSettleSec = 0   # one attempt for the inside test unless a test sets it
   foreach ($d in @(Get-ChildItem -LiteralPath $Sandbox -Force -ErrorAction SilentlyContinue)) { [System.IO.Directory]::Delete('\\?\' + $d.FullName, $true) }
 }
 function Invoke-Dx([string]$Mode = 'apply', [object[]]$Ans = @(), [string]$Set = 'defender', [string]$User = 'builder', [int]$Size = 100, [string]$UndoPath = '') {
@@ -1113,7 +1137,7 @@ function Invoke-Dx([string]$Mode = 'apply', [object[]]$Ans = @(), [string]$Set =
 }
 function Get-SandboxDirs([string]$L) { return @(Get-ChildItem -LiteralPath (Get-DriveRoot $L) -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name } | Sort-Object) }
 function Add-MpPreference { param($ExclusionPath, $ErrorAction) Note-Call "Add-MpPreference $ExclusionPath"; if ($null -ne $script:AddVariant) { foreach ($v in @($script:AddVariant)) { [void]$Mp.Ex.Add($v) } } else { [void]$Mp.Ex.Add($ExclusionPath) } }
-$MatrixCalls = 'detect C\lanq-selftest-<id>\eicar.com|Add-MpPreference C:\lanq-work\|detect C\lanq-work\lanq-selftest-<id>\eicar.com|detect C\lanq-work-<id>\eicar.com|detect C\lanq-work<id>\eicar.com|detect C\lanq-work.<id>\eicar.com|detect C\lanq-work.\eicar.com|detect C\lanq-work \eicar.com|detect C\lanq-work-<id>-ads\host.txt:eicar'
+$MatrixCalls = 'detect C\lanq-selftest-<id>\eicar-<id>.com|Add-MpPreference C:\lanq-work\|detect C\lanq-work\lanq-selftest-<id>\eicar-<id>-1.com|detect C\lanq-work-<id>\eicar-<id>.com (history)|detect C\lanq-work<id>\eicar-<id>.com (history)|detect C\lanq-work.<id>\eicar-<id>.com (history)|detect C\lanq-work.\eicar-<id>.com (history)|detect C\lanq-work \eicar-<id>.com (history)|detect C\lanq-work-<id>-ads\host-<id>.txt:eicar-<id> (history)'
 
 Reset-Dx; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
 Assert-Equal $rc 0 'C2: defender.exclude apply: exit 0'
@@ -1202,7 +1226,7 @@ Assert-True ($Calls.Count -eq 0 -and (OutText) -match 'not applied: .*already co
 
 Write-Host 'defender.exclude: self-test and read-back failures roll back (exit 1)'
 Reset-Dx; $script:Undetected = @('C\lanq-work\lanq-selftest-*', 'C\lanq-selftest-*'); $rc = Invoke-Dx 'apply' @('C:\lanq-work')
-Assert-True ($rc -eq 1 -and ($Calls -join '|') -eq 'detect C\lanq-selftest-<id>\eicar.com' -and @($Mp.Ex).Count -eq 0 -and (OutText) -match 'positive control') 'E9/M5: Defender misses the test file (positive control): no exclusion is added, exit 1'
+Assert-True ($rc -eq 1 -and ($Calls -join '|') -eq 'detect C\lanq-selftest-<id>\eicar-<id>.com' -and @($Mp.Ex).Count -eq 0 -and (OutText) -match 'positive control') 'E9/M5: Defender misses the test file (positive control): no exclusion is added, exit 1'
 Assert-True ((Read-Rec (Get-LatestRecord)).items[0].status -eq 'failed' -and (Read-Rec (Get-LatestRecord)).items[0].after -match '^entry=0 dir=lanq') 'E9: recorded as failed; the folder stays (made by this script)'
 Assert-Equal ((Get-SandboxDirs 'C') -join ',') 'lanq-work' 'E9: the self-test folder is cleaned up after a failure too'
 foreach ($sib in @('C\lanq-work-<id>\*', 'C\lanq-work<id>\*', 'C\lanq-work.<id>\*', 'C\lanq-work.\*', 'C\lanq-work \*', 'C\lanq-work-<id>-ads\*')) {
@@ -1222,7 +1246,32 @@ Assert-True ($rc -eq 1 -and $Calls.Count -eq 0 -and @($Mp.Ex).Count -eq 0 -and (
 Reset-Dx; $script:NotEmptyAfterCreate = $true; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
 Assert-True ($rc -eq 1 -and $Calls.Count -eq 0 -and (OutText) -match 'not empty') 'B7/M1: a new folder that is not empty right after creating it: no exclusion, exit 1'
 Reset-Dx; [void][System.IO.Directory]::CreateDirectory('\\?\' + (Get-DriveRoot 'C') + 'lanq-work.'); $rc = Invoke-Dx 'apply' @('C:\lanq-work')
-Assert-True ($rc -eq 1 -and @($Mp.Ex).Count -eq 0 -and (OutText) -match 'exists already' -and (Get-SandboxDirs 'C') -contains 'lanq-work.') 'E9/H4: a sibling form someone made already (lanq-work.): fail closed, it is left alone'
+Assert-True ($rc -eq 1 -and @($Mp.Ex).Count -eq 0 -and (OutText) -match 'could not be put in place' -and (Get-SandboxDirs 'C') -contains 'lanq-work.') 'E9/H4/MEDIUM-1: a sibling form someone made already (lanq-work.): the move fails, fail closed, it is left alone'
+
+Write-Host 'defender.exclude: review round 1 (HIGH-1, HIGH-2, MEDIUM-1, MEDIUM-2, the CI wait, LOWs)'
+Reset-Dx; $script:ThrowAt = 'C\lanq-work.<id>\*'; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 1 -and $Calls -contains 'Remove-MpPreference C:\lanq-work\' -and @($Mp.Ex).Count -eq 0 -and (OutText) -match 'interrupted' -and ((Get-SandboxDirs 'C') -join ',') -eq 'lanq-work') 'HIGH-1: an error in the middle of the matrix still rolls the exclusion back and cleans up'
+Assert-True ((Read-Rec (Get-LatestRecord)).items[0].after -match '^entry=0 ') 'HIGH-1: the failed record says the exclusion is not there'
+$rc = Invoke-Dx 'apply' @('C:\lanq-work'); Assert-True ($rc -eq 0 -and ($Calls -join '|') -eq $MatrixCalls) 'HIGH-1: after a rolled-back failure the next run offers it again (the folder is reused)'
+Reset-Dx; $script:RemoveBroken = $true; $script:Undetected = @(); $rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 1 -and @($Mp.Ex) -contains 'C:\lanq-work\' -and (OutText) -match 'FAILED to remove the exclusion' -and (OutText) -match "Remove-MpPreference -ExclusionPath 'C:\\lanq-work\\'") 'MEDIUM-2: the rollback is read back; a remove that did not work says FAILED with the command'
+Assert-True ((Read-Rec (Get-LatestRecord)).items[0].status -eq 'failed' -and (Read-Rec (Get-LatestRecord)).items[0].after -match '^entry=1 ') 'MEDIUM-2: the failed record says the exclusion is still there'
+$script:RemoveBroken = $false; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and (OutText) -notmatch 'Nothing to fix' -and (OutText) -match 'not offered: .*this script did not add it') 'HIGH-1: a failed record with the exclusion still there does not count as done: not offered, says to remove it'
+Reset-Dx; $script:SquatInside = $true; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 1 -and @($Mp.Ex).Count -eq 0 -and (OutText) -match 'could not be put in place' -and @(Get-ChildItem -LiteralPath (Join-Path (Get-DriveRoot 'C') 'lanq-work')).Count -eq 1) 'HIGH-2: the build user made the inside self-test folder first: nothing is written into it or deleted from it, rolled back'
+Reset-Dx; $script:NotOurs = @('C\lanq-work.<id>'); $rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 1 -and @($Mp.Ex).Count -eq 0 -and (OutText) -match 'is not the folder this script made' -and (OutText) -match 'left alone' -and @(Get-SandboxDirs 'C' | Where-Object { $_ -match '^lanq-work\.[0-9a-f]{32}$' }).Count -eq 1) 'HIGH-2: a self-test folder that is not ours before the write: nothing written, never deleted, rolled back'
+Reset-Dx; $script:ExclusionSettleSec = 30; $script:Undetected = @('C\lanq-work\lanq-selftest-*-2.com'); $rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 0 -and ($Calls -join '|') -match ([regex]::Escape('eicar-<id>-1.com|detect C\lanq-work\lanq-selftest-<id>\eicar-<id>-2.com|'))) 'CI: the exclusion takes a moment to apply: the inside test is tried again (up to 30 s) before it fails'
+Reset-Dx; $RecDirSaved = $RecDir; $RecDir = 'Q:\lanq-none\rec'; $rc = Invoke-Dx 'dry'; $RecDir = $RecDirSaved
+Assert-True ($rc -eq 0 -and (OutText) -match 'not offered: .*not on the drive') 'HIGH-2: %ProgramData% on another drive than lanq-work (the folders could not be moved into place): not offered'
+Reset-Dx; $Mp.Rtsd = $null; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and (OutText) -match 'not offered: .*RealTimeScanDirection') 'LOW: RealTimeScanDirection unreadable: not offered (fail closed)'
+Assert-True ((Get-CaseSens 'Case sensitive attribute on directory C:\ is disabled.') -eq $false -and (Get-CaseSens 'Case sensitive attribute on directory C:\ is enabled.') -eq $true -and $null -eq (Get-CaseSens 'Das Attribut ist deaktiviert.') -and $null -eq (Get-CaseSens '')) 'LOW: case sensitivity: disabled, enabled, or unknown (any other language: fail closed)'
+$stp = Join-Path ([IO.Path]::GetTempPath()) ('lanq-st-' + [Guid]::NewGuid().ToString('N')); [void][System.IO.Directory]::CreateDirectory($stp)
+Assert-True (-not (& $RealSelfTest $stp) -and -not (& $RealSelfTest (Join-Path $stp 'none'))) 'HIGH-2: the real Test-SelfTestDir refuses a folder this account owns, and a missing one'
+[System.IO.Directory]::Delete($stp, $true)
 
 Write-Host 'devdrive.create'
 $DevCalls = "diskpart.exe create vdisk file=`"$DevVhdFile`" maximum=102400 type=expandable|attach vdisk|exit|Get-DiskImage|Initialize-Disk 7 GPT|New-Partition 7|Format-Volume L DevDrive=True lanq-dev"
@@ -1323,10 +1372,15 @@ foreach ($pat in 'Set-ItemProperty', 'Remove-ItemProperty', 'Set-Service', 'Star
 Assert-True ($scanPs -match "param\(\[string\]\`$Json, \[string\]\`$Out, \[switch\]\`$Redact, \[string\]\`$Hours, \[switch\]\`$Quiet," ) 'scanner parameters unchanged (no fix switch)'
 
 Write-Host 'files'
-foreach ($f in 'lanq-makeready.ps1', 'lanq-makeready.sh', 'lanq-makeready-fix.ps1', 'lanq-makeready-fix.sh', 'tests/run.ps1', 'tests/run.sh', 'tests/fix.ps1', 'tests/fix.sh', 'lanq-makeready-tune.ps1', 'tests/tune.ps1', 'tests/real-fix.ps1', 'tests/real-defender.ps1') {
+foreach ($f in 'lanq-makeready.ps1', 'lanq-makeready.sh', 'lanq-makeready-fix.ps1', 'lanq-makeready-fix.sh', 'tests/run.ps1', 'tests/run.sh', 'tests/fix.ps1', 'tests/fix.sh', 'lanq-makeready-tune.ps1', 'tests/tune.ps1', 'tests/real-fix.ps1', 'tests/real-defender.ps1', 'tests/pool-defender.ps1') {
   $b = [System.IO.File]::ReadAllBytes((Join-Path $root $f))
   Assert-Equal @($b | Where-Object { ($_ -lt 32 -and $_ -ne 9 -and $_ -ne 10 -and $_ -ne 13) -or $_ -eq 127 }).Count 0 "$f has no control bytes (BEL, backspace, ...)"
 }
+$poolAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tests/pool-defender.ps1'), [ref]$null, [ref]$perr)
+$poolCmds = @($poolAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { "$($_.GetCommandName())" })
+Assert-True (@($perr).Count -eq 0 -and @($poolCmds | Where-Object { $_ -match '^(net(\.exe)?|New-LocalUser|Remove-LocalUser|Add-MpPreference|Remove-MpPreference|Set-MpPreference|Add-Type)$' }).Count -eq 0) 'MEDIUM-3: the pool harness creates no users, removes or adds no exclusion itself, changes no Defender setting, no Add-Type'
+$poolText = [System.IO.File]::ReadAllText((Join-Path $root 'tests/pool-defender.ps1'))
+Assert-True ($poolText -notmatch 'DisableRealtimeMonitoring' -and $poolText -match 'OPEN QUESTION 1' -and $poolText -match 'OPEN QUESTION 2' -and $poolText -match 'GITHUB_ACTIONS') 'MEDIUM-3: the pool harness never touches real-time protection, reports both open questions, and refuses in CI'
 $sch = [System.IO.File]::ReadAllText((Join-Path $root 'schema/fix-record.v1.json')) | ConvertFrom-Json
 Assert-Equal $sch.properties.schema.const 'lanq-makeready-fix/v1' 'schema/fix-record.v1.json parses, schema id'
 Assert-Equal ((@($sch.'$defs'.item.properties.PSObject.Properties | ForEach-Object { $_.Name }) | Sort-Object) -join ',') 'after,before,command,id,seq,status,time' 'schema item fields = record item fields'

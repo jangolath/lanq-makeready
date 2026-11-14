@@ -65,7 +65,12 @@ function Test-As([string]$User, [scriptblock]$Do) {
 $ex0 = @((Get-MpPreference).ExclusionPath | Where-Object { $_ })
 Write-Host "runner exclusions: $($ex0.Count) entries; C:\ among them: $([bool](@($ex0) -contains 'C:\'))"
 if (@($ex0) -notcontains 'C:\') { Add-MpPreference -ExclusionPath 'C:\'; Write-Host '  (added C:\ as the A10 fixture)' }
+# The image turns real-time protection off, which is checked first ("not offered: real-time protection is off"); to
+# test A10 itself, the Defender facts say it is on for this one dry run. The exclusion list stays the real one.
+$realDef0 = ${function:Get-DefenderFacts}
+function Get-DefenderFacts { $d = & $realDef0; $d.Mode = 'Normal'; $d.Rtp = $true; $d.Rtsd = 0; return $d }
 $FixOut.Clear(); $rc = Invoke-FixMain -Mode dry -FromFile $true -Set defender -BuildUser lanqbuild
+Set-Item -Path Function:\Get-DefenderFacts -Value $realDef0
 Write-Host (Out-Fix)
 Check ($rc -eq 0 -and (Out-Fix) -match 'not offered: .*already covers') 'A10: with C:\ excluded, defender.exclude is not offered (reported, never recorded)'
 Check (-not (Test-Path -LiteralPath $work)) 'A10: nothing was created'
@@ -78,9 +83,9 @@ $st1 = Get-MpComputerStatus
 $E = $false
 if ("$($st1.AMRunningMode)" -eq 'Normal' -and $st1.RealTimeProtectionEnabled) {
   $pcDir = "$L`:\lanq-ci-pc-$([Guid]::NewGuid().ToString('N'))"; [void][System.IO.Directory]::CreateDirectory($pcDir)
-  $pf = Join-Path $pcDir 'eicar.com'; $t0 = [DateTime]::Now.AddSeconds(-5)
-  try { [System.IO.File]::WriteAllBytes($pf, (Get-EicarBytes)) } catch { Write-Host "  write blocked: $($_.Exception.Message)" }
-  $E = Wait-MpDetection $pf $t0 30
+  $pf = Join-Path $pcDir "eicar-$([Guid]::NewGuid().ToString('N')).com"; $t0 = [DateTime]::Now.AddSeconds(-5)
+  $E = $false; try { [System.IO.File]::WriteAllBytes($pf, (Get-EicarBytes)) } catch { $E = (Test-VirusError $_.Exception); Write-Host "  write blocked: $($_.Exception.Message)" }
+  if (-not $E) { $E = Wait-MpDetection $pf $t0 30 }
   try { [System.IO.Directory]::Delete($pcDir, $true) } catch { }
 }
 if ($E) { Write-Host 'E: Defender scans here (positive control detected): E1-E8 run for real in this pass' }
@@ -107,21 +112,21 @@ Check ((Test-FixRecordTrusted $rec) -eq '' -and (Read-FixRecord $rec).Error -eq 
 if ($E) {
   # E2-E8 again from the test, on top of the apply-time matrix
   $tag = [Guid]::NewGuid().ToString('N'); $t0 = [DateTime]::Now.AddSeconds(-5)
-  $in = Join-Path $work "ci-$tag"; [void][System.IO.Directory]::CreateDirectory($in); $f = Join-Path $in 'eicar.com'
-  [System.IO.File]::WriteAllBytes($f, (Get-EicarBytes)); Start-Sleep -Seconds 15
-  Check ([System.IO.File]::Exists($f)) 'E2: EICAR inside lanq-work survives 15 s (the exclusion works)'
+  $in = Join-Path $work "ci-$tag"; [void][System.IO.Directory]::CreateDirectory($in); $f = Join-Path $in "eicar-$tag.com"
+  $ok2 = $true; try { [System.IO.File]::WriteAllBytes($f, (Get-EicarBytes)) } catch { $ok2 = $false }; Start-Sleep -Seconds 15
+  Check ($ok2 -and [System.IO.File]::Exists($f)) 'E2: EICAR inside lanq-work survives 15 s (the exclusion works)'
   [System.IO.Directory]::Delete($in, $true)
   $i = 3
   foreach ($s in @("lanq-work-ci$tag", "lanq-workci$tag", "lanq-work.ci$tag", 'lanq-work.', 'lanq-work ')) {
-    $d = '\\?\' + "$L`:\$s"; [void][System.IO.Directory]::CreateDirectory($d); $f = "$d\eicar.com"
-    $hit = $false; try { [System.IO.File]::WriteAllBytes($f, (Get-EicarBytes)) } catch { $hit = $true }
-    if (-not $hit) { $hit = Wait-MpDetection $f $t0 30 }
+    $d = '\\?\' + "$L`:\$s"; [void][System.IO.Directory]::CreateDirectory($d); $f = "$d\eicar-$tag.com"
+    $hit = $false; try { [System.IO.File]::WriteAllBytes($f, (Get-EicarBytes)) } catch { $hit = (Test-VirusError $_.Exception) }
+    if (-not $hit) { $hit = Wait-MpDetection $f $t0 30 -HistoryOnly }
     Check $hit "E$i`: EICAR in the sibling '$s' is detected (the exclusion does not reach it)"; $i++
     try { [System.IO.Directory]::Delete($d, $true) } catch { }
   }
-  $d = "$L`:\lanq-work-ads$tag"; [void][System.IO.Directory]::CreateDirectory($d); [System.IO.File]::WriteAllText("$d\host.txt", 'x')
-  $hit = $false; try { [System.IO.File]::WriteAllBytes('\\?\' + "$d\host.txt:eicar", (Get-EicarBytes)) } catch { $hit = $true }
-  if (-not $hit) { $hit = Wait-MpDetection "$d\host.txt:eicar" $t0 30 -HistoryOnly }
+  $d = "$L`:\lanq-work-ads$tag"; [void][System.IO.Directory]::CreateDirectory($d); [System.IO.File]::WriteAllText("$d\host-$tag.txt", 'x')
+  $hit = $false; try { [System.IO.File]::WriteAllBytes('\\?\' + "$d\host-$tag.txt:eicar-$tag", (Get-EicarBytes)) } catch { $hit = (Test-VirusError $_.Exception) }
+  if (-not $hit) { $hit = Wait-MpDetection "$d\host-$tag.txt:eicar-$tag" $t0 30 -HistoryOnly }
   Check $hit 'E8: EICAR in a stream of a sibling file is detected'
   try { [System.IO.Directory]::Delete($d, $true) } catch { }
 }
