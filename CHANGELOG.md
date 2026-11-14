@@ -28,10 +28,11 @@
     every name and path in a record has a fixed shape. A record holds at most 64 changes.
 - **Defender exclusions** behind their own switch, `-Tune -DefenderExclusions`: after a screen that suggests a Dev
   Drive first, only work_root (`-WorkRoot`) plus the NuGet package cache are offered, never temp or processes;
-  a folder must be canonical with no `.`/`..` part, not a drive root, not in, at or above the Windows, program,
-  ProgramData, Public, TEMP, recycle-bin, volume-information or recovery folders, not a profile root or a profile's
-  AppData, Downloads, Desktop, Documents or OneDrive, and with no junction or link on its path (the same rule for the
-  tune scan's `-WorkRoot`); the NuGet cache is offered only
+  only an allow-listed folder is offered: a top-level build folder such as `C:\lq` or `D:\build` (not a Windows,
+  program, user, vendor or `$` folder, and not in, at or above any ProfileList profile, Windows, Program Files,
+  ProgramData or TEMP), or exactly your own `<profile>\.nuget\packages`; never `~`, reserved device names, `.`/`..`,
+  a drive root or a junction on the path; the folder must exist and be owned by Administrators, SYSTEM or you, and is
+  checked again right before the change; a work_root inside a profile still scans, but is not offered for exclusion; the NuGet cache is offered only
   when the elevated account is the one logged on at the console;
   folders already covered by an exclusion are skipped and never recorded; nothing is offered unless AMRunningMode is
   Normal. Undo removes exactly the folders the record says were added.
@@ -69,7 +70,7 @@
   - a `--tune` leg in `tests/real-fix.sh` for disposable CI runners (cups, the sysctl drop-in, fstrim.timer).
 - Linux review fixes: `journald.cap` never overrides an admin's cap (it writes only the caps not already set, and
   removes a `journald.conf.d` folder it created when undone); desktop detection uses logind x11/wayland sessions;
-  `bluetooth` is never offered while a Bluetooth input device is present; `--tune` refuses to apply or undo
+  `bluetooth` is never offered while a Bluetooth input device is present; `--tune` refuses to apply, and `--undo` refuses tune items,
   inside a container (Docker, Podman, LXC, systemd-nspawn; exit 3), `--tune --dry-run` still works there, and WSL 2
   counts as a host; `journald.cap` undo compares only the drop-in and its folder, so a cap you add later does not block it.
 - Both tune scripts write the same JSON: `host.hostname` and `host.user` are `"<redacted>"` with `-Redact`/`--redact`, `context.hours` is present when given, and `summary` has `ok`, `info`, `warn` and `skip` (`host.os` is free text: `windows`, or the Linux distribution name).

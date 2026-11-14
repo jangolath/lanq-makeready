@@ -414,8 +414,9 @@ Windows tune fixes: `power.cpu`, `power.usbsuspend`, `startup.vendor`, `vendor.s
 `do.mode`, `dotnet.env` and `defender.scantime` (needs `-Hours`). `-Tune -DefenderExclusions` offers only
 `defender.exclude`, for work_root (`-WorkRoot`) plus the NuGet package cache, never temp, after a screen that suggests
 a Dev Drive first; folders already excluded are skipped, nothing is offered when Defender is not the active
-antivirus, a drive root or a Windows, program, shared-data or user folder (or a parent of one) is refused, and the
-NuGet cache is offered only when the elevated account is the one logged on at the console. What each one changes and how it is undone is in [docs/TUNE.md](docs/TUNE.md). A record holds at most 64
+antivirus, only a top-level build folder such as `C:\lq` or `D:\build` (or your own `.nuget\packages`) that exists
+and is owned by Administrators, SYSTEM or you is offered (a folder inside a profile is not), and the NuGet cache is
+offered only when the elevated account is the one logged on at the console. What each one changes and how it is undone is in [docs/TUNE.md](docs/TUNE.md). A record holds at most 64
 changes; run the script again for the rest.
 
 On Linux, `sudo sh lanq-makeready-fix.sh --tune --dry-run` shows the tune fixes (it also works inside a container,
@@ -502,7 +503,7 @@ The record format is in [docs/FIX-RECORD.md](docs/FIX-RECORD.md).
 | `0` | done, nothing to do, a dry run, a list (also without admin or root), help, or every fix skipped (not elevated, macOS, no systemd) |
 | `1` | a change or an undo failed or did not verify, the record could not be written or updated, the record folder is not safe, or `-Undo` / `--undo` without admin or root |
 | `2` | bad arguments, more than one of `-WhatIf`/`-Undo`/`-List`, or a record rejected by undo |
-| `3` | refused: over SSH, from stdin or a string, no interactive console, (Windows) a function or alias in the way, or (Linux) `--tune` without `--dry-run` inside a container (Docker, Podman, LXC, systemd-nspawn; WSL 2 counts as a host) |
+| `3` | refused: over SSH, from stdin or a string, no interactive console, (Windows) a function or alias in the way, or (Linux) `--tune` without `--dry-run`, or `--undo` of a tune item, inside a container (Docker, Podman, LXC, systemd-nspawn; WSL 2 counts as a host) |
 
 ### Limits
 

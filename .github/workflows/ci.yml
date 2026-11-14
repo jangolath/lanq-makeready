@@ -166,12 +166,11 @@ jobs:
           sudo rm -f /etc/sysctl.d/99-zz-lanq-makeready.conf
           sudo sysctl -w fs.inotify.max_user_instances=128
           req=sysctl.tune,services.unused:cups-browsed,services.unused:cups
-          # fstrim.timer only where the runner's disk reports TRIM (Azure disks vary); the driver checks the rest
+          # fstrim.timer only where the tune scan itself offers it on this runner (its disk may not report TRIM);
+          # otherwise it is covered by the fake tests only, as the Windows legs do with optional items
           sudo systemctl disable --now fstrim.timer || true
-          for q in /sys/block/*/queue/rotational; do n=${q%/queue/rotational}
-            case "$n" in */loop*|*/ram*|*/zram*|*/dm-*|*/sr*|*/nbd*|*/md*|*/fd*) continue ;; esac
-            [ "$(cat "$q")" = 0 ] && [ "$(cat "$n/queue/discard_max_bytes")" != 0 ] && { req="$req,fstrim.timer"; break; }
-          done
+          if sudo sh lanq-makeready-tune.sh --json - | grep -q '"fixId": "fstrim.timer"'; then req="$req,fstrim.timer"
+          else echo "the tune scan does not offer fstrim.timer on this runner (no TRIM reported): covered by the fake tests only"; fi
           echo "LANQ_REAL_FIX_REQUIRE=$req" >> "$GITHUB_ENV"
       - name: "Tune: real apply + undo (systemd, root)"
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" LANQ_REAL_FIX_OK="$LANQ_REAL_FIX_OK" LANQ_REAL_FIX_REQUIRE="$LANQ_REAL_FIX_REQUIRE" sh tests/real-fix.sh --tune

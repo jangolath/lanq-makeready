@@ -169,23 +169,37 @@ Assert-True ($tr -notmatch '1111-2222-3333' -and $tr -match 'S-1-5-21-(\\u003c|<
 Test-Case 'defender.schedule' @{ Defender = $dfOn; Hours = '00:00-23:30' } 'INFO' 'a window of 23 hours or more: no fix offered' ''
 Test-Case 'vendor.tasks' @{ Tasks = 'nomodule' } 'SKIP' 'no ScheduledTasks module (not "access denied")' '' 'module is not available'
 Test-Case 'vendor.tasks' @{ Tasks = 'error' } 'SKIP' 'another error' '' 'could not be read$'
-$upf = [Environment]::GetFolderPath('UserProfile')
+$upf = Get-CurrentProfile
+$realProfiles = ${function:Get-ProfileRoots}; $realCurrent = ${function:Get-CurrentProfile}
+${function:Get-ProfileRoots} = { @('C:\Users', 'C:\Users\Default', 'C:\Users\Public', 'D:\Users\bob', $upf) + @(& $realProfiles) }   # test seam: a profile on another drive
 $badDirs = @('C:/.', 'C:/lq/.', 'C:/lq/..', 'C:/', 'C:', 'C:/Windows', 'C:/Users', 'C:/ProgramData', 'C:/Program Files', 'C:/lq./x', 'C:/lq /x',
   "$env:SystemRoot\System32", "$env:SystemRoot\Temp", "$([Environment]::GetFolderPath('ProgramFiles'))\x", "$env:ProgramData\Microsoft", "$env:PUBLIC\x",
   "$env:SystemDrive\`$Recycle.Bin", "$env:SystemDrive\System Volume Information", "$env:SystemDrive\Recovery\x", "$env:TEMP\x", "$env:TMP",
-  $upf, (Split-Path -Parent $upf), "$upf\AppData", "$upf\AppData\Local\Temp", "$upf\Downloads", "$upf\Desktop\x", "$upf\Documents", "$upf\OneDrive", "$upf\OneDrive - Org\lq")
+  $upf, "$upf\lq", "$upf\AppData", "$upf\Downloads", "$upf\Pictures\x", "$upf\.ssh", "$upf\Org - SharePoint\lib", "$upf\OneDrive - Org\lq",
+  'C:\Users\Default\lq', 'D:\Users\bob\AppData', 'D:\Users\bob\lq', 'C:\Program Files (Arm)\x', 'C:\Windows.old\x', 'C:\PerfLogs', 'C:\inetpub\wwwroot', 'D:\Windows\x',
+  'C:\$Recycle.Bin', 'C:\$WinREAgent\x', 'C:\ESD\x', 'C:\Intel\x', 'C:\OneDrive\lq', 'C:\con', 'C:\lq\aux', 'C:\lq\com1.txt', 'C:\PROGRA~1\x', 'C:\lq\LPT9')
 if (Test-Path -LiteralPath "$env:SystemDrive\Documents and Settings") { $badDirs += "$env:SystemDrive\Documents and Settings\x" }   # a junction Windows creates
 foreach ($bad in $badDirs) { Assert-True ((Get-BuildDirProblem $bad) -ne '') "build folder refused: '$bad' ($(Get-BuildDirProblem $bad))" }
-foreach ($good in @('C:/lq', 'D:/build/lq-1', 'C:\nuget\packages', "$upf\.nuget\packages", "$upf\lq")) { Assert-Equal (Get-BuildDirProblem $good) '' "build folder accepted: '$good'" }
+foreach ($good in @('C:/lq', 'C:\lq', 'D:/build/lq', 'D:\build', "$upf\.nuget\packages")) { Assert-Equal (Get-BuildDirProblem $good) '' "build folder accepted: '$good'" }
+Assert-True ((Get-BuildDirProblem "$upf\lq") -match 'top-level build folder such as C:\\lq or D:\\build') 'a refusal says to use a top-level build folder'
+${function:Get-CurrentProfile} = { "$env:SystemRoot\System32\config\systemprofile" }   # test seam: running as SYSTEM
+Assert-True ((Get-BuildDirProblem "$env:SystemRoot\System32\config\systemprofile\.nuget\packages") -match 'system folder' -and (Get-BuildDirProblem "$upf\lq") -ne '' -and (Get-BuildDirProblem 'D:\Users\bob\.nuget\packages') -ne '') 'as SYSTEM: its own NuGet cache and every user profile are refused'
+${function:Get-ProfileRoots} = $realProfiles; ${function:Get-CurrentProfile} = $realCurrent
 $jt = Join-Path ([IO.Path]::GetTempPath()) ('lanq-junc-' + [Guid]::NewGuid().ToString('N')); [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path "$jt\real\sub")
 [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path "$jt\j" -Target "$jt\real")
 Assert-True ((Get-ReparseProblem "$jt\j") -match 'junction or link' -and (Get-ReparseProblem "$jt\j\sub") -match 'junction or link' -and (Get-ReparseProblem "$jt\j\not-yet") -match 'junction or link') 'a junction anywhere on the path is refused (also for a folder not created yet)'
 Assert-Equal (Get-ReparseProblem "$jt\real\sub") '' 'a plain folder passes the junction check'
 [System.IO.Directory]::Delete("$jt\j"); Remove-Item -LiteralPath $jt -Recurse -Force
 $fx = [System.IO.File]::ReadAllText((Join-Path $root 'lanq-makeready-fix.ps1'))
-foreach ($fn in 'Get-BuildDirProblem', 'Get-ProtectedDirs', 'Get-ReparseProblem', 'Get-CleanName') { $re = "(?ms)^function $fn\b.*?^}"; Assert-True ([regex]::Match($text0, $re).Value -ceq [regex]::Match($fx, $re).Value -and [regex]::Match($fx, $re).Success) "$fn is the same in the tune and fix scripts" }
+foreach ($fn in 'Get-BuildDirProblem', 'Get-ProtectedDirs', 'Get-ReparseProblem', 'Get-CleanName', 'Get-ProfileRoots', 'Get-CurrentProfile', 'Test-AtOrUnder') { $re = "(?ms)^function $fn\b.*?^}"; Assert-True ([regex]::Match($text0, $re).Value -ceq [regex]::Match($fx, $re).Value -and [regex]::Match($fx, $re).Success) "$fn is the same in the tune and fix scripts" }
 $saved = $TotalSec; $TotalSec = 0; $z = Get-DirSizeMB $env:SystemRoot 30; $TotalSec = $saved
 Assert-True ($z.Capped -and $z.MB -eq 0) 'Get-DirSizeMB stops at the scan deadline'
+
+Assert-True ((Test-WorkRoot 'C:/Users/builder/lq') -and (Test-WorkRoot 'C:/lq') -and -not (Test-WorkRoot 'C:/.') -and -not (Test-WorkRoot 'C:/') -and -not (Test-WorkRoot 'C:/lq/./x')) 'a work_root inside a profile is valid for scanning (only the exclusion is withheld); . and a whole drive are not'
+$pi = Get-It (New-TFacts @{ WorkRootExcl = 'it is in, at or above C:\Users; use a top-level build folder such as C:\lq or D:\build'; NugetExcl = '' }) 'defender.paths'
+Assert-True ($pi.status -eq 'INFO' -and $pi.fixId -eq 'defender.exclude' -and $pi.detail -match 'work_root cannot be excluded: .*top-level build folder') 'defender.paths: a work_root that cannot be excluded says so; the NuGet cache still has the fix'
+$pi = Get-It (New-TFacts @{ WorkRootExcl = 'x'; NugetExcl = 'y' }) 'defender.paths'
+Assert-True ($pi.status -eq 'INFO' -and -not $pi.fixId) 'defender.paths: nothing eligible: no fix id'
 
 Write-Host 'helpers'
 Assert-True ((Test-InWindow 120 '22:00-07:00') -and -not (Test-InWindow 420 '22:00-07:00') -and (Test-InWindow 1320 '22:00-07:00') -and (Test-InWindow 60 '00:00-07:00') -and -not (Test-InWindow 1439 '00:00-07:00')) 'Test-InWindow: wraps midnight, end exclusive'
@@ -279,7 +293,7 @@ function Get-TuneGuardViolations($Ast) {
     if ($n -eq 'ForEach-Object' -and -not ($c.CommandElements.Count -gt 1 -and $c.CommandElements[1] -is [System.Management.Automation.Language.ScriptBlockExpressionAst])) { $bad += "ForEach-Object without a script block" }
   }
   $okMembers = @('Add', 'AddArgument', 'AddScript', 'AddYears', 'BeginInvoke', 'BeginStop', 'Close', 'Contains', 'Create', 'Dispose', 'EndInvoke', 'EnumerateDirectories', 'EnumerateFiles', 'Escape', 'Exit',
-    'ExpandEnvironmentVariables', 'EndsWith', 'GetFullPath', 'GetAttributes', 'GetTempPath', 'Exists', 'Floor', 'Flush', 'GetCurrent', 'GetDrives', 'GetFolderPath', 'GetValue', 'GetValueNames', 'IsInRole', 'IsPathRooted', 'Kill', 'Matches', 'Min', 'Pop', 'Push', 'ReadToEndAsync',
+    'ExpandEnvironmentVariables', 'EndsWith', 'GetFullPath', 'GetAttributes', 'GetTempPath', 'Exists', 'GetEnvironmentVariable', 'Floor', 'Flush', 'GetCurrent', 'GetDrives', 'GetFolderPath', 'GetValue', 'GetValueNames', 'IsInRole', 'IsPathRooted', 'Kill', 'Matches', 'Min', 'Pop', 'Push', 'ReadToEndAsync',
     'Replace', 'Round', 'Split', 'Start', 'StartNew', 'StartsWith', 'Substring', 'ToInt64', 'ToLowerInvariant', 'ToString', 'ToUpper', 'Trim', 'TrimEnd', 'TryParseExact', 'Wait', 'WaitForExit', 'WaitOne',
     'Write', 'WriteAllText', 'WriteLine', 'Clear')
   $onlyIn = @{ Start = @('Invoke-Exe'); Kill = @('Invoke-Exe'); Create = @('Invoke-Probe'); AddScript = @('Invoke-Probe'); WriteAllText = @(''); Exit = @('') }
@@ -361,7 +375,7 @@ function Start-Child([string]$ArgText) {
   return @{ Code = $p.ExitCode; Out = "$($o.Result)"; Err = "$($e.Result)" }
 }
 $fa = "-NoProfile -ExecutionPolicy Bypass -File `"$tunePath`""
-foreach ($a in @('-Hours 7-9', '-WorkRoot C:\a b', '-WorkRoot C:/x/../y', '-WorkRoot C:/.', '-WorkRoot C:/Windows', '-WorkRoot C:/Users', '-Fix', '-Yes')) { $r = Start-Child "$fa $a"; Assert-True ($r.Code -eq 2 -and $r.Err -match 'lanq-makeready-tune:') "bad argument '$a': exit 2" }
+foreach ($a in @('-Hours 7-9', '-WorkRoot C:\a b', '-WorkRoot C:/x/../y', '-WorkRoot C:/.', '-WorkRoot C:/', '-Fix', '-Yes')) { $r = Start-Child "$fa $a"; Assert-True ($r.Code -eq 2 -and $r.Err -match 'lanq-makeready-tune:') "bad argument '$a': exit 2" }
 if (-not $SkipSmoke) {
   $sw = [Diagnostics.Stopwatch]::StartNew()
   $r = Start-Child "-NoProfile -ExecutionPolicy Bypass -Command `"& '$tunePath' -Json '-' -Redact -Hours 22:00-07:00 -WorkRoot C:/lq; exit `$LASTEXITCODE`""

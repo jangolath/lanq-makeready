@@ -643,6 +643,10 @@ reset_fake; echo 128 > "$R/proc/sys/fs/inotify/max_user_instances"; : > "$FAKE/v
 reset_fake; echo 128 > "$R/proc/sys/fs/inotify/max_user_instances"; : > "$R/.dockerenv"; runfix '' --tune --dry-run
 if [ "$RC" = 0 ] && [ -z "$(calls)" ] && printf '%s' "$OUT" | grep -q "sysctl.tune"; then ok "L4: --tune --dry-run inside a container is allowed (it changes nothing)"; else bad "L4 dry run in a container" "$RC $(calls)" "0, shown, none run"; fi
 reset_fake; : > "$R/.dockerenv"; unmask_all; runfix '' --dry-run; eq "$RC" 0 "L3: without --tune a container is not refused (the v1 fixes keep their rules)"
+reset_fake; echo 128 > "$R/proc/sys/fs/inotify/max_user_instances"; runfix 'y\n' --tune; rec=$(latest_record); : > "$R/.dockerenv"; : > "$FAKE/calls"; runfix 'y\n' --undo "$rec"
+if [ "$RC" = 3 ] && [ -z "$(calls)" ] && grep -q '"status": "applied"' "$rec"; then ok "L4: undo of a tune item inside a container is refused (exit 3), the record is kept"; else bad "L4 tune undo in a container" "$RC $(calls)" "3, none"; fi
+reset_fake; unmask_all; runfix 'y\n'; rec=$(latest_record); : > "$R/.dockerenv"; runfix 'y\n' --undo "$rec"
+if [ "$RC" = 0 ] && grep -q '"status": "undone"' "$rec"; then ok "L4: undo of a v1 item still works inside a container"; else bad "L4 v1 undo in a container" "$RC" 0; fi
 
 echo "L6: cups undo tolerates a path or socket unit starting cups.service"
 eq "$(if undo_ok services.unused:cups 'svc=cups service=enabled:active socket=enabled:active path=enabled:active' 'svc=cups service=enabled:inactive socket=enabled:active path=enabled:active'; then echo ok; fi)" ok "L6: an extra active unit after undo is fine"

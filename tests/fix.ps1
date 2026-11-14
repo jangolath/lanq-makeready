@@ -179,7 +179,7 @@ function Get-FixGuardViolations([string]$Path) {
     'ToString', 'GetSecurityDescriptorSddlForm', 'SetSecurityDescriptorSddlForm', 'GetOwner', 'Translate', 'IsInRole', 'GetCurrent', 'GetCurrentProcess', 'GetFolderPath', 'Matches',
     'ToInt64', 'Exists', 'ReadAllText', 'WriteAllText', 'Move', 'CreateDirectory', 'WriteLine', 'ReadLine', 'IsPathRooted', 'ContainsKey', 'Round', 'ToUniversalTime',
     'GetValueNames', 'GetValueKind', 'GetValue', 'Create', 'AddScript', 'BeginInvoke', 'WaitOne', 'BeginStop', 'EndInvoke', 'Dispose', 'ComputeHash', 'ToBase64String', 'FromBase64String',
-    'GetFullPath', 'ToLowerInvariant', 'GetBytes', 'Write', 'Min', 'Floor', 'ToByte', 'ExpandEnvironmentVariables', 'EndsWith', 'GetAttributes', 'GetTempPath')
+    'GetFullPath', 'ToLowerInvariant', 'GetBytes', 'Write', 'Min', 'Floor', 'ToByte', 'ExpandEnvironmentVariables', 'EndsWith', 'GetAttributes', 'GetTempPath', 'GetEnvironmentVariable', 'Contains')
   $onlyIn = @{ 'WriteAllText' = @('Save-FixRecord'); 'Move' = @('Save-FixRecord'); 'CreateDirectory' = @('New-FixSecuredDir'); 'Start' = @('Invoke-Native'); 'Kill' = @('Invoke-Native')
     'Remove' = @('Invoke-Native'); 'SetSecurityDescriptorSddlForm' = @('Invoke-FixChange', 'New-FixSecuredDir', 'New-FixSecuredFile'); 'AddScript' = @('Get-FixProcessTable'); 'BeginStop' = @('Get-FixProcessTable')
     'Write' = @('New-FixSecuredFile') }
@@ -729,7 +729,9 @@ $SvcKey = 'HKLM:\lanq-test\Services'; $DoKey = 'HKLM:\lanq-test\DeliveryOptimiza
 $ScExe = 'C:\lanq-test-none\sc.exe'
 $RunSources = @{ 'HKCU|Run' = @('HKCU:\lanq-test\Run', 'HKCU:\lanq-test\Approved\Run'); 'HKLM|Run' = @('HKLM:\lanq-test\Run', 'HKLM:\lanq-test\Approved\Run'); 'HKLM|Run32' = @('HKLM:\lanq-test\Wow\Run', 'HKLM:\lanq-test\Approved\Run32') }
 $FixModuleCmds = @{}   # the fakes below are functions over module command names on purpose
-$env:NUGET_PACKAGES = 'C:\nuget\packages'
+$TR = "$env:SystemDrive\lanq-fixtest-$([Guid]::NewGuid().ToString('N'))"; $WRP = "$TR\lq"; $WRF = $WRP.Replace('\', '/'); $NGP = "$TR\nuget\packages"
+foreach ($d in $WRP, $NGP) { [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path $d -Force) }   # real top-level build folders (they must exist)
+$env:NUGET_PACKAGES = $NGP
 function Reset-Tune {
   Reset-Fake
   $script:Reg = @{}; $script:RegKeys = New-Object System.Collections.ArrayList
@@ -737,7 +739,7 @@ function Reset-Tune {
   $script:Svcs = New-Object System.Collections.ArrayList; $script:Tasks = New-Object System.Collections.ArrayList; $script:TaskDenied = $false
   $script:Disks = @([pscustomobject]@{ MediaType = 'SSD'; BusType = 'NVMe' })
   $script:Mp = @{ Mode = 'Normal'; Tamper = $false; Ex = New-Object System.Collections.ArrayList; Readable = $true; Day = 0; Time = [TimeSpan]'02:00:00'; Quick = [TimeSpan]::Zero }
-  $script:FakeSid = 'S-1-5-21-1-2-3-1001'; $script:ConsoleSid = 'S-1-5-21-1-2-3-1001'
+  $script:FakeSid = 'S-1-5-21-1-2-3-1001'; $script:ConsoleSid = 'S-1-5-21-1-2-3-1001'; $script:DirOwner = 'S-1-5-21-1-2-3-1001'
   Set-Reg 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' 'EditionID' 'String' 'Professional'
   foreach ($k in $EnvKey, $SvcKey) { [void]$RegKeys.Add($k) }
 }
@@ -748,6 +750,7 @@ function Get-RegNames([string]$Path) { return @($script:Reg.Keys | Where-Object 
 function Test-RegKey([string]$Path) { return ($RegKeys -contains $Path) }
 function Get-UserSid { return $script:FakeSid }
 function Get-ConsoleUserSid { return $script:ConsoleSid }
+function Get-PathOwnerSid([string]$Path) { return $script:DirOwner }
 function New-Item { param($Path, [switch]$Force, $ErrorAction, $ItemType) if ($ItemType) { return (Microsoft.PowerShell.Management\New-Item -ItemType $ItemType -Path $Path) }; Note-Call "New-Item $Path"; [void]$RegKeys.Add($Path) }
 function Set-ItemProperty { param($Path, $LiteralPath, $Name, $Value, $Type, $ErrorAction) $p = "$LiteralPath$Path"; $v = $Value; if ($Type -eq 'Binary') { $v = [byte[]]$Value }; Note-Call "Set-ItemProperty $p $Name $(@($Value) -join ',') $Type"; Set-Reg $p $Name "$Type" $v }
 function Remove-ItemProperty { param($Path, $LiteralPath, $Name, $ErrorAction) $p = "$LiteralPath$Path"; Note-Call "Remove-ItemProperty $p $Name"; $script:Reg.Remove("$p|$Name") }
@@ -893,46 +896,70 @@ Assert-True (Test-SameState 'vendor.services' 'start=3 delayed=1 name=X' 'start=
 Assert-True (-not (Test-SameState 'vendor.services' 'start=2 delayed=1 name=X' 'start=2 delayed=0 name=X')) 'services: the delayed flag counts for an automatic service'
 
 Write-Host 'tune: Defender exclusions (-Tune -DefenderExclusions)'
-Reset-Tune; Set-TuneQuiet; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' 'C:/lq'
-Assert-Equal ($Calls -join '|') 'Add-MpPreference C:\lq|Add-MpPreference C:\nuget\packages' 'defender.exclude: work_root and the NuGet packages, nothing else'
+Reset-Tune; Set-TuneQuiet; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' $WRF
+Assert-Equal ($Calls -join '|') "Add-MpPreference $WRP|Add-MpPreference $NGP" 'defender.exclude: work_root and the NuGet packages, nothing else'
 Assert-True ((OutText) -match 'Dev Drive is the better choice' -and (OutText) -match 'never temp' -and (OutText) -match 'never processes') 'defender.exclude: the trade-off screen comes first and suggests a Dev Drive'
 $rp = Get-LatestRecord; $rc = Invoke-Tune 'undo' @('y', 'y') 'base' '' '' $rp
-Assert-True (($Calls -join '|') -eq 'Remove-MpPreference C:\nuget\packages|Remove-MpPreference C:\lq' -and @($Mp.Ex).Count -eq 0) 'defender.exclude: undo removes exactly the paths it added'
-Reset-Tune; Set-TuneQuiet; [void]$Mp.Ex.Add('C:\'); [void]$Mp.Ex.Add('D:\other'); $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' 'C:/lq'
+Assert-True (($Calls -join '|') -eq "Remove-MpPreference $NGP|Remove-MpPreference $WRP" -and @($Mp.Ex).Count -eq 0) 'defender.exclude: undo removes exactly the paths it added'
+Reset-Tune; Set-TuneQuiet; [void]$Mp.Ex.Add('C:\'); [void]$Mp.Ex.Add('D:\other'); $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' $WRF
 Assert-True ($Calls.Count -eq 0 -and $script:Asked -eq 0 -and (OutText) -match 'Nothing to fix') 'defender.exclude: paths already excluded (here by a parent) are skipped and never recorded'
-Reset-Tune; Set-TuneQuiet; $Mp.Mode = 'EDR Block Mode'; $rc = Invoke-Tune 'apply' @('y') 'defender' '' 'C:/lq'
+Reset-Tune; Set-TuneQuiet; $Mp.Mode = 'EDR Block Mode'; $rc = Invoke-Tune 'apply' @('y') 'defender' '' $WRF
 Assert-True ($Calls.Count -eq 0 -and (OutText) -match 'not offered: Defender is not the active antivirus') 'defender.exclude: AMRunningMode not Normal: not offered'
-Reset-Tune; Set-TuneQuiet; $Mp.Readable = $false; $rc = Invoke-Tune 'apply' @('y') 'defender' '' 'C:/lq'
+Reset-Tune; Set-TuneQuiet; $Mp.Readable = $false; $rc = Invoke-Tune 'apply' @('y') 'defender' '' $WRF
 Assert-True ($Calls.Count -eq 0 -and (OutText) -match 'exclusion list can only be read elevated' -and (OutText) -notmatch 'N/A') 'defender.exclude: exclusions unreadable: not offered, the list is never printed'
-Reset-Tune; Set-TuneQuiet; Add-Svc 'DellUpdate' 2; $Pw.Max = 50; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' 'C:/lq'
+Reset-Tune; Set-TuneQuiet; Add-Svc 'DellUpdate' 2; $Pw.Max = 50; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' $WRF
 Assert-True (@($Calls | Where-Object { $_ -notmatch 'MpPreference' }).Count -eq 0) '-DefenderExclusions offers only the exclusions'
-Reset-Tune; Set-TuneQuiet; $rc = Invoke-Tune 'apply' @('y', 'y') 'tune' '' 'C:/lq'
+Reset-Tune; Set-TuneQuiet; $rc = Invoke-Tune 'apply' @('y', 'y') 'tune' '' $WRF
 Assert-True (@($Calls | Where-Object { $_ -match 'MpPreference' }).Count -eq 0) '-Tune alone never offers exclusions'
 
 Write-Host 'tune: build folders (work_root, NuGet) are checked before an exclusion'
-$upf = [Environment]::GetFolderPath('UserProfile')
+$upf = Get-CurrentProfile
+$realProfiles = ${function:Get-ProfileRoots}; $realCurrent = ${function:Get-CurrentProfile}
+${function:Get-ProfileRoots} = { @('C:\Users', 'C:\Users\Default', 'C:\Users\Public', 'D:\Users\bob', $upf) + @(& $realProfiles) }   # test seam: a profile on another drive
 $badDirs = @('C:/.', 'C:/lq/.', 'C:/lq/..', 'C:/', 'C:', 'C:/Windows', 'C:/Users', 'C:/ProgramData', 'C:/Program Files', 'C:/lq./x', 'C:/lq /x',
   "$env:SystemRoot\System32", "$env:SystemRoot\Temp", "$([Environment]::GetFolderPath('ProgramFiles'))\x", "$env:ProgramData\Microsoft", "$env:PUBLIC\x",
   "$env:SystemDrive\`$Recycle.Bin", "$env:SystemDrive\System Volume Information", "$env:SystemDrive\Recovery\x", "$env:TEMP\x", "$env:TMP",
-  $upf, (Split-Path -Parent $upf), "$upf\AppData", "$upf\AppData\Local\Temp", "$upf\Downloads", "$upf\Desktop\x", "$upf\Documents", "$upf\OneDrive", "$upf\OneDrive - Org\lq")
+  $upf, "$upf\lq", "$upf\AppData", "$upf\Downloads", "$upf\Pictures\x", "$upf\.ssh", "$upf\Org - SharePoint\lib", "$upf\OneDrive - Org\lq",
+  'C:\Users\Default\lq', 'D:\Users\bob\AppData', 'D:\Users\bob\lq', 'C:\Program Files (Arm)\x', 'C:\Windows.old\x', 'C:\PerfLogs', 'C:\inetpub\wwwroot', 'D:\Windows\x',
+  'C:\$Recycle.Bin', 'C:\$WinREAgent\x', 'C:\ESD\x', 'C:\Intel\x', 'C:\OneDrive\lq', 'C:\con', 'C:\lq\aux', 'C:\lq\com1.txt', 'C:\PROGRA~1\x', 'C:\lq\LPT9')
 if (Test-Path -LiteralPath "$env:SystemDrive\Documents and Settings") { $badDirs += "$env:SystemDrive\Documents and Settings\x" }   # a junction Windows creates
 foreach ($bad in $badDirs) { Assert-True ((Get-BuildDirProblem $bad) -ne '') "build folder refused: '$bad' ($(Get-BuildDirProblem $bad))" }
-foreach ($good in @('C:/lq', 'D:/build/lq-1', 'C:\nuget\packages', "$upf\.nuget\packages", "$upf\lq")) { Assert-Equal (Get-BuildDirProblem $good) '' "build folder accepted: '$good'" }
+foreach ($good in @('C:/lq', 'C:\lq', 'D:/build/lq', 'D:\build', "$upf\.nuget\packages")) { Assert-Equal (Get-BuildDirProblem $good) '' "build folder accepted: '$good'" }
+Assert-True ((Get-BuildDirProblem "$upf\lq") -match 'top-level build folder such as C:\\lq or D:\\build') 'a refusal says to use a top-level build folder'
+${function:Get-CurrentProfile} = { "$env:SystemRoot\System32\config\systemprofile" }   # test seam: running as SYSTEM
+Assert-True ((Get-BuildDirProblem "$env:SystemRoot\System32\config\systemprofile\.nuget\packages") -match 'system folder' -and (Get-BuildDirProblem "$upf\lq") -ne '' -and (Get-BuildDirProblem 'D:\Users\bob\.nuget\packages') -ne '') 'as SYSTEM: its own NuGet cache and every user profile are refused'
+${function:Get-ProfileRoots} = $realProfiles; ${function:Get-CurrentProfile} = $realCurrent
 $jt = Join-Path ([IO.Path]::GetTempPath()) ('lanq-junc-' + [Guid]::NewGuid().ToString('N')); [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path "$jt\real\sub")
 [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path "$jt\j" -Target "$jt\real")
 Assert-True ((Get-ReparseProblem "$jt\j") -match 'junction or link' -and (Get-ReparseProblem "$jt\j\sub") -match 'junction or link' -and (Get-ReparseProblem "$jt\j\not-yet") -match 'junction or link') 'a junction anywhere on the path is refused (also for a folder not created yet)'
 Assert-Equal (Get-ReparseProblem "$jt\real\sub") '' 'a plain folder passes the junction check'
 [System.IO.Directory]::Delete("$jt\j"); Remove-Item -LiteralPath $jt -Recurse -Force
+Reset-Tune; Set-TuneQuiet; $rc = Invoke-Tune 'dry' @() 'defender' '' "$TR/missing"
+Assert-True ((OutText) -match 'missing is refused: it does not exist: create the folder first') 'an exclusion folder must exist (create the folder first)'
+Reset-Tune; Set-TuneQuiet; $script:DirOwner = 'S-1-5-21-9-9-9-1234'; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' $WRF
+Assert-True ($Calls.Count -eq 0 -and ([regex]::Matches((OutText), 'is owned by S-1-5-21-9-9-9-1234')).Count -eq 2) 'an exclusion folder owned by another account is refused'
+Reset-Tune; Set-TuneQuiet; $script:DirOwner = $BaSid; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' $WRF
+Assert-Equal ($Calls -join '|') "Add-MpPreference $WRP|Add-MpPreference $NGP" 'owned by Administrators: offered'
+$mkJ = { [System.IO.Directory]::Delete($WRP); [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $WRP -Target $NGP) }
+$unJ = { [System.IO.Directory]::Delete($WRP); [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path $WRP) }
+Reset-Tune; Set-TuneQuiet; $script:OnAnswer = $mkJ; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' $WRF
+Assert-True (($Calls -join '|') -eq "Add-MpPreference $NGP" -and (OutText) -match 'not applied: .*is refused: .*junction or link') 'TOCTOU: work_root became a junction while the prompt waited: checked again after the answer, not excluded'
+& $unJ
+$origSave2 = ${function:Save-FixRecord}; $script:SaveHook = $null
+function Save-FixRecord($Rec) { $r = & $origSave2 $Rec; if ($script:SaveHook) { & $script:SaveHook; $script:SaveHook = $null }; return $r }   # test seam: between the record and the change
+Reset-Tune; Set-TuneQuiet; $script:SaveHook = $mkJ; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' $WRF; $j = Read-Rec (Get-LatestRecord)
+Assert-True (($Calls -join '|') -eq "Add-MpPreference $NGP" -and (OutText) -match 'is refused now: .*junction or link' -and $j.items[0].status -eq 'skipped') 'TOCTOU: a junction made after the record was written: checked again right before the change, not excluded, recorded as skipped'
+Set-Item -Path Function:\Save-FixRecord -Value $origSave2; & $unJ
 foreach ($wr in @('C:/.', 'C:/lq/.', 'C:/Windows', 'C:/Users', 'C:/ProgramData')) { Assert-True ((Get-TuneArgError @{ Hours = $null; WorkRoot = $wr } $true $true 'dry') -match 'refused|-WorkRoot must') "-WorkRoot $wr refused (exit 2)" }
-Reset-Tune; Set-TuneQuiet; $env:NUGET_PACKAGES = 'C:\ProgramData'; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' 'C:/lq'
-Assert-True (($Calls -join '|') -eq 'Add-MpPreference C:\lq' -and (OutText) -match 'C:\\ProgramData is refused') 'NUGET_PACKAGES pointing at a protected folder: not offered, says why; work_root still offered'
-$env:NUGET_PACKAGES = 'C:\nuget\packages'
-Reset-Tune; Set-TuneQuiet; $script:ConsoleSid = 'S-1-5-21-1-2-3-2002'; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' 'C:/lq'
-Assert-True (($Calls -join '|') -eq 'Add-MpPreference C:\lq' -and (OutText) -match 'not run as the account logged on at the console') 'elevated as another account than the console user: the NuGet folder is not offered (wrong profile), work_root is'
-Reset-Tune; Set-TuneQuiet; $script:ConsoleSid = ''; $rc = Invoke-Tune 'dry' @() 'defender' '' 'C:/lq'
+Reset-Tune; Set-TuneQuiet; $env:NUGET_PACKAGES = 'C:\ProgramData'; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' $WRF
+Assert-True (($Calls -join '|') -eq "Add-MpPreference $WRP" -and (OutText) -match 'C:\\ProgramData is refused') 'NUGET_PACKAGES pointing at a protected folder: not offered, says why; work_root still offered'
+$env:NUGET_PACKAGES = $NGP
+Reset-Tune; Set-TuneQuiet; $script:ConsoleSid = 'S-1-5-21-1-2-3-2002'; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' $WRF
+Assert-True (($Calls -join '|') -eq "Add-MpPreference $WRP" -and (OutText) -match 'not run as the account logged on at the console') 'elevated as another account than the console user: the NuGet folder is not offered (wrong profile), work_root is'
+Reset-Tune; Set-TuneQuiet; $script:ConsoleSid = ''; $rc = Invoke-Tune 'dry' @() 'defender' '' $WRF
 Assert-True ((OutText) -match 'not offered: the NuGet packages folder') 'nobody at the console (or unreadable): the NuGet folder is not offered'
-Reset-Tune; Set-TuneQuiet; [void]$Mp.Ex.Add('%SystemDrive%\lq'); $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' "$($env:SystemDrive)/lq"
-Assert-True (($Calls -join '|') -eq 'Add-MpPreference C:\nuget\packages') 'an existing exclusion with an environment variable is expanded (as Defender and the tune scan do): work_root already covered'
+Reset-Tune; Set-TuneQuiet; [void]$Mp.Ex.Add('%SystemDrive%' + $WRP.Substring(2)); $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' $WRF
+Assert-True (($Calls -join '|') -eq "Add-MpPreference $NGP") 'an existing exclusion with an environment variable is expanded (as Defender and the tune scan do): work_root already covered'
 Reset-Tune; Set-TuneQuiet; $Mp.Day = 0; $rc = Invoke-Tune 'dry' @() 'tune' '00:00-23:30'
 Assert-True ((OutText) -match 'defender\.scantime .*not offered: the job window 00:00-23:30 leaves no hour') 'defender.scantime: not offered when an hour after the window is still inside it'
 Reset-Tune; Set-TuneQuiet; ${function:Get-ScheduledTask} = { param($TaskPath, $TaskName, $ErrorAction) throw 'The RPC server is unavailable' }; $rc = Invoke-Tune 'dry'
@@ -953,7 +980,7 @@ foreach ($e in @(@(@{ Hours = $null; WorkRoot = 'C:/lq' }, $false, $false, 'appl
   Assert-True ((Get-TuneArgError $e[0] $e[1] $e[2] $e[3]) -match [regex]::Escape($e[4])) "tune arguments refused: $($e[4])"
 }
 Assert-Equal (Get-TuneArgError @{ Hours = '22:00-07:00'; WorkRoot = 'D:/lq' } $true $true 'dry') '' 'tune arguments accepted'
-Remove-Item Env:\NUGET_PACKAGES
+Remove-Item Env:\NUGET_PACKAGES; Remove-Item -LiteralPath $TR -Recurse -Force
 
 Write-Host 'curated vendor list'
 # Every pattern shipped in a release (0.5.0). Append the next release's patterns here; each must stay in the current

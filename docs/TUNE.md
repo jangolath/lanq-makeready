@@ -91,12 +91,21 @@ problems and the `administrators_authorized_keys` ACL (fix `ssh.aclkeys`). The t
 
 Inside a Windows container the host-level checks report SKIP.
 
-**Build folders.** `-WorkRoot`, and every folder the fix script would exclude from Defender, must be a plain folder:
-no `.` or `..` part, no part ending in a dot or space, already in canonical form, not a drive root, and not in, at or
-above the Windows folder, either Program Files folder, ProgramData, the Public profile, TEMP/TMP, `$Recycle.Bin`,
-`System Volume Information` or `Recovery`. In a user profile the profile itself and its AppData, Downloads, Desktop,
-Documents and OneDrive folders are refused; other folders there (such as `.nuget\packages` or `lq`) are fine. When
-the folder or any folder above it exists and is a junction or symbolic link, it is refused too.
+**Build folders (Defender exclusions).** Only two kinds of folder can ever be excluded: (A) a top-level build
+folder such as `C:\lq` or `D:\build`, or (B) exactly this account's NuGet cache, `<profile>\.nuget\packages`
+(a `NUGET_PACKAGES` override must itself qualify as (A)). For (A) the top-level folder must not be a Windows, program,
+user, vendor or hidden one (`Windows*`, `Program Files*`, `ProgramData`, `Users`, `Documents and Settings`, `PerfLogs`,
+`inetpub`, `ESD`, `Recovery`, `Boot`, `System Volume Information`, any `$...` folder, `OneDrive*`, `Intel`, `AMD`,
+`NVIDIA`, `Drivers`, `MSOCache`), and the folder must not be in, at or above any user profile Windows knows (the
+ProfileList, so profiles on other drives too), `%SystemRoot%`, any Program Files folder, ProgramData or TEMP/TMP. So a
+folder inside a profile, such as `<profile>\lq`, is not offered: use a top-level build folder such as `C:\lq` or
+`D:\build`. Always refused: a drive root, `.` or `..`, `~` (8.3 short names), reserved device names (`CON`, `NUL`,
+`COM1`, `LPT1`, ...), a part ending in a dot or space, a path Windows would read differently, and a junction or
+symbolic link anywhere on the existing path. The fix also requires the folder to exist and to be owned by
+Administrators, SYSTEM or you ("create the folder first"), and checks all of this again right before the change.
+
+`-WorkRoot` itself only has to be a valid LanQueue work_root for the scan (a drive path with no `.` part, not a whole
+drive), so a work_root inside a profile still scans; `defender.paths` then says it cannot be excluded and why.
 
 ### The curated list
 
@@ -141,9 +150,9 @@ mode asynchronously, so protection stays on). Then:
 
 - exclusions cover work_root (`-WorkRoot`) plus the NuGet package cache (`NUGET_PACKAGES`, or
   `%USERPROFILE%\.nuget\packages`), nothing else: never temp, never processes;
-- each folder must pass the build-folder rule above (so `C:/.`, `C:/Windows`, `C:/Windows/Temp`, `C:/Users`, a
-  profile's AppData or Downloads, or a junction such as `C:/Documents and Settings` are refused); the same rule
-  applies to the tune scan's `-WorkRoot`;
+- each folder must pass the build-folder rule above: a top-level build folder such as `C:\lq` or `D:\build`, or
+  this account's own `.nuget\packages`; it must exist and be owned by Administrators, SYSTEM or you, and it is checked
+  again after your answer and right before the change (a folder that became a junction meanwhile is skipped);
 - the NuGet package cache is offered only when the elevated PowerShell runs as the account logged on at the console:
   otherwise `%USERPROFILE%` belongs to another account (for example an administrator who elevated for you), and the
   script says so and offers work_root only;
@@ -223,8 +232,9 @@ scan's decision functions unchanged, and a test checks that the copies match.
   counts as undone.
 - `fstrim.timer` runs `systemctl enable --now fstrim.timer`.
 
-`--tune` refuses to apply or undo anything inside a container (the same detection as the scan; exit 3): the tune
-fixes change host settings. `--tune --dry-run` still works there, since it changes nothing. WSL 2 counts as a host.
+`--tune` refuses to apply anything inside a container, and `--undo` refuses the tune items of a record there (the
+same detection as the scan; exit 3; readiness items in the record are still undone): the tune fixes change host
+settings. `--tune --dry-run` still works there, since it changes nothing. WSL 2 counts as a host.
 
 Undo takes unit, file and sysctl names only from fixed tables in the script. A service name in a record must be on
 the script's append-only list and have the name shape, or the record is rejected.

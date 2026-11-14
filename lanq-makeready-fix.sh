@@ -749,7 +749,7 @@ do_undo() { # $1 record file
   if ! record_in_place "$1"; then err "lanq-makeready-fix: record rejected: --undo reads only the records this script writes, fix-<time>.json in $(root_rec_dir). Nothing was changed."; return 2; fi
   if [ -e "$1" ] && ! record_trusted "$1"; then err "lanq-makeready-fix: record rejected (it or its folder is a link, not owned by root, or writable by group or others, so someone else could have written it): $1. Nothing was changed."; return 2; fi
   if ! load_record "$1"; then err "lanq-makeready-fix: record rejected ($LOAD_ERR): $1. Nothing was changed."; return 2; fi
-  _failed=0
+  _failed=0; _refused=0
   out "lanq-makeready-fix $TOOL_VERSION undo: $1 (newest change first; each needs your answer)"
   _todo=$(printf '%s\n' "$REC_ITEMS" | grep -E '^[0-9]+[|][a-z.]+[|](applied|failed|pending)[|]' | cut -d'|' -f1 | sort -nr)
   if [ -z "$_todo" ]; then out "Nothing to undo in this record."; return 0; fi
@@ -760,6 +760,9 @@ do_undo() { # $1 record file
     _key=$_id; [ "$_id" = services.unused ] && _key="$_id:$(field "$_b" svc)"   # a known name: the state passed valid_state
     out ""
     out "undo $_key  (check $(check_of "$_key")), $_st at $_tm"
+    case "$_id" in sysctl.tune|journald.cap|services.unused|fstrim.timer)
+      if fx_container; then out "  refused: this is a container; the tune fixes change host settings, so undo them on the host (nothing changed)"; _refused=1; continue; fi ;;
+    esac
     _cur=$(state_of "$_key")
     out "  before the fix: $_b"
     out "  after the fix:  $_a"
@@ -782,6 +785,7 @@ do_undo() { # $1 record file
     else _failed=$((_failed + 1)); out "  FAILED (exit $_rc; now: $_now)"; fi
   done
   [ "$_failed" = 0 ] || return 1
+  [ "$_refused" = 0 ] || return 3
   return 0
 }
 

@@ -84,7 +84,7 @@ $FixFunctionNames = @('Write-FixLine', 'Write-FixErr', 'Get-FixSessionId', 'Get-
   'Test-Props', 'Test-Str', 'ConvertTo-TimeText', 'New-RecordError', 'Read-FixRecord', 'Show-Fix', 'Invoke-FixApply', 'Invoke-FixUndo', 'Show-FixRecords', 'Invoke-FixMain',
   'Get-UndoArg', 'Test-Vendor', 'Test-VendorUndo', 'Test-InWindow', 'Get-HoursMin', 'Format-Min', 'Get-RegVal', 'Get-RegNames', 'Test-RegKey', 'Get-UserSid', 'Get-ActiveScheme',
   'Get-PowerAc', 'Test-UsbNic', 'Test-FixAllSsd', 'Get-SvcState', 'Get-TaskState', 'Get-StartupState', 'Get-DefenderInfo', 'ConvertTo-Minutes', 'Get-ExcludeState',
-  'Get-DotnetState', 'Get-DoState', 'Get-FixTargets', 'Get-StateTarget', 'Get-UndoRefusal', 'Get-TargetLabel', 'Get-ScanTarget', 'Get-SvcNorm', 'Get-FixApplyNote', 'Get-TuneArgError', 'Get-NugetDir', 'Get-ConsoleUserSid', 'Get-ProtectedDirs', 'Get-BuildDirProblem', 'Get-ReparseProblem', 'Get-CleanName')
+  'Get-DotnetState', 'Get-DoState', 'Get-FixTargets', 'Get-StateTarget', 'Get-UndoRefusal', 'Get-TargetLabel', 'Get-ScanTarget', 'Get-SvcNorm', 'Get-FixApplyNote', 'Get-TuneArgError', 'Get-NugetDir', 'Get-ConsoleUserSid', 'Get-ProtectedDirs', 'Get-BuildDirProblem', 'Get-ReparseProblem', 'Get-CleanName', 'Get-ProfileRoots', 'Get-CurrentProfile', 'Test-AtOrUnder', 'Get-PathOwnerSid', 'Get-ExcludeProblem')
 # Every cmdlet this file runs. A function or alias with one of these names would run instead of the cmdlet, so the
 # script refuses to start when any of them does not resolve to the cmdlet itself (Get-FixCommandShadow).
 $FixCmdletNames = @('Get-Service', 'Set-Service', 'Start-Service', 'Stop-Service', 'Get-Item', 'Set-ItemProperty', 'Remove-ItemProperty', 'Get-Acl', 'Set-Acl',
@@ -526,14 +526,27 @@ function Get-ConsoleUserSid {
     return "$((New-Object System.Security.Principal.NTAccount($n)).Translate([System.Security.Principal.SecurityIdentifier]).Value)"
   } catch { return '' }
 }
-# Folders a build folder must never be in, be, or hold: Windows, the program folders, ProgramData, the Public
-# profile, TEMP/TMP, and the recycle bin, volume information and recovery folders of the drive.
-function Get-ProtectedDirs([string]$Drive = '') {
+# System folders a build folder must never be in, at or above: Windows, every Program Files, ProgramData, TEMP/TMP.
+function Get-ProtectedDirs {
   $l = @($env:SystemRoot, [Environment]::GetFolderPath('Windows'), [Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86'), $env:ProgramW6432,
-    [Environment]::GetFolderPath('CommonApplicationData'), $env:ProgramData, $env:PUBLIC, $env:TEMP, $env:TMP, [System.IO.Path]::GetTempPath())
-  foreach ($d in @($env:SystemDrive, $Drive) | Where-Object { $_ }) { $l += @("$d\`$Recycle.Bin", "$d\System Volume Information", "$d\Recovery") }
+    [Environment]::GetEnvironmentVariable('ProgramFiles(x86)'), [Environment]::GetEnvironmentVariable('ProgramFiles(Arm)'), [Environment]::GetFolderPath('CommonApplicationData'),
+    $env:ProgramData, $env:TEMP, $env:TMP, [System.IO.Path]::GetTempPath())
   return @($l | Where-Object { $_ } | ForEach-Object { "$_".Replace('/', '\').TrimEnd('\') })
 }
+# Every user profile folder Windows knows (ProfileList: ProfilesDirectory, Default, Public and each ProfileImagePath,
+# on any drive), plus this account's.
+function Get-ProfileRoots {
+  $k = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'; $l = @()
+  try {
+    $pl = Get-Item -LiteralPath $k -ErrorAction Stop
+    foreach ($n in 'ProfilesDirectory', 'Default', 'Public') { $l += "$($pl.GetValue($n))" }
+    foreach ($pk in @(Get-ChildItem -LiteralPath $k -ErrorAction Stop)) { $l += "$($pk.GetValue('ProfileImagePath'))" }
+  } catch { }
+  $l += @($env:PUBLIC, (Get-CurrentProfile), $env:USERPROFILE)
+  return @($l | Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables("$_").Replace('/', '\').TrimEnd('\') })
+}
+function Get-CurrentProfile { return "$([Environment]::GetFolderPath('UserProfile'))".TrimEnd('\') }
+function Test-AtOrUnder([string]$P, [string]$Q) { return [bool]($Q -and ($P -ieq $Q -or $P.StartsWith($Q + '\', [System.StringComparison]::OrdinalIgnoreCase))) }
 # '' when no existing part of $Path, from the drive down, is a junction or symbolic link (it could point anywhere).
 function Get-ReparseProblem([string]$Path) {
   $parts = @($Path.Split('\')); $cur = $parts[0]
@@ -544,30 +557,45 @@ function Get-ReparseProblem([string]$Path) {
   }
   return ''
 }
-# '' when $Path may be work_root or a Defender exclusion: a folder on a drive with no '.' or '..' part, already in
-# canonical form (GetFullPath gives it back unchanged), not a drive root, not in, at or above a protected folder, not a
-# user profile itself or its AppData, Downloads, Desktop, Documents or OneDrive folders (other folders in a profile,
-# such as .nuget\packages, are fine), and with no junction or link on the way.
+# '' only for (A) a build folder: <drive>:\<top>\... where <top> is not a Windows, program, user, vendor or hidden ($)
+# folder, and the path is not in, at or above a system folder or any user profile; or (B) exactly this account's
+# NuGet cache, <profile>\.nuget\packages (not for a profile inside a system folder, such as SYSTEM's). Always refused:
+# a drive root, '.' or '..', ~ (8.3 short names), reserved device names, a part ending in a dot or space, a path
+# Windows would read differently (GetFullPath), and a junction or link on the existing part of the path.
 function Get-BuildDirProblem([string]$Path) {
-  $p = "$Path".Replace('/', '\').TrimEnd('\')
-  if ($p -notmatch '^[A-Za-z]:(\\[^\\]+)+$') { return 'it is not a folder on a drive (a whole drive is never used)' }
-  foreach ($g in @($p.Split('\'))) { if ($g -eq '.' -or $g -eq '..') { return "it has a '.' or '..' part" }; if ($g -ne $g.Trim() -or $g.EndsWith('.')) { return 'a part of it starts or ends with a space or ends with a dot (Windows drops those)' } }
+  $p = "$Path".Replace('/', '\').TrimEnd('\'); $use = 'use a top-level build folder such as C:\lq or D:\build'
+  if ($p -notmatch '^[A-Za-z]:(\\[^\\]+)+$') { return "it is not a folder on a drive (a whole drive is never used); $use" }
+  if ($p.Contains('~')) { return "it contains ~ (an 8.3 short name can stand for another folder); $use" }
+  $parts = @($p.Split('\'))
+  for ($i = 1; $i -lt $parts.Count; $i++) {
+    $g = $parts[$i]
+    if ($g -eq '.' -or $g -eq '..') { return "it has a '.' or '..' part" }
+    if ($g -ne $g.Trim() -or $g.EndsWith('.')) { return 'a part of it starts or ends with a space or ends with a dot (Windows drops those)' }
+    if ($g -match '^(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$') { return "it has a reserved device name ($g)" }
+  }
   $full = ''; try { $full = [System.IO.Path]::GetFullPath($p).TrimEnd('\') } catch { return 'it is not a valid path' }
   if ($full -ine $p) { return "it is not in canonical form (Windows reads it as $full)" }
-  $ic = [System.StringComparison]::OrdinalIgnoreCase
-  foreach ($q in (Get-ProtectedDirs $p.Substring(0, 2))) {
-    if ($p -ieq $q -or $p.StartsWith($q + '\', $ic) -or $q.StartsWith($p + '\', $ic)) { return "it is in, at or above $q (Windows, program, shared-data and temporary folders are never used)" }
+  $sys = @(Get-ProtectedDirs); $prof = Get-CurrentProfile
+  if ($prof -and $p -ieq "$prof\.nuget\packages") {
+    foreach ($q in $sys) { if (Test-AtOrUnder $prof $q) { return "the profile $prof is inside the system folder $q (SYSTEM or a service account); $use" } }
+    return (Get-ReparseProblem $p)
   }
-  $up = "$([Environment]::GetFolderPath('UserProfile'))".TrimEnd('\'); $users = $up -replace '\\[^\\]+$', ''
-  foreach ($root in @($users, ("$env:USERPROFILE".TrimEnd('\') -replace '\\[^\\]+$', '')) | Where-Object { $_ -match '^[A-Za-z]:\\' } | Sort-Object -Unique) {
-    if ($p -ieq $root -or $root.StartsWith($p + '\', $ic)) { return "it is $root or a folder that holds it (the user profiles)" }
-    if ($p.StartsWith($root + '\', $ic)) {
-      $rel = @($p.Substring($root.Length + 1).Split('\'))
-      if ($rel.Count -eq 1) { return "it is the user profile $p itself" }
-      if ($rel[1] -match '^(?i)(AppData|Downloads|Desktop|Documents|OneDrive.*)$') { return "it is in a profile's $($rel[1]) folder (AppData, Downloads, Desktop, Documents and OneDrive are never used)" }
-    }
+  if ($parts[1] -match '^(?i)(Windows.*|Program Files.*|ProgramData|Users|Documents and Settings|PerfLogs|inetpub|ESD|Recovery|Boot|System Volume Information|\$.*|OneDrive.*|Intel|AMD|NVIDIA|Drivers|MSOCache)$') {
+    return "$($parts[0])\$($parts[1]) is a Windows, program, user, vendor or hidden folder; $use"
   }
+  foreach ($q in @($sys) + @(Get-ProfileRoots)) { if ((Test-AtOrUnder $p $q) -or (Test-AtOrUnder $q $p)) { return "it is in, at or above $q; $use" } }
   return (Get-ReparseProblem $p)
+}
+function Get-PathOwnerSid([string]$Path) { try { return "$((Get-Acl -LiteralPath $Path -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]))" } catch { return '' } }
+# '' when a folder may become a Defender exclusion: a build folder (Get-BuildDirProblem) that exists, and is owned by
+# Administrators, SYSTEM or this account (anyone else would control what is never scanned). Checked when it is shown
+# and again just before the change.
+function Get-ExcludeProblem([string]$Path) {
+  $why = Get-BuildDirProblem $Path; if ($why) { return $why }
+  if (-not [System.IO.Directory]::Exists($Path)) { return 'it does not exist: create the folder first, then run this again' }
+  $o = Get-PathOwnerSid $Path
+  if (@($BaSid, $SySid, (Get-UserSid)) -notcontains $o) { return "it is owned by $(Get-AccountName $o), not Administrators, SYSTEM or you, so someone else decides what is in it" }
+  return ''
 }
 function Get-DotnetState {
   $s = @{ Readable = (Test-RegKey $EnvKey); Vals = [ordered]@{}; Odd = '' }
@@ -881,7 +909,7 @@ function Get-FixNote([string]$Id, $S) {
       if (-not $S.Known) { return 'Defender could not be read (Get-MpPreference)' }
       if ($S.Mode -and $S.Mode -ne 'Normal') { return "Defender is not the active antivirus (AMRunningMode: $($S.Mode)); its exclusions do not matter" }
       if (-not $S.Readable) { return 'the exclusion list can only be read elevated' }
-      $why = Get-BuildDirProblem $S.Path; if ($why) { return "$($S.Path) is refused: $why" }
+      $why = Get-ExcludeProblem $S.Path; if ($why) { return "$($S.Path) is refused: $why" }
       if ($S.Path -cnotmatch "^$WinPathRe$") { return "$($S.Path): this script adds only plain drive paths (letters, digits, space, _ . ( ) -)" }
       if ($S.IsNuget) {
         $cu = Get-ConsoleUserSid
@@ -965,7 +993,7 @@ function Get-ExpectedAfter([string]$Id, $S) {
 # A name from the PC (Run entry, service, task, driver, product) made safe to print: control and bidi characters
 # removed (any user process can write a Run entry), at most 80 characters.
 function Get-CleanName([string]$S) {
-  $c = [regex]::Replace("$S", '[\x00-\x1F\x7F\u202A-\u202E\u2066-\u2069]', '')
+  $c = [regex]::Replace("$S", '[\p{Cc}\p{Cf}\u2028\u2029]', '')
   if ($c.Length -gt 80) { $c = $c.Substring(0, 77) + '...' }
   return $c
 }
@@ -1351,6 +1379,7 @@ function Invoke-FixApply([bool]$Dry) {
     if ($rec -and $rec.Items.Count -ge 64) { Write-FixLine '  not offered: this session''s undo record is full (64 changes); run the script again for the rest' 'DarkYellow'; continue }
     if (-not (Confirm-Fix)) { Write-FixLine '  not applied'; continue }
     $s2 = Get-FixState $id $target   # the precondition, re-read just before the change
+    $n2 = Get-FixNote $id $s2; if ($n2) { Write-FixLine "  not applied: $n2" 'DarkYellow'; continue }   # e.g. the folder became a junction
     if (-not (Test-FixNeeded $id $s2)) { Write-FixLine '  no longer needed (the state changed); nothing done'; continue }
     $before = Get-StateText $id $s2
     if ($before -cne (Get-StateText $id $s)) { Write-FixLine '  the state changed since it was shown; nothing done (run the script again)' 'DarkYellow'; continue }
@@ -1358,6 +1387,10 @@ function Invoke-FixApply([bool]$Dry) {
     $item = [ordered]@{ seq = ($rec.Items.Count + 1); id = $id; status = 'pending'; time = (Get-UtcStamp); before = $before; command = ((Get-FixCommand $id 'apply' $s2 $s2) -join ' ; '); after = (Get-ExpectedAfter $id $s2) }
     [void]$rec.Items.Add($item)
     if (-not (Save-FixRecord $rec)) { Write-FixErr '  nothing changed: the undo record could not be written'; $rec.Items.RemoveAt($rec.Items.Count - 1); return 1 }
+    if ($id -eq 'defender.exclude') {   # the folder again, right before the change (it could have become a junction meanwhile)
+      $why = Get-ExcludeProblem $s2.Path
+      if ($why) { $item.status = 'skipped'; $item.time = Get-UtcStamp; [void](Save-FixRecord $rec); Write-FixLine "  not applied: $($s2.Path) is refused now: $why" 'DarkYellow'; continue }
+    }
     $err = ''
     try { Invoke-FixChange $id 'apply' $s2 $s2 } catch { $err = "$($_.Exception.Message)" }
     $s3 = Get-FixState $id $target

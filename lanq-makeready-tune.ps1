@@ -44,15 +44,30 @@ function Test-Hours([string]$H) {
   $p = $H.Split('-'); return ($p[0] -ne $p[1])
 }
 # LanQueue's Windows work_root rule (ConfigLoader): drive path, forward slashes, [A-Za-z0-9_./-], no '..'.
-function Test-WorkRoot([string]$W) { return ($W -cmatch '^[A-Za-z]:/[A-Za-z0-9_./-]*$' -and $W -notmatch '\.\.') }
-# Folders a build folder must never be in, be, or hold: Windows, the program folders, ProgramData, the Public
-# profile, TEMP/TMP, and the recycle bin, volume information and recovery folders of the drive.
-function Get-ProtectedDirs([string]$Drive = '') {
+# A valid work_root for scanning (LanQueue's rule, no '.' part, not a whole drive). Whether it may also become a
+# Defender exclusion is a separate, stricter question (Get-BuildDirProblem).
+function Test-WorkRoot([string]$W) { return ($W -cmatch '^[A-Za-z]:/[A-Za-z0-9_.-][A-Za-z0-9_./-]*$' -and $W -notmatch '\.\.' -and $W -notmatch '(^|/)\.(/|$)') }
+# System folders a build folder must never be in, at or above: Windows, every Program Files, ProgramData, TEMP/TMP.
+function Get-ProtectedDirs {
   $l = @($env:SystemRoot, [Environment]::GetFolderPath('Windows'), [Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86'), $env:ProgramW6432,
-    [Environment]::GetFolderPath('CommonApplicationData'), $env:ProgramData, $env:PUBLIC, $env:TEMP, $env:TMP, [System.IO.Path]::GetTempPath())
-  foreach ($d in @($env:SystemDrive, $Drive) | Where-Object { $_ }) { $l += @("$d\`$Recycle.Bin", "$d\System Volume Information", "$d\Recovery") }
+    [Environment]::GetEnvironmentVariable('ProgramFiles(x86)'), [Environment]::GetEnvironmentVariable('ProgramFiles(Arm)'), [Environment]::GetFolderPath('CommonApplicationData'),
+    $env:ProgramData, $env:TEMP, $env:TMP, [System.IO.Path]::GetTempPath())
   return @($l | Where-Object { $_ } | ForEach-Object { "$_".Replace('/', '\').TrimEnd('\') })
 }
+# Every user profile folder Windows knows (ProfileList: ProfilesDirectory, Default, Public and each ProfileImagePath,
+# on any drive), plus this account's.
+function Get-ProfileRoots {
+  $k = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'; $l = @()
+  try {
+    $pl = Get-Item -LiteralPath $k -ErrorAction Stop
+    foreach ($n in 'ProfilesDirectory', 'Default', 'Public') { $l += "$($pl.GetValue($n))" }
+    foreach ($pk in @(Get-ChildItem -LiteralPath $k -ErrorAction Stop)) { $l += "$($pk.GetValue('ProfileImagePath'))" }
+  } catch { }
+  $l += @($env:PUBLIC, (Get-CurrentProfile), $env:USERPROFILE)
+  return @($l | Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables("$_").Replace('/', '\').TrimEnd('\') })
+}
+function Get-CurrentProfile { return "$([Environment]::GetFolderPath('UserProfile'))".TrimEnd('\') }
+function Test-AtOrUnder([string]$P, [string]$Q) { return [bool]($Q -and ($P -ieq $Q -or $P.StartsWith($Q + '\', [System.StringComparison]::OrdinalIgnoreCase))) }
 # '' when no existing part of $Path, from the drive down, is a junction or symbolic link (it could point anywhere).
 function Get-ReparseProblem([string]$Path) {
   $parts = @($Path.Split('\')); $cur = $parts[0]
@@ -63,35 +78,39 @@ function Get-ReparseProblem([string]$Path) {
   }
   return ''
 }
-# '' when $Path may be work_root or a Defender exclusion: a folder on a drive with no '.' or '..' part, already in
-# canonical form (GetFullPath gives it back unchanged), not a drive root, not in, at or above a protected folder, not a
-# user profile itself or its AppData, Downloads, Desktop, Documents or OneDrive folders (other folders in a profile,
-# such as .nuget\packages, are fine), and with no junction or link on the way.
+# '' only for (A) a build folder: <drive>:\<top>\... where <top> is not a Windows, program, user, vendor or hidden ($)
+# folder, and the path is not in, at or above a system folder or any user profile; or (B) exactly this account's
+# NuGet cache, <profile>\.nuget\packages (not for a profile inside a system folder, such as SYSTEM's). Always refused:
+# a drive root, '.' or '..', ~ (8.3 short names), reserved device names, a part ending in a dot or space, a path
+# Windows would read differently (GetFullPath), and a junction or link on the existing part of the path.
 function Get-BuildDirProblem([string]$Path) {
-  $p = "$Path".Replace('/', '\').TrimEnd('\')
-  if ($p -notmatch '^[A-Za-z]:(\\[^\\]+)+$') { return 'it is not a folder on a drive (a whole drive is never used)' }
-  foreach ($g in @($p.Split('\'))) { if ($g -eq '.' -or $g -eq '..') { return "it has a '.' or '..' part" }; if ($g -ne $g.Trim() -or $g.EndsWith('.')) { return 'a part of it starts or ends with a space or ends with a dot (Windows drops those)' } }
+  $p = "$Path".Replace('/', '\').TrimEnd('\'); $use = 'use a top-level build folder such as C:\lq or D:\build'
+  if ($p -notmatch '^[A-Za-z]:(\\[^\\]+)+$') { return "it is not a folder on a drive (a whole drive is never used); $use" }
+  if ($p.Contains('~')) { return "it contains ~ (an 8.3 short name can stand for another folder); $use" }
+  $parts = @($p.Split('\'))
+  for ($i = 1; $i -lt $parts.Count; $i++) {
+    $g = $parts[$i]
+    if ($g -eq '.' -or $g -eq '..') { return "it has a '.' or '..' part" }
+    if ($g -ne $g.Trim() -or $g.EndsWith('.')) { return 'a part of it starts or ends with a space or ends with a dot (Windows drops those)' }
+    if ($g -match '^(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$') { return "it has a reserved device name ($g)" }
+  }
   $full = ''; try { $full = [System.IO.Path]::GetFullPath($p).TrimEnd('\') } catch { return 'it is not a valid path' }
   if ($full -ine $p) { return "it is not in canonical form (Windows reads it as $full)" }
-  $ic = [System.StringComparison]::OrdinalIgnoreCase
-  foreach ($q in (Get-ProtectedDirs $p.Substring(0, 2))) {
-    if ($p -ieq $q -or $p.StartsWith($q + '\', $ic) -or $q.StartsWith($p + '\', $ic)) { return "it is in, at or above $q (Windows, program, shared-data and temporary folders are never used)" }
+  $sys = @(Get-ProtectedDirs); $prof = Get-CurrentProfile
+  if ($prof -and $p -ieq "$prof\.nuget\packages") {
+    foreach ($q in $sys) { if (Test-AtOrUnder $prof $q) { return "the profile $prof is inside the system folder $q (SYSTEM or a service account); $use" } }
+    return (Get-ReparseProblem $p)
   }
-  $up = "$([Environment]::GetFolderPath('UserProfile'))".TrimEnd('\'); $users = $up -replace '\\[^\\]+$', ''
-  foreach ($root in @($users, ("$env:USERPROFILE".TrimEnd('\') -replace '\\[^\\]+$', '')) | Where-Object { $_ -match '^[A-Za-z]:\\' } | Sort-Object -Unique) {
-    if ($p -ieq $root -or $root.StartsWith($p + '\', $ic)) { return "it is $root or a folder that holds it (the user profiles)" }
-    if ($p.StartsWith($root + '\', $ic)) {
-      $rel = @($p.Substring($root.Length + 1).Split('\'))
-      if ($rel.Count -eq 1) { return "it is the user profile $p itself" }
-      if ($rel[1] -match '^(?i)(AppData|Downloads|Desktop|Documents|OneDrive.*)$') { return "it is in a profile's $($rel[1]) folder (AppData, Downloads, Desktop, Documents and OneDrive are never used)" }
-    }
+  if ($parts[1] -match '^(?i)(Windows.*|Program Files.*|ProgramData|Users|Documents and Settings|PerfLogs|inetpub|ESD|Recovery|Boot|System Volume Information|\$.*|OneDrive.*|Intel|AMD|NVIDIA|Drivers|MSOCache)$') {
+    return "$($parts[0])\$($parts[1]) is a Windows, program, user, vendor or hidden folder; $use"
   }
+  foreach ($q in @($sys) + @(Get-ProfileRoots)) { if ((Test-AtOrUnder $p $q) -or (Test-AtOrUnder $q $p)) { return "it is in, at or above $q; $use" } }
   return (Get-ReparseProblem $p)
 }
 # A name from the PC (Run entry, service, task, driver, product) made safe to print: control and bidi characters
 # removed (any user process can write a Run entry), at most 80 characters.
 function Get-CleanName([string]$S) {
-  $c = [regex]::Replace("$S", '[\x00-\x1F\x7F\u202A-\u202E\u2066-\u2069]', '')
+  $c = [regex]::Replace("$S", '[\p{Cc}\p{Cf}\u2028\u2029]', '')
   if ($c.Length -gt 80) { $c = $c.Substring(0, 77) + '...' }
   return $c
 }
@@ -134,7 +153,7 @@ $HostIds = @('power.plan', 'power.usbsuspend', 'startup.vendor', 'vendor.service
 function New-TuneItem([string]$Id, [string]$Title, [string]$Status, [string]$Detail, [string]$Advice = '', [bool]$Admin = $false, [string]$FixId = '', [bool]$Security = $false) {
   $fx = $null; if ($FixId -and @('INFO', 'WARN') -contains $Status) { $fx = $FixId }
   if (@('OK', 'SKIP') -contains $Status) { $Advice = '' }
-  $Detail = [regex]::Replace($Detail, '[\x00-\x1F\x7F\u202A-\u202E\u2066-\u2069]', ''); $Advice = [regex]::Replace($Advice, '[\x00-\x1F\x7F\u202A-\u202E\u2066-\u2069]', '')
+  $Detail = [regex]::Replace($Detail, '[\p{Cc}\p{Cf}\u2028\u2029]', ''); $Advice = [regex]::Replace($Advice, '[\p{Cc}\p{Cf}\u2028\u2029]', '')
   if ($Detail.Length -gt 1024) { $Detail = $Detail.Substring(0, 1021) + '...' }; if ($Advice.Length -gt 1024) { $Advice = $Advice.Substring(0, 1021) + '...' }
   return [ordered]@{ id = $Id; title = $Title; status = $Status; detail = $Detail; advice = $Advice; needsAdmin = $Admin; fixId = $fx; security = $Security }
 }
@@ -246,10 +265,14 @@ function Get-TuneItems($F) {
   elseif (-not $d.Rtp) { & $add (New-TuneItem 'defender.paths' $t 'OK' 'real-time protection is off' '' $true '' $true) }
   elseif ($null -eq $d.Scanned) { & $add (New-TuneItem 'defender.paths' $t 'SKIP' 'needs admin (exclusions are readable only elevated; the list is never printed)' '' $true '' $true) }
   else {
-    $rows = @(); $scan = 0
-    foreach ($k in @('work_root', 'NuGet packages', 'temp')) { if ($d.Scanned.Contains($k)) { $s = 'scanned'; if (-not $d.Scanned[$k]) { $s = 'excluded' } elseif ($k -ne 'temp') { $scan++ }; $rows += "$k $s" } }
+    $rows = @(); $scan = 0; $no = @(); $elig = @{ work_root = $F.WorkRootExcl; 'NuGet packages' = $F.NugetExcl }
+    foreach ($k in @('work_root', 'NuGet packages', 'temp')) {
+      if (-not $d.Scanned.Contains($k)) { continue }
+      $s = 'scanned'; if (-not $d.Scanned[$k]) { $s = 'excluded' } elseif ($k -ne 'temp') { if ($elig[$k]) { $no += "$k cannot be excluded: $($elig[$k])" } else { $scan++ } }; $rows += "$k $s" }
+    if ($no.Count) { $rows += $no }
     $adv = 'A Dev Drive (Windows 11, performance mode) is the better choice: Defender scans it asynchronously. An exclusion is a trade-off: nothing in that folder is ever scanned. The fix offers work_root and the NuGet packages only (lanq-makeready-fix.ps1 -Tune -DefenderExclusions), never temp.'
     if ($scan -gt 0) { & $add (New-TuneItem 'defender.paths' $t 'INFO' "real-time scanning: $($rows -join ', ')" $adv $true 'defender.exclude' $true) }
+    elseif ($no.Count) { & $add (New-TuneItem 'defender.paths' $t 'INFO' "real-time scanning: $($rows -join ', ')" $adv $true '' $true) }
     else { & $add (New-TuneItem 'defender.paths' $t 'OK' "real-time scanning: $($rows -join ', ')" '' $true '' $true) }
   }
 
@@ -454,6 +477,7 @@ function Get-TuneFacts([string]$H, [string]$W) {
   $F.Container = [bool]($ctl -and @($ctl.GetValueNames()) -contains 'ContainerType')
   $F.Edition = Get-RegValue 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' 'EditionID'
   $F.NugetDir = "$env:USERPROFILE\.nuget\packages"; if ($env:NUGET_PACKAGES) { $F.NugetDir = "$env:NUGET_PACKAGES" }
+  $F.NugetExcl = Get-BuildDirProblem $F.NugetDir; $F.WorkRootExcl = ''; if ($W) { $F.WorkRootExcl = Get-BuildDirProblem $W }   # may each become an exclusion?
   $F.OneDrive = @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial) | Where-Object { $_ }
   # power (powercfg /q, AC values of the active plan)
   $pc = Join-Path ([Environment]::GetFolderPath('System')) 'powercfg.exe'
@@ -560,7 +584,6 @@ if ($Extra -and @($Extra | Where-Object { $null -ne $_ -and "$_" -ne '' }).Count
 if ($Hours -and -not (Test-Hours $Hours)) { [Console]::Error.WriteLine('lanq-makeready-tune: -Hours must look like 00:00-07:00 (HH:mm-HH:mm, start different from end).'); exit 2 }
 if ($WorkRoot) { $WorkRoot = $WorkRoot.Replace('\', '/') }
 if ($WorkRoot -and -not (Test-WorkRoot $WorkRoot)) { [Console]::Error.WriteLine('lanq-makeready-tune: -WorkRoot must be a drive path like C:/lq (letters, digits, _ . / -; no spaces, no ..), as in LanQueue machines.yml.'); exit 2 }
-if ($WorkRoot) { $wp = Get-BuildDirProblem $WorkRoot; if ($wp) { [Console]::Error.WriteLine("lanq-makeready-tune: -WorkRoot $WorkRoot is refused: $wp."); exit 2 } }
 $StdoutJson = ($Json -eq '-')
 if ($StdoutJson) { $WarningPreference = 'SilentlyContinue'; $ProgressPreference = 'SilentlyContinue'; $InformationPreference = 'SilentlyContinue'; $VerbosePreference = 'SilentlyContinue' }
 $facts = Get-TuneFacts $Hours $WorkRoot
