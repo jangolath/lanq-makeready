@@ -19,7 +19,7 @@
 # Exit:  0 = done or nothing to do, 1 = a change failed or did not verify, 2 = bad arguments or a rejected record,
 #        3 = refused (over SSH, from stdin, no interactive console).
 
-TOOL_VERSION=0.4.1
+TOOL_VERSION=0.5.0
 RECORD_SCHEMA=lanq-makeready-fix/v1
 FIX_IDS="ssh.start power.sleep"
 SLEEP_KEYS="sleep suspend hibernate hybrid-sleep"
