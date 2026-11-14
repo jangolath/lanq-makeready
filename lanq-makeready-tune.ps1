@@ -45,26 +45,48 @@ function Test-Hours([string]$H) {
 }
 # LanQueue's Windows work_root rule (ConfigLoader): drive path, forward slashes, [A-Za-z0-9_./-], no '..'.
 function Test-WorkRoot([string]$W) { return ($W -cmatch '^[A-Za-z]:/[A-Za-z0-9_./-]*$' -and $W -notmatch '\.\.') }
-# Folders a build folder must never be, or hold: the Windows, program, shared-data and user folders.
-function Get-ProtectedDirs {
-  $u = [Environment]::GetFolderPath('UserProfile'); $users = "$u" -replace '\\[^\\]+$', ''
-  return @($env:SystemRoot, [Environment]::GetFolderPath('Windows'), [Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86'), $env:ProgramW6432,
-    [Environment]::GetFolderPath('CommonApplicationData'), $env:ProgramData, $env:PUBLIC, $u, $users, $env:USERPROFILE) | Where-Object { $_ }
+# Folders a build folder must never be in, be, or hold: Windows, the program folders, ProgramData, the Public
+# profile, TEMP/TMP, and the recycle bin, volume information and recovery folders of the drive.
+function Get-ProtectedDirs([string]$Drive = '') {
+  $l = @($env:SystemRoot, [Environment]::GetFolderPath('Windows'), [Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86'), $env:ProgramW6432,
+    [Environment]::GetFolderPath('CommonApplicationData'), $env:ProgramData, $env:PUBLIC, $env:TEMP, $env:TMP, [System.IO.Path]::GetTempPath())
+  foreach ($d in @($env:SystemDrive, $Drive) | Where-Object { $_ }) { $l += @("$d\`$Recycle.Bin", "$d\System Volume Information", "$d\Recovery") }
+  return @($l | Where-Object { $_ } | ForEach-Object { "$_".Replace('/', '\').TrimEnd('\') })
 }
-# '' when $Path may be work_root: a folder on a drive with no '.' or '..' segment, already in canonical form
-# (GetFullPath gives it back unchanged), not a drive root, and neither a protected folder nor a parent of one.
-# The same rule as lanq-makeready-fix.ps1 uses before a Defender exclusion (a test keeps the two copies equal).
+# '' when no existing part of $Path, from the drive down, is a junction or symbolic link (it could point anywhere).
+function Get-ReparseProblem([string]$Path) {
+  $parts = @($Path.Split('\')); $cur = $parts[0]
+  for ($i = 1; $i -lt $parts.Count; $i++) {
+    $cur = $cur + '\' + $parts[$i]
+    if (-not [System.IO.Directory]::Exists($cur) -and -not [System.IO.File]::Exists($cur)) { break }
+    try { if ([System.IO.File]::GetAttributes($cur) -band [System.IO.FileAttributes]::ReparsePoint) { return "$cur is a junction or link" } } catch { return "$cur cannot be read" }
+  }
+  return ''
+}
+# '' when $Path may be work_root or a Defender exclusion: a folder on a drive with no '.' or '..' part, already in
+# canonical form (GetFullPath gives it back unchanged), not a drive root, not in, at or above a protected folder, not a
+# user profile itself or its AppData, Downloads, Desktop, Documents or OneDrive folders (other folders in a profile,
+# such as .nuget\packages, are fine), and with no junction or link on the way.
 function Get-BuildDirProblem([string]$Path) {
   $p = "$Path".Replace('/', '\').TrimEnd('\')
   if ($p -notmatch '^[A-Za-z]:(\\[^\\]+)+$') { return 'it is not a folder on a drive (a whole drive is never used)' }
   foreach ($g in @($p.Split('\'))) { if ($g -eq '.' -or $g -eq '..') { return "it has a '.' or '..' part" }; if ($g -ne $g.Trim() -or $g.EndsWith('.')) { return 'a part of it starts or ends with a space or ends with a dot (Windows drops those)' } }
   $full = ''; try { $full = [System.IO.Path]::GetFullPath($p).TrimEnd('\') } catch { return 'it is not a valid path' }
   if ($full -ine $p) { return "it is not in canonical form (Windows reads it as $full)" }
-  foreach ($k in (Get-ProtectedDirs)) {
-    $q = "$k".Replace('/', '\').TrimEnd('\')
-    if ($q -and ($q -ieq $p -or $q.StartsWith($p + '\', [System.StringComparison]::OrdinalIgnoreCase))) { return "it is $q or a folder that holds it (Windows, program, shared-data and user folders are never used)" }
+  $ic = [System.StringComparison]::OrdinalIgnoreCase
+  foreach ($q in (Get-ProtectedDirs $p.Substring(0, 2))) {
+    if ($p -ieq $q -or $p.StartsWith($q + '\', $ic) -or $q.StartsWith($p + '\', $ic)) { return "it is in, at or above $q (Windows, program, shared-data and temporary folders are never used)" }
   }
-  return ''
+  $up = "$([Environment]::GetFolderPath('UserProfile'))".TrimEnd('\'); $users = $up -replace '\\[^\\]+$', ''
+  foreach ($root in @($users, ("$env:USERPROFILE".TrimEnd('\') -replace '\\[^\\]+$', '')) | Where-Object { $_ -match '^[A-Za-z]:\\' } | Sort-Object -Unique) {
+    if ($p -ieq $root -or $root.StartsWith($p + '\', $ic)) { return "it is $root or a folder that holds it (the user profiles)" }
+    if ($p.StartsWith($root + '\', $ic)) {
+      $rel = @($p.Substring($root.Length + 1).Split('\'))
+      if ($rel.Count -eq 1) { return "it is the user profile $p itself" }
+      if ($rel[1] -match '^(?i)(AppData|Downloads|Desktop|Documents|OneDrive.*)$') { return "it is in a profile's $($rel[1]) folder (AppData, Downloads, Desktop, Documents and OneDrive are never used)" }
+    }
+  }
+  return (Get-ReparseProblem $p)
 }
 # A name from the PC (Run entry, service, task, driver, product) made safe to print: control and bidi characters
 # removed (any user process can write a Run entry), at most 80 characters.

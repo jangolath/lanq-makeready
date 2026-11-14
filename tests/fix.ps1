@@ -179,7 +179,7 @@ function Get-FixGuardViolations([string]$Path) {
     'ToString', 'GetSecurityDescriptorSddlForm', 'SetSecurityDescriptorSddlForm', 'GetOwner', 'Translate', 'IsInRole', 'GetCurrent', 'GetCurrentProcess', 'GetFolderPath', 'Matches',
     'ToInt64', 'Exists', 'ReadAllText', 'WriteAllText', 'Move', 'CreateDirectory', 'WriteLine', 'ReadLine', 'IsPathRooted', 'ContainsKey', 'Round', 'ToUniversalTime',
     'GetValueNames', 'GetValueKind', 'GetValue', 'Create', 'AddScript', 'BeginInvoke', 'WaitOne', 'BeginStop', 'EndInvoke', 'Dispose', 'ComputeHash', 'ToBase64String', 'FromBase64String',
-    'GetFullPath', 'ToLowerInvariant', 'GetBytes', 'Write', 'Min', 'Floor', 'ToByte', 'ExpandEnvironmentVariables', 'EndsWith')
+    'GetFullPath', 'ToLowerInvariant', 'GetBytes', 'Write', 'Min', 'Floor', 'ToByte', 'ExpandEnvironmentVariables', 'EndsWith', 'GetAttributes', 'GetTempPath')
   $onlyIn = @{ 'WriteAllText' = @('Save-FixRecord'); 'Move' = @('Save-FixRecord'); 'CreateDirectory' = @('New-FixSecuredDir'); 'Start' = @('Invoke-Native'); 'Kill' = @('Invoke-Native')
     'Remove' = @('Invoke-Native'); 'SetSecurityDescriptorSddlForm' = @('Invoke-FixChange', 'New-FixSecuredDir', 'New-FixSecuredFile'); 'AddScript' = @('Get-FixProcessTable'); 'BeginStop' = @('Get-FixProcessTable')
     'Write' = @('New-FixSecuredFile') }
@@ -910,10 +910,19 @@ Reset-Tune; Set-TuneQuiet; $rc = Invoke-Tune 'apply' @('y', 'y') 'tune' '' 'C:/l
 Assert-True (@($Calls | Where-Object { $_ -match 'MpPreference' }).Count -eq 0) '-Tune alone never offers exclusions'
 
 Write-Host 'tune: build folders (work_root, NuGet) are checked before an exclusion'
-foreach ($bad in @('C:/.', 'C:/lq/.', 'C:/lq/..', 'C:/', 'C:', 'C:/Windows', 'C:/Users', 'C:/ProgramData', 'C:/Program Files', 'C:/lq./x', 'C:/lq /x', $env:USERPROFILE, $env:SystemRoot, (Split-Path -Parent $env:USERPROFILE))) {
-  Assert-True ((Get-BuildDirProblem $bad) -ne '') "build folder refused: '$bad' ($(Get-BuildDirProblem $bad))"
-}
-foreach ($good in @('C:/lq', 'D:/build/lq-1', 'C:\nuget\packages', "$env:USERPROFILE\.nuget\packages")) { Assert-Equal (Get-BuildDirProblem $good) '' "build folder accepted: '$good'" }
+$upf = [Environment]::GetFolderPath('UserProfile')
+$badDirs = @('C:/.', 'C:/lq/.', 'C:/lq/..', 'C:/', 'C:', 'C:/Windows', 'C:/Users', 'C:/ProgramData', 'C:/Program Files', 'C:/lq./x', 'C:/lq /x',
+  "$env:SystemRoot\System32", "$env:SystemRoot\Temp", "$([Environment]::GetFolderPath('ProgramFiles'))\x", "$env:ProgramData\Microsoft", "$env:PUBLIC\x",
+  "$env:SystemDrive\`$Recycle.Bin", "$env:SystemDrive\System Volume Information", "$env:SystemDrive\Recovery\x", "$env:TEMP\x", "$env:TMP",
+  $upf, (Split-Path -Parent $upf), "$upf\AppData", "$upf\AppData\Local\Temp", "$upf\Downloads", "$upf\Desktop\x", "$upf\Documents", "$upf\OneDrive", "$upf\OneDrive - Org\lq")
+if (Test-Path -LiteralPath "$env:SystemDrive\Documents and Settings") { $badDirs += "$env:SystemDrive\Documents and Settings\x" }   # a junction Windows creates
+foreach ($bad in $badDirs) { Assert-True ((Get-BuildDirProblem $bad) -ne '') "build folder refused: '$bad' ($(Get-BuildDirProblem $bad))" }
+foreach ($good in @('C:/lq', 'D:/build/lq-1', 'C:\nuget\packages', "$upf\.nuget\packages", "$upf\lq")) { Assert-Equal (Get-BuildDirProblem $good) '' "build folder accepted: '$good'" }
+$jt = Join-Path ([IO.Path]::GetTempPath()) ('lanq-junc-' + [Guid]::NewGuid().ToString('N')); [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path "$jt\real\sub")
+[void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path "$jt\j" -Target "$jt\real")
+Assert-True ((Get-ReparseProblem "$jt\j") -match 'junction or link' -and (Get-ReparseProblem "$jt\j\sub") -match 'junction or link' -and (Get-ReparseProblem "$jt\j\not-yet") -match 'junction or link') 'a junction anywhere on the path is refused (also for a folder not created yet)'
+Assert-Equal (Get-ReparseProblem "$jt\real\sub") '' 'a plain folder passes the junction check'
+[System.IO.Directory]::Delete("$jt\j"); Remove-Item -LiteralPath $jt -Recurse -Force
 foreach ($wr in @('C:/.', 'C:/lq/.', 'C:/Windows', 'C:/Users', 'C:/ProgramData')) { Assert-True ((Get-TuneArgError @{ Hours = $null; WorkRoot = $wr } $true $true 'dry') -match 'refused|-WorkRoot must') "-WorkRoot $wr refused (exit 2)" }
 Reset-Tune; Set-TuneQuiet; $env:NUGET_PACKAGES = 'C:\ProgramData'; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' 'C:/lq'
 Assert-True (($Calls -join '|') -eq 'Add-MpPreference C:\lq' -and (OutText) -match 'C:\\ProgramData is refused') 'NUGET_PACKAGES pointing at a protected folder: not offered, says why; work_root still offered'
@@ -929,6 +938,11 @@ Assert-True ((OutText) -match 'defender\.scantime .*not offered: the job window 
 Reset-Tune; Set-TuneQuiet; ${function:Get-ScheduledTask} = { param($TaskPath, $TaskName, $ErrorAction) throw 'The RPC server is unavailable' }; $rc = Invoke-Tune 'dry'
 Assert-True ((OutText) -match 'vendor\.tasks .*not offered: the scheduled tasks could not be read; skipped' -and (OutText) -notmatch 'access denied') 'vendor.tasks: another error is not called "access denied"'
 ${function:Get-ScheduledTask} = { param($TaskPath, $TaskName, $ErrorAction) if ($script:TaskDenied) { throw 'Access is denied' }; $r = @($Tasks | Where-Object { (-not $TaskPath -or $_.TaskPath -eq $TaskPath) -and (-not $TaskName -or $_.TaskName -eq $TaskName) }); if ($TaskName -and $r.Count -eq 0) { throw 'No MSFT_ScheduledTask objects found' }; return $r }
+
+$esc = [string][char]27
+$ss = Get-StateSummary 'startup.vendor' @{ Hive = 'HKCU'; Key = 'Run'; Name = "SupportAssist${esc}[2J"; Exe = (('x' * 500) + "${esc}]0;t.exe"); Flag = '-' }
+$sv = Get-StateSummary 'vendor.services' @{ Name = 'DellUpdate'; Display = ("Dell Update${esc}[31m" + ('y' * 900)); Start = 2; Delayed = 0 }
+Assert-True ($ss -notmatch '[\x00-\x1F\x7F]' -and $sv -notmatch '[\x00-\x1F\x7F]' -and $ss.Length -lt 250 -and $sv.Length -lt 200) 'the consent prompt shows Run entry, program and service display names without control characters, capped'
 
 Write-Host 'tune arguments'
 Assert-Equal (Get-UndoArg @('-Hours', '22:00-07:00', '-WorkRoot', 'C:/lq')).WorkRoot 'C:/lq' 'Get-UndoArg: -WorkRoot value'

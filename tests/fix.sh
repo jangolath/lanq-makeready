@@ -126,7 +126,7 @@ fix_guard() { # FILE -> one line per violation
   printf '%s\n' "$_outside" | grep -vE '^[[:space:]]*#' | grep -nE '(^|[^A-Za-z_])sysctl[[:space:]]+-' | sed 's/^/sysctl outside FIXES: /'
   # per command, not per line: each command naming systemctl, loginctl, gsettings or timeout must be one of these reads
   printf '%s\n' "$_outside" | grep -vE '^[[:space:]]*#' | awk '{ sub(/[ \t]#.*$/, ""); n = split($0, a, /;|&&|[|][|]|[|]/); for (i = 1; i <= n; i++) if (a[i] ~ /systemctl|loginctl|gsettings|timeout/) print a[i] }' |
-    grep -vE '^[^"]*("[$][(])?(systemctl is-(enabled|active) "[$]1" 2>/dev/null|command -v (systemctl|loginctl|timeout|gsettings) >/dev/null 2>&1|timeout 10 du -sk -- "[$]1" 2>/dev/null |timeout 5 loginctl show-session "[$]1" -p Remote -p Service 2>/dev/null|loginctl show-session "[$]1" -p Remote -p Service 2>/dev/null|(timeout 5 )?loginctl list-sessions --no-legend 2>/dev/null |(timeout 5 )?loginctl show-session "[$]1" -p Type 2>/dev/null|systemd-detect-virt -c -q 2>/dev/null|_gt=[$][(]gsettings get org[.]gnome[.]settings-daemon[.]plugins[.]power sleep-inactive-ac-type 2>/dev/null)' |
+    grep -vE '^[^"]*("[$][(])?(systemctl is-(enabled|active) "[$]1" 2>/dev/null|command -v (systemctl|loginctl|timeout|gsettings) >/dev/null 2>&1|timeout 10 du -sk -- "[$]1" 2>/dev/null |timeout 5 loginctl show-session "[$]1" -p Remote -p Service 2>/dev/null|loginctl show-session "[$]1" -p Remote -p Service 2>/dev/null|(timeout 5 )?loginctl list-sessions --no-legend 2>/dev/null |(timeout 5 )?loginctl show-session "[$]1" -p Type 2>/dev/null|systemd-detect-virt -c 2>/dev/null </dev/null|_gt=[$][(]gsettings get org[.]gnome[.]settings-daemon[.]plugins[.]power sleep-inactive-ac-type 2>/dev/null)' |
     sed 's/^/a command outside FIXES that is not an allowed read: /'
   # awk programs never write or pipe; sed scripts never write (w) or run (e) anything
   printf '%s\n' "$_outside$nl$_inside" | grep -vE '^[[:space:]]*#' | grep 'awk' | awk -F"'" '{ for (i = 2; i <= NF; i += 2) { p = $i; gsub(/"[^"]*"/, "", p); if (length($i) > 1 && p ~ /[>|]|system|getline/) { print "awk program writes, pipes or runs: " $0; next } } }'
@@ -614,6 +614,8 @@ lacks "$OUT" "journald.cap  (" "M1: both caps set by hand: never offered"
 reset_fake; echo 2000000 > "$FAKE/jkb"; runfix 'y\n' --tune; rec=$(latest_record); : > "$(journald_dir)/50-other.conf"; runfix 'y\n' --undo "$rec"
 contains "$OUT" "undone and verified" "L2: a folder something else put a file in stays, and undo still verifies"
 eq "$([ -e "$(journald_dir)/50-other.conf" ] && echo kept)" kept "L2: the other file is kept"
+reset_fake; echo 2000000 > "$FAKE/jkb"; runfix 'y\n' --tune; rec=$(latest_record); printf '[Journal]\nRuntimeMaxUse=64M\n' > "$(journald_dir)/20-admin.conf"; runfix 'y\n' --undo "$rec"
+if [ ! -e "$(journald_dropin)" ] && grep -q '"status": "undone"' "$rec" && [ -e "$(journald_dir)/20-admin.conf" ]; then ok "LOW2: a cap the admin adds after the fix does not block undo (only file= and dir= are compared)"; else bad "LOW2 journald undo after an admin cap" "$(grep journald "$rec")" undone; fi
 
 echo "M2: desktop sessions, Bluetooth input devices, ModemManager"
 reset_fake; for u in cups.service bluetooth.service; do setu $u.en enabled; setu $u.act active; done; echo 3 > "$FAKE/sessions"; echo Type=wayland > "$FAKE/type.3"; runfix '' --tune --dry-run
@@ -635,9 +637,11 @@ for c in .dockerenv run/.containerenv; do
   reset_fake; echo 128 > "$R/proc/sys/fs/inotify/max_user_instances"; mkdir -p "$R/run"; : > "$R/$c"; runfix 'y\n' --tune
   if [ "$RC" = 3 ] && [ -z "$(calls)" ]; then ok "L3: /$c: --tune refused, exit 3"; else bad "L3 /$c" "$RC $(calls)" "3, none"; fi
 done
-reset_fake; echo 128 > "$R/proc/sys/fs/inotify/max_user_instances"; mkdir -p "$R/run/systemd"; echo lxc > "$R/run/systemd/container"; runfix 'y\n' --tune --dry-run
+reset_fake; echo 128 > "$R/proc/sys/fs/inotify/max_user_instances"; mkdir -p "$R/run/systemd"; echo lxc > "$R/run/systemd/container"; runfix 'y\n' --tune
 eq "$RC" 3 "L3: /run/systemd/container (LXC, nspawn): refused"; contains "$OUT" "this is a container" "L3: says why"
-reset_fake; echo 128 > "$R/proc/sys/fs/inotify/max_user_instances"; : > "$FAKE/virt"; runfix 'y\n' --tune --dry-run; eq "$RC" 3 "L3: systemd-detect-virt -c: refused"
+reset_fake; echo 128 > "$R/proc/sys/fs/inotify/max_user_instances"; : > "$FAKE/virt"; runfix 'y\n' --tune; eq "$RC" 3 "L3: systemd-detect-virt -c: refused"
+reset_fake; echo 128 > "$R/proc/sys/fs/inotify/max_user_instances"; : > "$R/.dockerenv"; runfix '' --tune --dry-run
+if [ "$RC" = 0 ] && [ -z "$(calls)" ] && printf '%s' "$OUT" | grep -q "sysctl.tune"; then ok "L4: --tune --dry-run inside a container is allowed (it changes nothing)"; else bad "L4 dry run in a container" "$RC $(calls)" "0, shown, none run"; fi
 reset_fake; : > "$R/.dockerenv"; unmask_all; runfix '' --dry-run; eq "$RC" 0 "L3: without --tune a container is not refused (the v1 fixes keep their rules)"
 
 echo "L6: cups undo tolerates a path or socket unit starting cups.service"

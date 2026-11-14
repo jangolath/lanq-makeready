@@ -418,7 +418,8 @@ antivirus, a drive root or a Windows, program, shared-data or user folder (or a 
 NuGet cache is offered only when the elevated account is the one logged on at the console. What each one changes and how it is undone is in [docs/TUNE.md](docs/TUNE.md). A record holds at most 64
 changes; run the script again for the rest.
 
-On Linux, `sudo sh lanq-makeready-fix.sh --tune --dry-run` shows the tune fixes (`sysctl.tune`, `journald.cap`,
+On Linux, `sudo sh lanq-makeready-fix.sh --tune --dry-run` shows the tune fixes (it also works inside a container,
+where applying is refused) (`sysctl.tune`, `journald.cap`,
 `services.unused`, `fstrim.timer`); run it without `--dry-run` at the PC. `journald.cap` deletes old journal files,
 which undo cannot bring back; the prompt says so.
 
@@ -501,7 +502,7 @@ The record format is in [docs/FIX-RECORD.md](docs/FIX-RECORD.md).
 | `0` | done, nothing to do, a dry run, a list (also without admin or root), help, or every fix skipped (not elevated, macOS, no systemd) |
 | `1` | a change or an undo failed or did not verify, the record could not be written or updated, the record folder is not safe, or `-Undo` / `--undo` without admin or root |
 | `2` | bad arguments, more than one of `-WhatIf`/`-Undo`/`-List`, or a record rejected by undo |
-| `3` | refused: over SSH, from stdin or a string, no interactive console, (Windows) a function or alias in the way, or (Linux) `--tune` inside a container (Docker, Podman, LXC, systemd-nspawn) |
+| `3` | refused: over SSH, from stdin or a string, no interactive console, (Windows) a function or alias in the way, or (Linux) `--tune` without `--dry-run` inside a container (Docker, Podman, LXC, systemd-nspawn; WSL 2 counts as a host) |
 
 ### Limits
 

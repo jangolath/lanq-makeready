@@ -165,14 +165,25 @@ $ni = New-TuneItem 'x.y' 't' 'INFO' ('d' * 3000) ('a' * 3000)
 Assert-True ($ni.detail.Length -eq 1024 -and $ni.advice.Length -eq 1024) 'detail and advice are capped at 1024 characters'
 $tf = New-TFacts @{ Tasks = @(@{ Path = '\Dell\'; Name = 'SupportAssistAgent S-1-5-21-1111-2222-3333-1001'; State = 'Ready' }) }
 $tr = ConvertTo-AsciiJson (New-TuneReport $tf (Get-TuneItems $tf) $true); $tp = ConvertTo-AsciiJson (New-TuneReport $tf (Get-TuneItems $tf) $false)
-Assert-True ($tr -notmatch '1111-2222-3333' -and $tr -match 'S-1-5-21-.u003credacted' -and $tp -match '1111-2222-3333') 'with -Redact an account SID in a task name is redacted'
+Assert-True ($tr -notmatch '1111-2222-3333' -and $tr -match 'S-1-5-21-(\\u003c|<)redacted' -and $tp -match '1111-2222-3333') 'with -Redact an account SID in a task name is redacted'
 Test-Case 'defender.schedule' @{ Defender = $dfOn; Hours = '00:00-23:30' } 'INFO' 'a window of 23 hours or more: no fix offered' ''
 Test-Case 'vendor.tasks' @{ Tasks = 'nomodule' } 'SKIP' 'no ScheduledTasks module (not "access denied")' '' 'module is not available'
 Test-Case 'vendor.tasks' @{ Tasks = 'error' } 'SKIP' 'another error' '' 'could not be read$'
-foreach ($bad in @('C:/.', 'C:/lq/.', 'C:/', 'C:/Windows', 'C:/Users', 'C:/ProgramData', 'C:/lq./x', $env:USERPROFILE, (Split-Path -Parent $env:USERPROFILE))) { Assert-True ((Get-BuildDirProblem $bad) -ne '') "work_root refused: '$bad'" }
-Assert-Equal (Get-BuildDirProblem 'C:/lq') '' 'work_root accepted: C:/lq'
+$upf = [Environment]::GetFolderPath('UserProfile')
+$badDirs = @('C:/.', 'C:/lq/.', 'C:/lq/..', 'C:/', 'C:', 'C:/Windows', 'C:/Users', 'C:/ProgramData', 'C:/Program Files', 'C:/lq./x', 'C:/lq /x',
+  "$env:SystemRoot\System32", "$env:SystemRoot\Temp", "$([Environment]::GetFolderPath('ProgramFiles'))\x", "$env:ProgramData\Microsoft", "$env:PUBLIC\x",
+  "$env:SystemDrive\`$Recycle.Bin", "$env:SystemDrive\System Volume Information", "$env:SystemDrive\Recovery\x", "$env:TEMP\x", "$env:TMP",
+  $upf, (Split-Path -Parent $upf), "$upf\AppData", "$upf\AppData\Local\Temp", "$upf\Downloads", "$upf\Desktop\x", "$upf\Documents", "$upf\OneDrive", "$upf\OneDrive - Org\lq")
+if (Test-Path -LiteralPath "$env:SystemDrive\Documents and Settings") { $badDirs += "$env:SystemDrive\Documents and Settings\x" }   # a junction Windows creates
+foreach ($bad in $badDirs) { Assert-True ((Get-BuildDirProblem $bad) -ne '') "build folder refused: '$bad' ($(Get-BuildDirProblem $bad))" }
+foreach ($good in @('C:/lq', 'D:/build/lq-1', 'C:\nuget\packages', "$upf\.nuget\packages", "$upf\lq")) { Assert-Equal (Get-BuildDirProblem $good) '' "build folder accepted: '$good'" }
+$jt = Join-Path ([IO.Path]::GetTempPath()) ('lanq-junc-' + [Guid]::NewGuid().ToString('N')); [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path "$jt\real\sub")
+[void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path "$jt\j" -Target "$jt\real")
+Assert-True ((Get-ReparseProblem "$jt\j") -match 'junction or link' -and (Get-ReparseProblem "$jt\j\sub") -match 'junction or link' -and (Get-ReparseProblem "$jt\j\not-yet") -match 'junction or link') 'a junction anywhere on the path is refused (also for a folder not created yet)'
+Assert-Equal (Get-ReparseProblem "$jt\real\sub") '' 'a plain folder passes the junction check'
+[System.IO.Directory]::Delete("$jt\j"); Remove-Item -LiteralPath $jt -Recurse -Force
 $fx = [System.IO.File]::ReadAllText((Join-Path $root 'lanq-makeready-fix.ps1'))
-foreach ($fn in 'Get-BuildDirProblem', 'Get-ProtectedDirs') { $re = "(?ms)^function $fn\b.*?^}"; Assert-True ([regex]::Match($text0, $re).Value -ceq [regex]::Match($fx, $re).Value -and [regex]::Match($fx, $re).Success) "$fn is the same in the tune and fix scripts" }
+foreach ($fn in 'Get-BuildDirProblem', 'Get-ProtectedDirs', 'Get-ReparseProblem', 'Get-CleanName') { $re = "(?ms)^function $fn\b.*?^}"; Assert-True ([regex]::Match($text0, $re).Value -ceq [regex]::Match($fx, $re).Value -and [regex]::Match($fx, $re).Success) "$fn is the same in the tune and fix scripts" }
 $saved = $TotalSec; $TotalSec = 0; $z = Get-DirSizeMB $env:SystemRoot 30; $TotalSec = $saved
 Assert-True ($z.Capped -and $z.MB -eq 0) 'Get-DirSizeMB stops at the scan deadline'
 
@@ -268,7 +279,7 @@ function Get-TuneGuardViolations($Ast) {
     if ($n -eq 'ForEach-Object' -and -not ($c.CommandElements.Count -gt 1 -and $c.CommandElements[1] -is [System.Management.Automation.Language.ScriptBlockExpressionAst])) { $bad += "ForEach-Object without a script block" }
   }
   $okMembers = @('Add', 'AddArgument', 'AddScript', 'AddYears', 'BeginInvoke', 'BeginStop', 'Close', 'Contains', 'Create', 'Dispose', 'EndInvoke', 'EnumerateDirectories', 'EnumerateFiles', 'Escape', 'Exit',
-    'ExpandEnvironmentVariables', 'EndsWith', 'GetFullPath', 'Floor', 'Flush', 'GetCurrent', 'GetDrives', 'GetFolderPath', 'GetValue', 'GetValueNames', 'IsInRole', 'IsPathRooted', 'Kill', 'Matches', 'Min', 'Pop', 'Push', 'ReadToEndAsync',
+    'ExpandEnvironmentVariables', 'EndsWith', 'GetFullPath', 'GetAttributes', 'GetTempPath', 'Exists', 'Floor', 'Flush', 'GetCurrent', 'GetDrives', 'GetFolderPath', 'GetValue', 'GetValueNames', 'IsInRole', 'IsPathRooted', 'Kill', 'Matches', 'Min', 'Pop', 'Push', 'ReadToEndAsync',
     'Replace', 'Round', 'Split', 'Start', 'StartNew', 'StartsWith', 'Substring', 'ToInt64', 'ToLowerInvariant', 'ToString', 'ToUpper', 'Trim', 'TrimEnd', 'TryParseExact', 'Wait', 'WaitForExit', 'WaitOne',
     'Write', 'WriteAllText', 'WriteLine', 'Clear')
   $onlyIn = @{ Start = @('Invoke-Exe'); Kill = @('Invoke-Exe'); Create = @('Invoke-Probe'); AddScript = @('Invoke-Probe'); WriteAllText = @(''); Exit = @('') }

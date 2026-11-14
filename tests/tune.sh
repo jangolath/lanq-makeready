@@ -74,7 +74,7 @@ run_t() { # the fakes behind run_t: smartctl, loginctl, systemd-detect-virt
   case "$1" in
     smartctl) _d=${5##*/}; cat "$FAKE/smart.$_d" 2>/dev/null ;;
     loginctl) if [ "$2" = list-sessions ]; then cat "$FAKE/sessions"; else cat "$FAKE/type.$3" 2>/dev/null; fi ;;
-    systemd-detect-virt) [ -e "$FAKE/virt" ] ;;
+    systemd-detect-virt) if [ -s "$FAKE/virt" ]; then cat "$FAKE/virt"; elif [ -e "$FAKE/virt" ]; then echo lxc; else echo none; return 1; fi ;;
     *) "$@" ;;
   esac
 }
@@ -163,6 +163,7 @@ reset; printf '12:cpu:/docker/abc\n' > "$R/proc/1/cgroup"; if in_container; then
 reset; if in_container; then bad "a host is not a container" yes no; else ok "host: not a container"; fi
 reset; mkdir -p "$R/run/systemd"; echo lxc > "$R/run/systemd/container"; if in_container; then ok "L3: /run/systemd/container (LXC, nspawn)"; else bad "L3 run/systemd/container" no yes; fi
 reset; : > "$FAKE/sdv"; : > "$FAKE/virt"; if in_container; then ok "L3: systemd-detect-virt -c says container"; else bad "L3 detect-virt" no yes; fi
+reset; : > "$FAKE/sdv"; echo wsl > "$FAKE/virt"; if in_container; then bad "WSL is a host" container host; else ok "LOW3: WSL 2 (systemd-detect-virt -c says wsl) counts as a host"; fi
 reset; : > "$FAKE/sdv"; if in_container; then bad "L3 detect-virt says none" yes no; else ok "L3: systemd-detect-virt -c says none: a host"; fi
 reset; T_END=$(( $(now_s) - 1 )); gather_lin
 eq "$(printf '%s' "$ITEMS" | awk -F"$SEP" '$3 != "SKIP"' | wc -l | tr -d ' ')" 0 "time budget spent: every check SKIP"
@@ -288,7 +289,7 @@ tune_guard() { # FILE -> one line per violation
   # every command run through run_t: one of these reads, exactly
   printf '%s\n' "$_code" | grep -vE '^[[:space:]]*#' | grep -oE 'run_t [0-9]+ [^;|&)]*' | grep -vxF \
     -e 'run_t 10 du -sk "$1" 2>/dev/null ' -e 'run_t 5 systemctl is-enabled "$1" 2>/dev/null ' -e 'run_t 5 systemctl is-active "$1" 2>/dev/null ' \
-    -e 'run_t 5 systemd-detect-virt -c -q 2>/dev/null' -e 'run_t 5 loginctl list-sessions --no-legend 2>/dev/null ' \
+    -e 'run_t 5 systemd-detect-virt -c 2>/dev/null' -e 'run_t 5 loginctl list-sessions --no-legend 2>/dev/null ' \
     -e 'run_t 5 loginctl show-session "$_sid" -p Type 2>/dev/null' -e 'run_t 10 smartctl -H -n standby "/dev/$_d" 2>/dev/null' \
     -e 'run_t 5 df -Pk "$1" 2>/dev/null ' | sed 's/^/a command run through run_t that is not an allowed read: /'
   printf '%s\n' "$_code" | grep -vE '^[[:space:]]*#' | grep -oE 'smartctl -[^;|&)]*' | grep -vxE 'smartctl -H -n standby "/dev/\$_d" 2>/dev/null' | sed 's/^/smartctl other than -H -n standby: /'

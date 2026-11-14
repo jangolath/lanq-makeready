@@ -211,7 +211,7 @@ With `--redact`: hostname, user and any absolute user-profile paths replaced by 
 - **Released together.** Same tag, listed in `SHA256SUMS`, attested. Not embedded in LanQueue: `lanq` never copies or
   runs the fix script.
 - **Local only, confirm each.** It refuses to run over SSH, from stdin or a string, or without an interactive console
-  (exit 3). On Linux, `--tune` also refuses inside a container (Docker, Podman, LXC, systemd-nspawn; exit 3). There is no `--yes`. Each fix is shown as check, current state, exact command and undo, then
+  (exit 3). On Linux, `--tune` also refuses to apply or undo inside a container (Docker, Podman, LXC, systemd-nspawn; WSL 2 counts as a host; exit 3); `--tune --dry-run` is allowed there. There is no `--yes`. Each fix is shown as check, current state, exact command and undo, then
   `Apply? [y/N]`; the default is no. It never elevates itself: without admin or root each fix is skipped with a note.
 - **Short, reversible fix list (v1).** Windows: `ssh.start`, `ssh.auto`, `power.sleep`, `longpaths.on`,
   `git.longpaths`, `ssh.aclkeys`. Linux: `ssh.start`, `power.sleep`. Left out on purpose: installing OpenSSH, firewall
@@ -441,7 +441,7 @@ that already runs as admin or root on the PC.
 - Defender: exclusions only for work_root plus the NuGet package cache, never temp or processes. Each folder passes
   `Get-BuildDirProblem` (no `.`/`..` part, canonical by `GetFullPath`, no drive root, not a Windows, program,
   shared-data or user folder or a parent of one; the tune scan uses the same function, checked equal by a test), and
-  the NuGet cache is offered only when the process user SID equals the console user's (`Win32_ComputerSystem.UserName`),
+  any existing junction or symbolic link on the path is refused, and the NuGet cache is offered only when the process user SID equals the console user's (`Win32_ComputerSystem.UserName`),
   since `%USERPROFILE%` is otherwise another account's. A folder already
   covered is skipped and never recorded; nothing is offered unless AMRunningMode is Normal; undo removes exactly the
   folders the record says this script added. The scan-time fix replaces the plan's "CPU load factor" idea.

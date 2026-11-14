@@ -91,6 +91,13 @@ problems and the `administrators_authorized_keys` ACL (fix `ssh.aclkeys`). The t
 
 Inside a Windows container the host-level checks report SKIP.
 
+**Build folders.** `-WorkRoot`, and every folder the fix script would exclude from Defender, must be a plain folder:
+no `.` or `..` part, no part ending in a dot or space, already in canonical form, not a drive root, and not in, at or
+above the Windows folder, either Program Files folder, ProgramData, the Public profile, TEMP/TMP, `$Recycle.Bin`,
+`System Volume Information` or `Recovery`. In a user profile the profile itself and its AppData, Downloads, Desktop,
+Documents and OneDrive folders are refused; other folders there (such as `.nuget\packages` or `lq`) are fine. When
+the folder or any folder above it exists and is a junction or symbolic link, it is refused too.
+
 ### The curated list
 
 The PC-maker names (services, scheduled tasks, Run entries) are a short list of regular expressions kept in the code,
@@ -134,10 +141,9 @@ mode asynchronously, so protection stays on). Then:
 
 - exclusions cover work_root (`-WorkRoot`) plus the NuGet package cache (`NUGET_PACKAGES`, or
   `%USERPROFILE%\.nuget\packages`), nothing else: never temp, never processes;
-- each folder must be a plain folder on a drive: no `.` or `..` part, already in canonical form (Windows reads it back
-  unchanged), not a drive root, and neither the Windows, Program Files, ProgramData or Users folder, a user profile,
-  nor a folder that holds one of them (so `C:/.`, `C:/Windows` or `C:/Users` are refused). The same rule applies to
-  the tune scan's `-WorkRoot`;
+- each folder must pass the build-folder rule above (so `C:/.`, `C:/Windows`, `C:/Windows/Temp`, `C:/Users`, a
+  profile's AppData or Downloads, or a junction such as `C:/Documents and Settings` are refused); the same rule
+  applies to the tune scan's `-WorkRoot`;
 - the NuGet package cache is offered only when the elevated PowerShell runs as the account logged on at the console:
   otherwise `%USERPROFILE%` belongs to another account (for example an administrator who elevated for you), and the
   script says so and offers work_root only;
@@ -169,7 +175,7 @@ arguments). The whole scan has a 90 s deadline. Each probe checks it before ever
 each cache folder, each disk, each call), so a probe that would run past it reports `SKIP` (time budget), and the
 worst case stays close to 90 s. Inside a container (`/.dockerenv`, `/run/.containerenv`, `/run/systemd/container` for
 LXC and systemd-nspawn, a docker/lxc/kubepods/containerd/libpod cgroup for PID 1, or `systemd-detect-virt -c` when
-present), the host-level checks report `SKIP`; `pkgcache` and `disk.full` still run. `--redact` rewrites the host
+present, run with a 5 s limit; WSL 2, which it reports as `wsl`, counts as a host), the host-level checks report `SKIP`; `pkgcache` and `disk.full` still run. `--redact` rewrites the host
 name, user name and home folder in `detail` (and in `os` and `workRoot`); the fixed `advice` text is never changed.
 `host.os` is cut to 128 characters. On macOS it prints "no tune checks for
 macOS". The pending reboot is reported by the scanner (`reboot.pending`), not here.
@@ -217,8 +223,8 @@ scan's decision functions unchanged, and a test checks that the copies match.
   counts as undone.
 - `fstrim.timer` runs `systemctl enable --now fstrim.timer`.
 
-`--tune` refuses to run inside a container (the same detection as the scan; exit 3): the tune fixes change host
-settings.
+`--tune` refuses to apply or undo anything inside a container (the same detection as the scan; exit 3): the tune
+fixes change host settings. `--tune --dry-run` still works there, since it changes nothing. WSL 2 counts as a host.
 
 Undo takes unit, file and sysctl names only from fixed tables in the script. A service name in a record must be on
 the script's append-only list and have the name shape, or the record is rejected.

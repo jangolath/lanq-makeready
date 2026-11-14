@@ -282,7 +282,11 @@ desktop() {
 }
 bt_input() { for _h in "$R"/sys/bus/hid/devices/0005:*; do [ -e "$_h" ] && return 0; done; return 1; } # a Bluetooth keyboard, mouse or pad
 bt_flag() { if bt_input; then echo yes; else echo no; fi; }
-virt_container() { command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt -c -q 2>/dev/null; }
+virt_container() { # systemd-detect-virt -c, bounded; WSL counts as a host here (as in the tune scan)
+  command -v systemd-detect-virt >/dev/null 2>&1 || return 1
+  if command -v timeout >/dev/null 2>&1; then _v=$(timeout 5 systemd-detect-virt -c 2>/dev/null </dev/null); else _v=$(systemd-detect-virt -c 2>/dev/null </dev/null); fi
+  case "$_v" in ''|none|wsl) return 1 ;; *) return 0 ;; esac
+}
 fx_container() { # docker, podman, LXC, systemd-nspawn (the tune scan's rule)
   [ -e "$R/.dockerenv" ] || [ -e "$R/run/.containerenv" ] || [ -s "$R/run/systemd/container" ] && return 0
   grep -qE '(docker|lxc|kubepods|containerd|libpod)' "$R/proc/1/cgroup" 2>/dev/null && return 0
@@ -427,6 +431,14 @@ check_of() {
 # Undo succeeded when the state is back to before. services.unused: each unit has its enabled state back, and every unit
 # that was active is active again (starting cups.path or cups.socket may start cups.service too). journald.cap: the
 # folder this fix created may stay when something else put files in it.
+# Two states of one fix are the same. journald.cap: only file= and dir=; sys/run (caps of your own) are read again at
+# undo time, and a cap you add later must not make the record impossible to undo.
+same_state() { # $1 key, $2 state, $3 state
+  case "$1" in
+    journald.cap) [ -n "$2" ] && [ "$(field "$2" file)" = "$(field "$3" file)" ] && [ "$(field "$2" dir)" = "$(field "$3" dir)" ] ;;
+    *) [ "$2" = "$3" ] ;;
+  esac
+}
 undo_ok() { # $1 key, $2 state now, $3 before
   case "$1" in
     services.unused:*)
@@ -437,9 +449,9 @@ undo_ok() { # $1 key, $2 state now, $3 before
         [ "${_b#*:}" = inactive ] || [ "${_n#*:}" = active ] || return 1
       done ;;
     journald.cap)
-      [ "$2" = "$3" ] && return 0
-      [ "$(field "$3" dir)" = absent ] && [ "$(field "$2" dir)" = present ] || return 1
-      [ "$(printf '%s' "$2" | sed 's/ dir=present / dir=absent /')" = "$3" ] && [ -n "$(ls -A -- "$(journald_dir)" 2>/dev/null)" ] ;;
+      same_state journald.cap "$2" "$3" && return 0
+      [ "$(field "$2" file)" = "$(field "$3" file)" ] && [ "$(field "$3" dir)" = absent ] && [ "$(field "$2" dir)" = present ] || return 1
+      [ -n "$(ls -A -- "$(journald_dir)" 2>/dev/null)" ] ;;
     *) [ "$2" = "$3" ] ;;
   esac
 }
@@ -752,16 +764,16 @@ do_undo() { # $1 record file
     out "  before the fix: $_b"
     out "  after the fix:  $_a"
     out "  now:            $_cur"
-    if [ "$_st" = pending ] && [ -n "$_cur" ] && [ "$_cur" = "$_b" ]; then
+    if [ "$_st" = pending ] && [ -n "$_cur" ] && same_state "$_key" "$_cur" "$_b"; then
       set_item "$_s" skipped "$(now_utc)" "$_a"
       if save_record; then out "  never applied (the record was written, the change was not made); marked skipped"; else _failed=$((_failed + 1)); fi
       continue
     fi
     fix_command "$_key" undo "$_b" | while IFS= read -r _c; do out "  command: $_c"; done
-    if [ -z "$_cur" ] || [ "$_cur" != "$_a" ]; then out "  changed since; left alone"; continue; fi
+    if [ -z "$_cur" ] || ! same_state "$_key" "$_cur" "$_a"; then out "  changed since; left alone"; continue; fi
     if ! confirm; then out ""; out "  left as it is"; continue; fi
     out ""
-    if [ "$(state_of "$_key")" != "$_a" ]; then out "  changed since; left alone"; continue; fi
+    if ! same_state "$_key" "$(state_of "$_key")" "$_a"; then out "  changed since; left alone"; continue; fi
     fix_change "$_key" undo "$_b"; _rc=$?
     _now=$(state_of "$_key")
     if [ "$_rc" = 0 ] && undo_ok "$_key" "$_now" "$_b"; then
@@ -825,7 +837,7 @@ main() {
   umask 077
   if [ "$MODE" = list ]; then do_list; return $?; fi
   if ! have_systemd; then out "lanq-makeready-fix: systemd is not running here, so no fix applies (nothing changed)"; return 0; fi
-  if [ "$_tune" = 1 ] && fx_container; then err "lanq-makeready-fix: refused: this is a container (docker, podman, LXC or systemd-nspawn). The tune fixes change host settings; run them on the host. Nothing was changed."; return 3; fi
+  if [ "$_tune" = 1 ] && [ "$MODE" != dry ] && fx_container; then err "lanq-makeready-fix: refused: this is a container (docker, podman, LXC or systemd-nspawn). The tune fixes change host settings; run them on the host. Nothing was changed."; return 3; fi
   case "$MODE" in
     undo) do_undo "$UNDO_FILE" ;;
     dry) do_apply 1 ;;

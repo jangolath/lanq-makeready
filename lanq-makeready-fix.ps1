@@ -84,7 +84,7 @@ $FixFunctionNames = @('Write-FixLine', 'Write-FixErr', 'Get-FixSessionId', 'Get-
   'Test-Props', 'Test-Str', 'ConvertTo-TimeText', 'New-RecordError', 'Read-FixRecord', 'Show-Fix', 'Invoke-FixApply', 'Invoke-FixUndo', 'Show-FixRecords', 'Invoke-FixMain',
   'Get-UndoArg', 'Test-Vendor', 'Test-VendorUndo', 'Test-InWindow', 'Get-HoursMin', 'Format-Min', 'Get-RegVal', 'Get-RegNames', 'Test-RegKey', 'Get-UserSid', 'Get-ActiveScheme',
   'Get-PowerAc', 'Test-UsbNic', 'Test-FixAllSsd', 'Get-SvcState', 'Get-TaskState', 'Get-StartupState', 'Get-DefenderInfo', 'ConvertTo-Minutes', 'Get-ExcludeState',
-  'Get-DotnetState', 'Get-DoState', 'Get-FixTargets', 'Get-StateTarget', 'Get-UndoRefusal', 'Get-TargetLabel', 'Get-ScanTarget', 'Get-SvcNorm', 'Get-FixApplyNote', 'Get-TuneArgError', 'Get-NugetDir', 'Get-ConsoleUserSid', 'Get-ProtectedDirs', 'Get-BuildDirProblem')
+  'Get-DotnetState', 'Get-DoState', 'Get-FixTargets', 'Get-StateTarget', 'Get-UndoRefusal', 'Get-TargetLabel', 'Get-ScanTarget', 'Get-SvcNorm', 'Get-FixApplyNote', 'Get-TuneArgError', 'Get-NugetDir', 'Get-ConsoleUserSid', 'Get-ProtectedDirs', 'Get-BuildDirProblem', 'Get-ReparseProblem', 'Get-CleanName')
 # Every cmdlet this file runs. A function or alias with one of these names would run instead of the cmdlet, so the
 # script refuses to start when any of them does not resolve to the cmdlet itself (Get-FixCommandShadow).
 $FixCmdletNames = @('Get-Service', 'Set-Service', 'Start-Service', 'Stop-Service', 'Get-Item', 'Set-ItemProperty', 'Remove-ItemProperty', 'Get-Acl', 'Set-Acl',
@@ -526,25 +526,48 @@ function Get-ConsoleUserSid {
     return "$((New-Object System.Security.Principal.NTAccount($n)).Translate([System.Security.Principal.SecurityIdentifier]).Value)"
   } catch { return '' }
 }
-# Folders a build folder must never be, or hold: the Windows, program, shared-data and user folders.
-function Get-ProtectedDirs {
-  $u = [Environment]::GetFolderPath('UserProfile'); $users = "$u" -replace '\\[^\\]+$', ''
-  return @($env:SystemRoot, [Environment]::GetFolderPath('Windows'), [Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86'), $env:ProgramW6432,
-    [Environment]::GetFolderPath('CommonApplicationData'), $env:ProgramData, $env:PUBLIC, $u, $users, $env:USERPROFILE) | Where-Object { $_ }
+# Folders a build folder must never be in, be, or hold: Windows, the program folders, ProgramData, the Public
+# profile, TEMP/TMP, and the recycle bin, volume information and recovery folders of the drive.
+function Get-ProtectedDirs([string]$Drive = '') {
+  $l = @($env:SystemRoot, [Environment]::GetFolderPath('Windows'), [Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86'), $env:ProgramW6432,
+    [Environment]::GetFolderPath('CommonApplicationData'), $env:ProgramData, $env:PUBLIC, $env:TEMP, $env:TMP, [System.IO.Path]::GetTempPath())
+  foreach ($d in @($env:SystemDrive, $Drive) | Where-Object { $_ }) { $l += @("$d\`$Recycle.Bin", "$d\System Volume Information", "$d\Recovery") }
+  return @($l | Where-Object { $_ } | ForEach-Object { "$_".Replace('/', '\').TrimEnd('\') })
 }
-# '' when $Path may be work_root or a Defender exclusion: a folder on a drive with no '.' or '..' segment, already in
-# canonical form (GetFullPath gives it back unchanged), not a drive root, and neither a protected folder nor a parent of one.
+# '' when no existing part of $Path, from the drive down, is a junction or symbolic link (it could point anywhere).
+function Get-ReparseProblem([string]$Path) {
+  $parts = @($Path.Split('\')); $cur = $parts[0]
+  for ($i = 1; $i -lt $parts.Count; $i++) {
+    $cur = $cur + '\' + $parts[$i]
+    if (-not [System.IO.Directory]::Exists($cur) -and -not [System.IO.File]::Exists($cur)) { break }
+    try { if ([System.IO.File]::GetAttributes($cur) -band [System.IO.FileAttributes]::ReparsePoint) { return "$cur is a junction or link" } } catch { return "$cur cannot be read" }
+  }
+  return ''
+}
+# '' when $Path may be work_root or a Defender exclusion: a folder on a drive with no '.' or '..' part, already in
+# canonical form (GetFullPath gives it back unchanged), not a drive root, not in, at or above a protected folder, not a
+# user profile itself or its AppData, Downloads, Desktop, Documents or OneDrive folders (other folders in a profile,
+# such as .nuget\packages, are fine), and with no junction or link on the way.
 function Get-BuildDirProblem([string]$Path) {
   $p = "$Path".Replace('/', '\').TrimEnd('\')
   if ($p -notmatch '^[A-Za-z]:(\\[^\\]+)+$') { return 'it is not a folder on a drive (a whole drive is never used)' }
   foreach ($g in @($p.Split('\'))) { if ($g -eq '.' -or $g -eq '..') { return "it has a '.' or '..' part" }; if ($g -ne $g.Trim() -or $g.EndsWith('.')) { return 'a part of it starts or ends with a space or ends with a dot (Windows drops those)' } }
   $full = ''; try { $full = [System.IO.Path]::GetFullPath($p).TrimEnd('\') } catch { return 'it is not a valid path' }
   if ($full -ine $p) { return "it is not in canonical form (Windows reads it as $full)" }
-  foreach ($k in (Get-ProtectedDirs)) {
-    $q = "$k".Replace('/', '\').TrimEnd('\')
-    if ($q -and ($q -ieq $p -or $q.StartsWith($p + '\', [System.StringComparison]::OrdinalIgnoreCase))) { return "it is $q or a folder that holds it (Windows, program, shared-data and user folders are never used)" }
+  $ic = [System.StringComparison]::OrdinalIgnoreCase
+  foreach ($q in (Get-ProtectedDirs $p.Substring(0, 2))) {
+    if ($p -ieq $q -or $p.StartsWith($q + '\', $ic) -or $q.StartsWith($p + '\', $ic)) { return "it is in, at or above $q (Windows, program, shared-data and temporary folders are never used)" }
   }
-  return ''
+  $up = "$([Environment]::GetFolderPath('UserProfile'))".TrimEnd('\'); $users = $up -replace '\\[^\\]+$', ''
+  foreach ($root in @($users, ("$env:USERPROFILE".TrimEnd('\') -replace '\\[^\\]+$', '')) | Where-Object { $_ -match '^[A-Za-z]:\\' } | Sort-Object -Unique) {
+    if ($p -ieq $root -or $root.StartsWith($p + '\', $ic)) { return "it is $root or a folder that holds it (the user profiles)" }
+    if ($p.StartsWith($root + '\', $ic)) {
+      $rel = @($p.Substring($root.Length + 1).Split('\'))
+      if ($rel.Count -eq 1) { return "it is the user profile $p itself" }
+      if ($rel[1] -match '^(?i)(AppData|Downloads|Desktop|Documents|OneDrive.*)$') { return "it is in a profile's $($rel[1]) folder (AppData, Downloads, Desktop, Documents and OneDrive are never used)" }
+    }
+  }
+  return (Get-ReparseProblem $p)
 }
 function Get-DotnetState {
   $s = @{ Readable = (Test-RegKey $EnvKey); Vals = [ordered]@{}; Odd = '' }
@@ -605,7 +628,7 @@ function Get-StateTarget([string]$Id, $B) {
 }
 function Get-TargetLabel([string]$Id, $S) {
   switch ($Id) {
-    'startup.vendor' { return " $($S.Hive) $($S.Key): $($S.Name)" }
+    'startup.vendor' { return " $($S.Hive) $($S.Key): $(Get-CleanName $S.Name)" }
     { @('vendor.services', 'sysmain') -contains $_ } { return " $($S.Name)" }
     'vendor.tasks' { return " $($S.Path)$($S.Name)" }
     'defender.exclude' { return " $($S.Path)" }
@@ -836,12 +859,12 @@ function Get-FixNote([string]$Id, $S) {
     { @('power.cpu', 'power.usbsuspend') -contains $_ } { if (-not $S.Scheme) { return 'the active power scheme could not be read (powercfg /getactivescheme), so undo could not be tied to it' } }
     'startup.vendor' {
       if ($S.RunHas -and $S.Name -cnotmatch "^$NameRe$") { return "the entry name has characters this script does not record; use Task Manager > Startup apps" }
-      if ($S.RunHas -and -not $S.Flag) { return "$($S.Name): its StartupApproved value is not the usual 12-byte flag; use Task Manager > Startup apps" }
+      if ($S.RunHas -and -not $S.Flag) { return "$(Get-CleanName $S.Name): its StartupApproved value is not the usual 12-byte flag; use Task Manager > Startup apps" }
     }
-    'vendor.services' { if (-not $S.Exists -and $S.Name -cnotmatch "^$SvcRe$") { return "$($S.Name): the service name has characters this script does not record; use services.msc" } }
+    'vendor.services' { if (-not $S.Exists -and $S.Name -cnotmatch "^$SvcRe$") { return "$(Get-CleanName $S.Name): the service name has characters this script does not record; use services.msc" } }
     'vendor.tasks' {
-      if ($null -eq $S.Exists) { return "$($S.Path)$($S.Name) could not be read (access denied); skipped" }
-      if (-not $S.Exists) { return "$($S.Path)$($S.Name): the task path or name has characters this script does not record; use taskschd.msc" }
+      if ($null -eq $S.Exists) { return "$(Get-CleanName "$($S.Path)$($S.Name)") could not be read (access denied); skipped" }
+      if (-not $S.Exists) { return "$(Get-CleanName "$($S.Path)$($S.Name)"): the task path or name has characters this script does not record; use taskschd.msc" }
     }
     'do.mode' {
       if ($S.Kind -eq 'DWord' -and $S.Value -ne 0) { return "DODownloadMode is $($S.Value) by a policy (managed by your organization or set by hand); not changed here" }
@@ -939,6 +962,13 @@ function Get-ExpectedAfter([string]$Id, $S) {
   return 'unknown'
 }
 
+# A name from the PC (Run entry, service, task, driver, product) made safe to print: control and bidi characters
+# removed (any user process can write a Run entry), at most 80 characters.
+function Get-CleanName([string]$S) {
+  $c = [regex]::Replace("$S", '[\x00-\x1F\x7F\u202A-\u202E\u2066-\u2069]', '')
+  if ($c.Length -gt 80) { $c = $c.Substring(0, 77) + '...' }
+  return $c
+}
 function Get-StateSummary([string]$Id, $S) {
   switch ($Id) {
     { @('ssh.start', 'ssh.auto') -contains $_ } { return "sshd is $($S.Status), start type $($S.StartType)" }
@@ -952,8 +982,8 @@ function Get-StateSummary([string]$Id, $S) {
     'ssh.aclkeys' { return "$KeysFile has the DACL $($S.Dacl)" }
     'power.cpu' { return "power scheme $($S.Scheme): processor maximum $($S.Max)%, minimum $($S.Min)% on AC" }
     'power.usbsuspend' { $o = 'off'; if ($S.Usb -eq 1) { $o = 'on' }; return "power scheme $($S.Scheme): USB selective suspend $o on AC; a network adapter in use is on USB" }
-    'startup.vendor' { $f = 'no flag (enabled)'; if ($S.Flag -ne '-') { $f = "flag $($S.Flag)" }; return "$($S.Hive) $($S.Key) entry '$($S.Name)' ($($S.Exe)), StartupApproved $f" }
-    { @('vendor.services', 'sysmain') -contains $_ } { $d = ''; if ($S.Start -eq 2 -and $S.Delayed -eq 1) { $d = ' (delayed)' }; return "service $($S.Name) ($($S.Display)): start $($StartWord[[int]$S.Start])$d" }
+    'startup.vendor' { $f = 'no flag (enabled)'; if ($S.Flag -ne '-') { $f = "flag $($S.Flag)" }; return "$($S.Hive) $($S.Key) entry '$(Get-CleanName $S.Name)' ($(Get-CleanName $S.Exe)), StartupApproved $f" }
+    { @('vendor.services', 'sysmain') -contains $_ } { $d = ''; if ($S.Start -eq 2 -and $S.Delayed -eq 1) { $d = ' (delayed)' }; return "service $($S.Name) ($(Get-CleanName $S.Display)): start $($StartWord[[int]$S.Start])$d" }
     'vendor.tasks' { $e = 'disabled'; if ($S.Enabled) { $e = 'enabled' }; return "task $($S.Path)$($S.Name) is $e" }
     'do.mode' { $p = 'not set'; if ($null -ne $S.Value) { $p = "$($S.Value)" }; return "policy DODownloadMode: $p; download mode in effect: $($S.Effective) (1 = LAN peers, 2 = group, 3 = internet peers)" }
     'dotnet.env' { return (@($DotnetVars.Keys | ForEach-Object { "$($DotnetVars[$_][0])=$($S.Vals[$_])" }) -join ', ') + ' (- = not set) for the machine' }

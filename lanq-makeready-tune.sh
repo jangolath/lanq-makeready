@@ -161,7 +161,9 @@ unit_act() { _v=$(run_t 5 systemctl is-active "$1" 2>/dev/null | head -n 1); ech
 in_container() { # docker, podman, LXC, systemd-nspawn
   [ -e "$R/.dockerenv" ] || [ -e "$R/run/.containerenv" ] || [ -s "$R/run/systemd/container" ] && return 0
   grep -qE '(docker|lxc|kubepods|containerd|libpod)' "$R/proc/1/cgroup" 2>/dev/null && return 0
-  have systemd-detect-virt && run_t 5 systemd-detect-virt -c -q 2>/dev/null
+  have systemd-detect-virt || return 1
+  _v=$(run_t 5 systemd-detect-virt -c 2>/dev/null)
+  case "$_v" in ''|none|wsl) return 1 ;; *) return 0 ;; esac   # WSL 2 counts as a host (its own kernel and services)
 }
 is_root() { [ "$(id -u 2>/dev/null)" = 0 ]; }
 gui_session() { # a logind session of type x11 or wayland (a desktop in use, even without a display manager)
