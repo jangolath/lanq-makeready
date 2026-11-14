@@ -46,6 +46,8 @@ eq "$(printf '[commands]\napply_updates = yes\nreboot = when-needed\n' | dnf_val
 eq "$(svc_offer avahi no)" report "avahi is report only"
 eq "$(svc_offer cups yes)" none "cups on a desktop: not reported"
 eq "$(svc_offer cups-browsed yes)" fix "cups-browsed: always"
+eq "$(svc_offer bluetooth no yes)" none "bluetooth with a Bluetooth input device: never offered"
+eq "$(svc_offer bluetooth no no)" fix "bluetooth on a headless box without Bluetooth input: fixable"
 
 echo "checks against a fake root (one case per status)"
 FAKE=${TMPDIR:-/tmp}/lanq-tune.$$
@@ -62,12 +64,20 @@ cpu() { # driver governor [count]
 unit() { echo "$2" > "$FAKE/u/$1.en"; echo "$3" > "$FAKE/u/$1.act"; } # unit NAME enabled active
 unit_en() { cat "$FAKE/u/$1.en" 2>/dev/null || echo none; }
 unit_act() { cat "$FAKE/u/$1.act" 2>/dev/null || echo inactive; }
-have() { case "$1" in systemctl) return 0 ;; smartctl) [ -e "$FAKE/smartctl" ] ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
+have() { case "$1" in systemctl) return 0 ;; smartctl) [ -e "$FAKE/smartctl" ] ;; loginctl) [ -e "$FAKE/sessions" ] ;; systemd-detect-virt) [ -e "$FAKE/sdv" ] ;; *) command -v "$1" >/dev/null 2>&1 ;; esac; }
 is_root() { [ "$ROOTUSER" = 1 ]; }
 dir_kb() { _p=${1#"$R"}; _p=$(printf '%s' "$_p" | tr '/' '_'); cat "$FAKE/kb$_p" 2>/dev/null || { [ -d "$1" ] && echo 4 || echo 0; }; }
 kb() { _p=$(printf '%s' "$1" | tr '/' '_'); mkdir -p "$R$1"; echo "$2" > "$FAKE/kb$_p"; } # kb /var/log/journal 2000000
 df_used() { case "$1" in /) cat "$FAKE/df.root" 2>/dev/null || echo "40 /" ;; *) cat "$FAKE/df.work" 2>/dev/null || echo "40 /" ;; esac; }
-run_t() { shift; case "$1" in smartctl) _d=${5##*/}; cat "$FAKE/smart.$_d" 2>/dev/null ;; *) "$@" ;; esac; }
+run_t() { # the fakes behind run_t: smartctl, loginctl, systemd-detect-virt
+  shift
+  case "$1" in
+    smartctl) _d=${5##*/}; cat "$FAKE/smart.$_d" 2>/dev/null ;;
+    loginctl) if [ "$2" = list-sessions ]; then cat "$FAKE/sessions"; else cat "$FAKE/type.$3" 2>/dev/null; fi ;;
+    systemd-detect-virt) [ -e "$FAKE/virt" ] ;;
+    *) "$@" ;;
+  esac
+}
 disk() { mkdir -p "$R/sys/block/$1/queue"; echo "$2" > "$R/sys/block/$1/queue/rotational"; echo "$3" > "$R/sys/block/$1/queue/discard_max_bytes"; }
 st() { item_field "$1" 3; }
 det() { item_field "$1" 4; }
@@ -96,6 +106,13 @@ reset; kb /var/log/journal 2000000; printf '[Journal]\nSystemMaxUse=3G\n' > "$R/
 eq "$(st journald.size)" OK "journald OK: a cap set by hand"
 if [ "$(id -u)" != 0 ]; then reset; kb /var/log/journal 10; mkdir -p "$R/var/log/journal/abc"; chmod 000 "$R/var/log/journal/abc"; run1 check_journald; eq "$(st journald.size)" SKIP "journald SKIP: not readable (needs admin)"; eq "$(item_field journald.size 6)" true "journald: needsAdmin"; chmod 700 "$R/var/log/journal/abc"; fi
 reset; run1 check_services; eq "$(st services.unused)" OK "services OK: none"
+reset; unit cups.service enabled active; echo 7 > "$FAKE/sessions"; echo Type=wayland > "$FAKE/type.7"; run1 check_services; eq "$(st services.unused)" OK "M2: a wayland session (no display manager) is a desktop: cups not reported"
+reset; unit cups.service enabled active; echo 7 > "$FAKE/sessions"; echo Type=tty > "$FAKE/type.7"; run1 check_services; eq "$(st services.unused)" INFO "M2: a tty session is not a desktop"
+reset; unit bluetooth.service enabled active; mkdir -p "$R/sys/bus/hid/devices/0005:046D:B342.0001"; run1 check_services; eq "$(st services.unused)" OK "M2: a Bluetooth input device: bluetooth not reported"; contains "$(det services.unused)" "Bluetooth input device is connected" "M2: says why"
+reset; unit bluetooth.service enabled active; unit cups.service enabled active; mkdir -p "$R/sys/bus/hid/devices/0005:046D:B342.0001"; run1 check_services; eq "$(fid services.unused)" services.unused "M2: cups still fixable"; lacks "$(det services.unused)" "bluetooth.service" "M2: bluetooth left out of the list"
+reset; unit cups.service enabled active; unit cups.socket enabled active; unit cups-browsed.service enabled active; n=0; due() { n=$((n + 1)); [ "$n" -le 3 ]; }; run1 check_services; unset -f due
+eq "$(st services.unused)" SKIP "L4: the deadline is checked per unit in services"
+due() { [ $(( $(now_s) + ${1:-1} )) -le "$T_END" ]; }
 reset; unit cups-browsed.service enabled active; run1 check_services; eq "$(st services.unused)" WARN "services WARN: cups-browsed"; eq "$(item_field services.unused 8)" true "services: cups-browsed is a security item"; eq "$(fid services.unused)" services.unused "services: fix id"
 reset; unit cups.service enabled active; unit cups.socket enabled active; run1 check_services; eq "$(st services.unused)" INFO "services INFO: cups"; contains "$(det services.unused)" "cups.socket enabled/active" "services: units listed"
 reset; unit avahi-daemon.service enabled active; run1 check_services; eq "$(st services.unused)" INFO "services INFO: avahi"; eq "$(fid services.unused)" "" "services: avahi alone is report only (no fix id)"; contains "$(item_field services.unused 5)" "host.local" "services: avahi advice explains"
@@ -108,7 +125,12 @@ reset; apt_on 'Unattended-Upgrade::Automatic-Reboot-Time "22:00";'; HOURS=00:00-
 reset; apt_on ''; run1 check_unattended; eq "$(st unattended.reboot)" INFO "unattended INFO: no --hours"; contains "$(det unattended.reboot)" "06:00" "unattended: 'now' means after the 06:00 run"
 reset; mkdir -p "$R/etc/dnf"; printf '[commands]\napply_updates = yes\nreboot = when-needed\n' > "$R/etc/dnf/automatic.conf"; unit dnf-automatic.timer enabled active; HOURS=05:00-08:00; run1 check_unattended
 eq "$(st unattended.reboot)" WARN "unattended WARN: dnf-automatic reboots inside the hours"
+n=0; due() { n=$((n + 1)); [ "$n" -le 2 ]; }; run1 check_unattended; eq "$(st unattended.reboot)" SKIP "L4: the deadline is checked per call in unattended"
+due() { [ $(( $(now_s) + ${1:-1} )) -le "$T_END" ]; }
 reset; run1 check_pkgcache; eq "$(st pkgcache)" OK "pkgcache OK: none"
+reset; kb /var/cache/apt/archives 10; kb /var/cache/dnf 10; n=0; due() { n=$((n + 1)); [ "$n" -le 1 ]; }; run1 check_pkgcache
+eq "$(st pkgcache)" SKIP "L4: the deadline is checked per folder in pkgcache"
+due() { [ $(( $(now_s) + ${1:-1} )) -le "$T_END" ]; }
 reset; kb /var/cache/apt/archives 3000000; run1 check_pkgcache; eq "$(st pkgcache)" INFO "pkgcache INFO: 3 GB"; contains "$(item_field pkgcache 5)" "apt clean" "pkgcache: advice"; eq "$(fid pkgcache)" "" "pkgcache: report only"
 reset; run1 check_fstrim; eq "$(st fstrim)" OK "fstrim OK: no SSD"
 reset; disk sda 0 2147450880; unit fstrim.timer disabled inactive; run1 check_fstrim; eq "$(st fstrim)" INFO "fstrim INFO: timer disabled"; eq "$(fid fstrim)" fstrim.timer "fstrim: fix id"
@@ -128,7 +150,7 @@ reset; thr 0 0; run1 check_thermal; eq "$(st thermal.throttle)" OK "thermal OK"
 reset; thr 12 3; run1 check_thermal; eq "$(st thermal.throttle)" INFO "thermal INFO: throttled"
 reset; run1 check_disk; eq "$(st disk.full)" OK "disk OK"
 reset; echo "95 /" > "$FAKE/df.root"; run1 check_disk; eq "$(st disk.full)" WARN "disk WARN: 95% used"
-reset; WORK_ROOT=/srv/lq; echo "93 /srv" > "$FAKE/df.work"; run1 check_disk; eq "$(st disk.full)" WARN "disk WARN: the work root's filesystem"; contains "$(det disk.full)" "/srv 93%" "disk: names it"
+reset; mkdir -p "$FAKE/srv"; WORK_ROOT=$FAKE/srv/lq; echo "93 /srv" > "$FAKE/df.work"; run1 check_disk; eq "$(st disk.full)" WARN "disk WARN: the work root's filesystem"; contains "$(det disk.full)" "/srv 93%" "disk: names it"
 reset; : > "$FAKE/df.root"; run1 check_disk; eq "$(st disk.full)" SKIP "disk SKIP: df gave nothing"
 
 echo "containers, the time budget, macOS"
@@ -139,12 +161,16 @@ eq "$(st pkgcache)" OK "container: pkgcache still runs"; eq "$(st disk.full)" OK
 contains "$(det cpu.governor)" "inside a container" "container: says why"
 reset; printf '12:cpu:/docker/abc\n' > "$R/proc/1/cgroup"; if in_container; then ok "container: cgroup with docker"; else bad "cgroup docker" no yes; fi
 reset; if in_container; then bad "a host is not a container" yes no; else ok "host: not a container"; fi
+reset; mkdir -p "$R/run/systemd"; echo lxc > "$R/run/systemd/container"; if in_container; then ok "L3: /run/systemd/container (LXC, nspawn)"; else bad "L3 run/systemd/container" no yes; fi
+reset; : > "$FAKE/sdv"; : > "$FAKE/virt"; if in_container; then ok "L3: systemd-detect-virt -c says container"; else bad "L3 detect-virt" no yes; fi
+reset; : > "$FAKE/sdv"; if in_container; then bad "L3 detect-virt says none" yes no; else ok "L3: systemd-detect-virt -c says none: a host"; fi
 reset; T_END=$(( $(now_s) - 1 )); gather_lin
 eq "$(printf '%s' "$ITEMS" | awk -F"$SEP" '$3 != "SKIP"' | wc -l | tr -d ' ')" 0 "time budget spent: every check SKIP"
 contains "$(det smart)" "time budget" "time budget: says so"
-out=$( reset; uname() { case "$1" in -s) echo Darwin ;; *) echo arm64 ;; esac; }; sw_vers() { echo 15.1; }; main; echo "rc=$?" )
+mac_uname() { if [ "$1" = -s ]; then echo Darwin; else echo arm64; fi; }
+out=$( reset; uname() { mac_uname "$@"; }; sw_vers() { echo 15.1; }; main; echo "rc=$?" )
 contains "$out" "no tune checks for macOS" "macOS: says so"; contains "$out" "rc=0" "macOS: exit 0"
-out=$( reset; uname() { case "$1" in -s) echo Darwin ;; *) echo arm64 ;; esac; }; sw_vers() { echo 15.1; }; main --json - )
+out=$( reset; uname() { mac_uname "$@"; }; sw_vers() { echo 15.1; }; main --json - )
 contains "$out" '"items": [],' "macOS: JSON with empty items"
 
 echo "a whole run against the fake root: output, JSON shape, exit code, redaction"
@@ -176,6 +202,13 @@ red=$(whole --json - --redact --work-root /home/builder7/lq); red=${red%rc=*}
 lacks "$red" "builder7" "redact: no user name"; lacks "$red" "testbox7" "redact: no host name"
 contains "$red" '"host": {"hostname": "<redacted>", "user": "<redacted>", "os": "Testix on <redacted>", "arch": "x86_64"},' "redact: hostname and user are <redacted> (as in the ps1), free text redacted"
 contains "$red" '"workRoot": "<redacted>/lq"' "redact: the work root hides the home folder"
+l1d=$(REDACT=1; R_USER=PC; R_HOST=x; R_HOME=/nonexistent; ITEMS=""; add_item t T INFO "detail on PC" inotify.low false "" false; item_field t 4)
+l1a=$(REDACT=1; R_USER=PC; R_HOST=x; R_HOME=/nonexistent; ITEMS=""; add_item t T INFO "detail on PC" inotify.low false "" false; item_field t 5)
+eq "$l1d" "detail on <redacted>" "L1: --redact rewrites the detail"
+eq "$l1a" "$(tadvice inotify.low)" "L1: --redact never rewrites the fixed advice text (it says 'at the PC')"
+long=$(printf '%0200d' 0)
+l8=$(F_OSNAME="Os $long"; F_ARCH=x86_64; F_OS=Linux; REDACT=0; WORK_ROOT=""; HOURS=""; ITEMS=""; render_json | sed -n 's/.*"os": "\([^"]*\)".*/\1/p')
+eq "${#l8}" 128 "L8: host.os is cut to 128 characters"
 jf=${TMPDIR:-/tmp}/lanq-tune-out.$$.json; whole --json "$jf" >/dev/null; eq "$(head -n 1 "$jf" 2>/dev/null)" "{" "--json PATH writes the file"; rm -f "$jf"
 rm -rf "$FAKE"
 
@@ -251,7 +284,13 @@ tune_guard() { # FILE -> one line per violation
   printf '%s\n' "$_code" | grep -vE '^[[:space:]]*#' | grep 'awk' | awk -F"'" '{ for (i = 2; i <= NF; i += 2) { p = $i; gsub(/"[^"]*"/, "", p); if (length($i) > 1 && p ~ /[>|]|system|getline/) { print "awk program writes, pipes or runs: " $0; next } } }'
   printf '%s\n' "$_code" | grep -vE '^[[:space:]]*#' | grep -E "sed[^|;]*(/[gpIiM0-9]*[we]([[:space:]};']|\$)|[;{][[:space:]]*[we][[:space:]]|'[0-9\$,]*[we][[:space:]])" | sed 's/^/sed write or execute: /'
   # systemctl: only is-enabled and is-active; smartctl: only the health check of a standby-safe read
-  printf '%s\n' "$_code" | grep -vE '^[[:space:]]*#' | grep -oE 'systemctl [^;|&)]*' | grep -vxE 'systemctl is-(enabled|active) "\$1" 2>/dev/null ' | sed 's/^/systemctl other than is-enabled or is-active: /'
+  printf '%s\n' "$_code" | grep -vE '^[[:space:]]*#' | grep -oE 'systemctl [a-z-]+' | grep -vxE 'systemctl (is-enabled|is-active|show)' | sed 's/^/systemctl other than is-enabled, is-active or show: /'
+  # every command run through run_t: one of these reads, exactly
+  printf '%s\n' "$_code" | grep -vE '^[[:space:]]*#' | grep -oE 'run_t [0-9]+ [^;|&)]*' | grep -vxF \
+    -e 'run_t 10 du -sk "$1" 2>/dev/null ' -e 'run_t 5 systemctl is-enabled "$1" 2>/dev/null ' -e 'run_t 5 systemctl is-active "$1" 2>/dev/null ' \
+    -e 'run_t 5 systemd-detect-virt -c -q 2>/dev/null' -e 'run_t 5 loginctl list-sessions --no-legend 2>/dev/null ' \
+    -e 'run_t 5 loginctl show-session "$_sid" -p Type 2>/dev/null' -e 'run_t 10 smartctl -H -n standby "/dev/$_d" 2>/dev/null' \
+    -e 'run_t 5 df -Pk "$1" 2>/dev/null ' | sed 's/^/a command run through run_t that is not an allowed read: /'
   printf '%s\n' "$_code" | grep -vE '^[[:space:]]*#' | grep -oE 'smartctl -[^;|&)]*' | grep -vxE 'smartctl -H -n standby "/dev/\$_d" 2>/dev/null' | sed 's/^/smartctl other than -H -n standby: /'
   printf '%s\n' "$_code" | awk "$scan_awk"'
     /^[ \t]*#/ { next }
@@ -276,6 +315,10 @@ mutant "awk system()" "x() { awk 'BEGIN { system(\"id\") }'; }"
 mutant "sed -i" 'x() { sed -i s/a/b/ /etc/x; }'
 mutant "unknown command" 'x() { journalctl --vacuum-size=1G; }'
 mutant "backtick" 'x() { y=`id`; }'
+mutant "L7: systemctl edit" 'x() { systemctl edit cups.service; }'
+mutant "L7: run_t loginctl terminate" 'x() { run_t 5 loginctl terminate-session 3; }'
+mutant "L7: run_t of another command" 'x() { run_t 5 journalctl --vacuum-size=1G; }'
+mutant "L7: run_t du with other options" 'x() { run_t 10 du -sk --exclude=x "$1"; }'
 rm -rf "$mut_dir"
 
 echo "size, bytes, version"

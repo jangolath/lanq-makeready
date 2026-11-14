@@ -165,9 +165,13 @@ instructions.
     sh lanq-makeready-tune.sh [--json PATH|-] [--redact] [--hours HH:MM-HH:MM] [--work-root /srv/lq] [--quiet]
 
 It never changes anything. Tuning never affects readiness: there is no FAIL, and the exit code is always 0 (2 for bad
-arguments). The whole scan has a 90 s deadline, and any probe that would start after it reports `SKIP` (time budget).
-Inside a container (`/.dockerenv`, `/run/.containerenv`, or a docker/lxc/kubepods/containerd/libpod cgroup for PID 1),
-the host-level checks report `SKIP`; `pkgcache` and `disk.full` still run. On macOS it prints "no tune checks for
+arguments). The whole scan has a 90 s deadline. Each probe checks it before every step that can wait (each unit,
+each cache folder, each disk, each call), so a probe that would run past it reports `SKIP` (time budget), and the
+worst case stays close to 90 s. Inside a container (`/.dockerenv`, `/run/.containerenv`, `/run/systemd/container` for
+LXC and systemd-nspawn, a docker/lxc/kubepods/containerd/libpod cgroup for PID 1, or `systemd-detect-virt -c` when
+present), the host-level checks report `SKIP`; `pkgcache` and `disk.full` still run. `--redact` rewrites the host
+name, user name and home folder in `detail` (and in `os` and `workRoot`); the fixed `advice` text is never changed.
+`host.os` is cut to 128 characters. On macOS it prints "no tune checks for
 macOS". The pending reboot is reported by the scanner (`reboot.pending`), not here.
 
 | id | What it looks at | OK / INFO / WARN | Fix |
@@ -175,8 +179,8 @@ macOS". The pending reboot is reported by the scanner (`reboot.pending`), not he
 | `cpu.governor` | `scaling_driver` and `scaling_governor` | intel_pstate and amd-pstate-epp: any governor is OK (powersave is their normal dynamic mode). acpi-cpufreq and intel_cpufreq: powersave is WARN, userspace is INFO. Any other driver: INFO. No cpufreq (a VM): SKIP. | report only |
 | `sysctl.swappiness` | `vm.swappiness`, RAM | INFO above 60 with less than 8 GB RAM | report only |
 | `sysctl.inotify` | `fs.inotify.max_user_instances` / `max_user_watches` | WARN when instances is 128 or less; INFO when watches is below 524288 | `sysctl.tune` |
-| `journald.size` | `/var/log/journal`, `/run/log/journal` (RAM), and `SystemMaxUse` / `RuntimeMaxUse` in journald.conf and its drop-ins | INFO when there is no cap of your own and the persistent journal is 1 GB or more, or the volatile one 256 MB or more (the default cap is already 10% of the filesystem, at most 4 GB). SKIP (needs admin) when the folders cannot be read. | `journald.cap` |
-| `services.unused` | cups (service, socket, path), cups-browsed, avahi-daemon, bluetooth, ModemManager: enabled or active | cups-browsed is WARN and a security item (it listens on the network, CVE-2024-47176). The others are INFO. With a desktop running (display-manager), only cups-browsed is checked. avahi-daemon is report only: disabling it can make `host.local` names stop resolving. | `services.unused` (not avahi) |
+| `journald.size` | `/var/log/journal`, `/run/log/journal` (RAM), and `SystemMaxUse` / `RuntimeMaxUse` in journald.conf and its drop-ins | INFO when the persistent journal is 1 GB or more and you set no `SystemMaxUse`, or the volatile one is 256 MB or more and you set no `RuntimeMaxUse` (the default cap is already 10% of the filesystem, at most 4 GB). SKIP (needs admin) when the folders cannot be read. | `journald.cap` |
+| `services.unused` | cups (service, socket, path), cups-browsed, avahi-daemon, bluetooth, ModemManager: enabled or active | cups-browsed is WARN and a security item (it listens on the network, CVE-2024-47176). The others are INFO. With a desktop in use (an active display-manager, or a logind session of type x11 or wayland), only cups-browsed is checked. bluetooth is left out while a Bluetooth input device is connected (`/sys/bus/hid/devices/0005:*`). avahi-daemon is report only: disabling it can make `host.local` names stop resolving. | `services.unused` (not avahi) |
 | `unattended.reboot` | unattended-upgrades `Automatic-Reboot` / `-Time`; dnf-automatic `reboot =` with an enabled timer | WARN when the reboot time falls inside `--hours` ("now" counts as about 06:00, after apt-daily-upgrade); INFO without `--hours` | report only |
 | `pkgcache` | apt, dnf, yum, apk, pacman and zypper caches | INFO above 2 GB; the clean commands are given as advice | report only |
 | `fstrim` | non-rotational disks with `discard_max_bytes` > 0; `/` mounted with discard; `fstrim.timer` | INFO when the timer is disabled (or missing) | `fstrim.timer` |
@@ -193,14 +197,28 @@ for every fix without it. A tune fix is offered only for what the tune scan repo
 scan's decision functions unchanged, and a test checks that the copies match.
 
 - `sysctl.tune` writes `/etc/sysctl.d/99-zz-lanq-makeready.conf` (only when absent) with the inotify limits that are
-  below 1024 instances and 524288 watches, and applies them with `sysctl -w`. It never lowers a value. Undo removes the
-  file and restores the old values.
-- `journald.cap` writes `/etc/systemd/journald.conf.d/99-zz-lanq-makeready.conf` (`SystemMaxUse=1G`,
-  `RuntimeMaxUse=256M`) and restarts journald. **The trimmed logs cannot be restored**; the prompt says so.
+  below 1024 instances and 524288 watches, and applies them with `sysctl -w`. It never lowers a value at the time it
+  runs. Undo removes the file and restores the old values. Two things to know:
+  - The `99-zz-` name sorts last, so this file wins over every other file in the sysctl.d folders. If you later raise
+    a limit in another file (say to 2048 instances), this file still sets 1024 at the next boot. Undo this fix, or
+    edit the file, before you raise a limit elsewhere.
+  - On kernels 5.11 and newer, the kernel sizes its own `max_user_watches` default by RAM (about 1% of it, up to
+    1048576), so a large machine may already be above 524288 without this file. The fix only raises what is lower.
+- `journald.cap` writes `/etc/systemd/journald.conf.d/99-zz-lanq-makeready.conf` with only the caps you have not set
+  yourself (`SystemMaxUse=1G` when no `SystemMaxUse` is set, `RuntimeMaxUse=256M` when no `RuntimeMaxUse` is set),
+  then restarts journald. A cap you set in any journald.conf file is never overridden, and the record says which keys
+  were written. When `journald.conf.d` does not exist, the fix creates it with mode 755 and records that; undo
+  removes it again if it is still empty. **The trimmed logs cannot be restored**; the prompt says so.
 - `services.unused` runs `systemctl disable --now` on cups (service, socket and path), cups-browsed, bluetooth or
-  ModemManager. Each is its own prompt, and none is offered while a desktop runs, except cups-browsed. It never masks.
-  Undo re-enables and restarts exactly the units that were enabled and running.
+  ModemManager. Each is its own prompt, and none is offered while a desktop is in use, except cups-browsed. bluetooth
+  is never offered while a Bluetooth input device is connected, and the ModemManager prompt warns that a
+  mobile-broadband connection drops. It never masks. Undo re-enables the units that were enabled and starts the ones
+  that were running; another unit starting along with them (cups.path or cups.socket starting cups.service) still
+  counts as undone.
 - `fstrim.timer` runs `systemctl enable --now fstrim.timer`.
+
+`--tune` refuses to run inside a container (the same detection as the scan; exit 3): the tune fixes change host
+settings.
 
 Undo takes unit, file and sysctl names only from fixed tables in the script. A service name in a record must be on
 the script's append-only list and have the name shape, or the record is rejected.
