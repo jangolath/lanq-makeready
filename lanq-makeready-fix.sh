@@ -14,17 +14,32 @@
 #    ever written there), and --undo FILE puts the changes back, newest first, again confirming each. --undo reads
 #    only records in that folder; --list also lists ${XDG_STATE_HOME:-~/.local/state}/lanq-makeready/.
 # Fixes (v1): ssh.start (enable and start the ssh/sshd unit), power.sleep (mask the four sleep targets).
+# Tune fixes (--tune, for what lanq-makeready-tune.sh reports): sysctl.tune (raise the inotify limits:
+# /etc/sysctl.d/99-zz-lanq-makeready.conf plus sysctl -w), journald.cap (a journald size cap drop-in; the trimmed logs
+# cannot be restored), services.unused (systemctl disable --now cups, cups-browsed, bluetooth, ModemManager; never
+# masks), fstrim.timer (enable the weekly TRIM timer). --undo puts any of them back.
 #
-# Usage: sh lanq-makeready-fix.sh [--dry-run | --undo FILE | --list]
+# Usage: sh lanq-makeready-fix.sh [--tune] [--dry-run] | --undo FILE | --list
 # Exit:  0 = done or nothing to do, 1 = a change failed or did not verify, 2 = bad arguments or a rejected record,
 #        3 = refused (over SSH, from stdin, no interactive console).
 
 TOOL_VERSION=0.4.1
 RECORD_SCHEMA=lanq-makeready-fix/v1
 FIX_IDS="ssh.start power.sleep"
+# --tune: one key per prompt (services.unused:<service>); the record holds the id before the colon
+TUNE_KEYS="sysctl.tune journald.cap services.unused:cups-browsed services.unused:cups services.unused:bluetooth services.unused:modemmanager fstrim.timer"
+# APPEND-ONLY: every service name a record may ever hold. Undo accepts a name only when it is in this list, has the
+# name shape and its units match the fixed table in svc_units; never remove a name (old records must stay undoable).
+SVC_KNOWN="cups cups-browsed bluetooth modemmanager"
+INOTIFY_INSTANCES=1024
+INOTIFY_WATCHES=524288
+SYSCTL_MARK="# lanq-makeready-fix sysctl.tune: remove it with lanq-makeready-fix.sh --undo"
+JOURNALD_MARK="# lanq-makeready-fix journald.cap: remove it with lanq-makeready-fix.sh --undo"
+R=""   # root prefix for /proc, /sys and /etc paths; tests point it at a fake root (never taken from the environment)
+KEYS=$FIX_IDS
 SLEEP_KEYS="sleep suspend hibernate hybrid-sleep"
 FIX_SELF=$0
-USAGE="usage: sh lanq-makeready-fix.sh [--dry-run | --undo FILE | --list]   (no --yes: every change is confirmed one by one)"
+USAGE="usage: sh lanq-makeready-fix.sh [--tune] [--dry-run] | --undo FILE | --list   (no --yes: every change is confirmed one by one)"
 LOAD_ERR=""
 REC_PATH=""; REC_VERSION=""; REC_HOST=""; REC_USER=""; REC_STARTED=""; REC_ITEMS=""
 
@@ -108,20 +123,30 @@ ssh_unit() { for _u in ssh sshd; do case "$(unit_enabled "$_u.service")" in enab
 
 # A state text has a fixed shape per fix id; anything else is refused (and never offered or undone).
 valid_state() { # $1 id, $2 text
-  case "$2" in *[!a-z0-9=\ .-]*|'') return 1 ;; esac
+  case "$2" in *[!a-z0-9=\ .:-]*|'') return 1 ;; esac
   case "$1" in
     ssh.start) printf '%s\n' "$2" | grep -qxE 'unit=(ssh|sshd) enabled=(enabled|disabled) active=(active|inactive)' ;;
     power.sleep) printf '%s\n' "$2" | grep -qxE 'sleep=[a-z-]{1,20} suspend=[a-z-]{1,20} hibernate=[a-z-]{1,20} hybrid-sleep=[a-z-]{1,20}' ;;
+    sysctl.tune) printf '%s\n' "$2" | grep -qxE 'file=(absent|lanq) instances=[0-9]{1,10} watches=[0-9]{1,10}' ;;
+    journald.cap) printf '%s\n' "$2" | grep -qxE 'file=(absent|lanq)' ;;
+    services.unused) printf '%s\n' "$2" | grep -qxE 'svc=[a-z][a-z0-9-]{0,31}( (service|socket|path)=(enabled|disabled|none):(active|inactive)){1,3}' || return 1
+      _sv=$(field "$2" svc); svc_known "$_sv" || return 1
+      [ "$(printf '%s\n' "$2" | tr ' ' '\n' | sed -n '2,$s/=.*//p' | tr '\n' ' ')" = "$(for _u in $(svc_units "$_sv"); do printf '%s ' "${_u##*.}"; done)" ] ;;
+    fstrim.timer) printf '%s\n' "$2" | grep -qxE 'enabled=(enabled|disabled) active=(active|inactive)' ;;
     *) return 1 ;;
   esac
 }
-state_of() { # $1 id -> state text, empty when it cannot be recorded
+state_of() { # $1 key (an id, or services.unused:<service>) -> state text, empty when it cannot be recorded
   case "$1" in
     ssh.start) _u=$(ssh_unit) || return 0; _t="unit=$_u enabled=$(unit_enabled "$_u.service") active=$(unit_active "$_u.service")" ;;
     power.sleep) _t="sleep=$(unit_enabled sleep.target) suspend=$(unit_enabled suspend.target) hibernate=$(unit_enabled hibernate.target) hybrid-sleep=$(unit_enabled hybrid-sleep.target)" ;;
+    sysctl.tune) _t="file=$(dropin_state "$(sysctl_dropin)" "$SYSCTL_MARK") instances=$(proc_num fs/inotify/max_user_instances) watches=$(proc_num fs/inotify/max_user_watches)" ;;
+    journald.cap) _t="file=$(dropin_state "$(journald_dropin)" "$JOURNALD_MARK")" ;;
+    services.unused:*) _t=$(svc_state "${1#*:}") ;;
+    fstrim.timer) _t="enabled=$(unit_enabled fstrim.timer) active=$(unit_active fstrim.timer)" ;;
     *) return 0 ;;
   esac
-  if valid_state "$1" "$_t"; then printf '%s' "$_t"; fi
+  if valid_state "${1%%:*}" "$_t"; then printf '%s' "$_t"; fi
 }
 field() { printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p"; }
 # $1 power.sleep state -> the targets this fix would mask. A target masked only until the next boot (masked-runtime)
@@ -159,6 +184,109 @@ logind_auto_suspend() { # $1 idle $2 lid $3 lid-on-AC $4 laptop(yes|no) -> what 
 }
 # end of the copied scanner functions
 
+# ---------- tune fixes: fixed names and reads ----------
+# The tune scan's logic (lanq-makeready-tune.sh: is_num, inotify_finding, journald_limits, journal_finding, svc_offer,
+# trim_disks), copied unchanged so that a tune fix is offered only for what the tune scan reports; tests/fix.sh checks
+# that the copies match.
+is_num() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+inotify_finding() { # $1 max_user_instances, $2 max_user_watches -> OK | WARN | INFO
+  if [ "$1" -le 128 ]; then echo WARN; elif [ "$2" -lt 524288 ]; then echo INFO; else echo OK; fi
+}
+journald_limits() { # journald.conf text (main file, then drop-ins) on stdin -> "SystemMaxUse RuntimeMaxUse", "-" when unset; the last value wins
+  awk '/^[ \t]*[#;]/ { next } { gsub(/[ \t]/, "") } /^SystemMaxUse=/ { s = substr($0, 14) } /^RuntimeMaxUse=/ { r = substr($0, 15) } END { print (s == "" ? "-" : s) " " (r == "" ? "-" : r) }'
+}
+journal_finding() { # $1 persistent KB, $2 volatile (/run, RAM) KB, $3 SystemMaxUse, $4 RuntimeMaxUse -> INFO when worth a cap, else OK
+  if [ "$3" = - ] && [ "$1" -ge 1048576 ]; then echo INFO; return 0; fi
+  if [ "$4" = - ] && [ "$2" -ge 262144 ]; then echo INFO; return 0; fi
+  echo OK
+}
+svc_offer() { # $1 service key, $2 desktop running (yes|no) -> fix | report | none (none: not worth a line on this machine)
+  case "$1" in
+    cups-browsed) echo fix ;;
+    cups|bluetooth|modemmanager) if [ "$2" = yes ]; then echo none; else echo fix; fi ;;
+    avahi) if [ "$2" = yes ]; then echo none; else echo report; fi ;;
+    *) echo none ;;
+  esac
+}
+trim_disks() { # non-rotational disks that accept discard (TRIM)
+  for _q in "$R"/sys/block/*/queue/rotational; do
+    [ -r "$_q" ] || continue
+    _n=${_q%/queue/rotational}; _n=${_n##*/}
+    case "$_n" in loop*|ram*|zram*|dm-*|sr*|nbd*|md*|fd*) continue ;; esac
+    [ "$(head -n 1 "$_q")" = 0 ] || continue
+    _dm=$(head -n 1 "${_q%/rotational}/discard_max_bytes" 2>/dev/null)
+    is_num "$_dm" && [ "$_dm" -gt 0 ] && printf '%s ' "$_n"
+  done
+}
+# end of the copied tune functions
+
+sysctl_dropin() { echo "$R/etc/sysctl.d/99-zz-lanq-makeready.conf"; }
+journald_dropin() { echo "$R/etc/systemd/journald.conf.d/99-zz-lanq-makeready.conf"; }
+svc_units() { # the FIXED unit table: service key -> its units (never read from a record)
+  case "$1" in
+    cups) echo "cups.service cups.socket cups.path" ;;
+    cups-browsed) echo cups-browsed.service ;;
+    bluetooth) echo bluetooth.service ;;
+    modemmanager) echo ModemManager.service ;;
+  esac
+}
+svc_known() { # $1 service key: the name shape and the append-only list
+  printf '%s\n' "$1" | grep -qxE '[a-z][a-z0-9-]{0,31}' || return 1
+  case " $SVC_KNOWN " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+svc_state() { # $1 service key -> "svc=KEY service=en:act ..." (one word per unit, named by its type; none = no such unit)
+  _st="svc=$1"
+  for _u in $(svc_units "$1"); do
+    _e=$(unit_enabled "$_u"); [ "$_e" = not-found ] && _e=none
+    _st="$_st ${_u##*.}=$_e:$(unit_active "$_u")"
+  done
+  printf '%s' "$_st"
+}
+svc_pick() { # $1 services.unused state, $2 on|enabled|active -> the matching unit names from the fixed table
+  _sv=$(field "$1" svc); _o=""
+  for _u in $(svc_units "$_sv"); do
+    case "$2:$(field "$1" "${_u##*.}")" in on:enabled:*|on:*:active|enabled:enabled:*|active:*:active) _o="$_o${_o:+ }$_u" ;; esac
+  done
+  printf '%s' "$_o"
+}
+any_on() { printf '%s\n' "$1" | tr ' ' '\n' | grep -qE '=enabled:|:active$'; }
+desktop() { if [ "$(unit_active display-manager.service)" = active ]; then echo yes; else echo no; fi; }
+dropin_state() { # $1 file, $2 its first line when this script wrote it -> absent | lanq | other
+  if [ ! -e "$1" ] && [ ! -L "$1" ]; then echo absent
+  elif [ -f "$1" ] && [ ! -L "$1" ] && [ "$(head -n 1 "$1" 2>/dev/null)" = "$2" ]; then echo lanq
+  else echo other; fi
+}
+proc_num() { _v=$(head -n 1 "$R/proc/sys/$1" 2>/dev/null); if is_num "$_v"; then echo "$_v"; else echo x; fi; }
+raise_to() { if [ "$1" -lt "$2" ]; then echo "$2"; else echo "$1"; fi; }
+sysctl_args() { # $1 sysctl.tune before state, $2 apply|undo -> key=value words, only for the limits below the target
+  _o=""
+  for _k in instances watches; do
+    _b=$(field "$1" "$_k"); _t=$INOTIFY_INSTANCES; [ "$_k" = watches ] && _t=$INOTIFY_WATCHES
+    [ "$_b" -lt "$_t" ] || continue
+    if [ "$2" = apply ]; then _o="$_o${_o:+ }fs.inotify.max_user_$_k=$_t"; else _o="$_o${_o:+ }fs.inotify.max_user_$_k=$_b"; fi
+  done
+  printf '%s' "$_o"
+}
+sysctl_text() { # $1 before state -> the drop-in text
+  echo "$SYSCTL_MARK"
+  for _a in $(sysctl_args "$1" apply); do echo "${_a%%=*} = ${_a#*=}"; done
+}
+journald_text() { printf '%s\n[Journal]\nSystemMaxUse=1G\nRuntimeMaxUse=256M\n' "$JOURNALD_MARK"; }
+dir_kb() { # size of a folder in KB, bounded (0 when absent or unreadable)
+  [ -d "$1" ] || { echo 0; return 0; }
+  if command -v timeout >/dev/null 2>&1; then _k=$(timeout 10 du -sk -- "$1" 2>/dev/null | head -n 1); else _k=$(du -sk -- "$1" 2>/dev/null | head -n 1); fi
+  _k=${_k%%[!0-9]*}; if is_num "$_k"; then echo "$_k"; else echo 0; fi
+}
+journal_need() { # true when the tune scan reports journald.size INFO
+  _lim=$(for _x in "$R"/etc/systemd/journald.conf "$R"/usr/lib/systemd/journald.conf.d/*.conf "$R"/run/systemd/journald.conf.d/*.conf "$R"/etc/systemd/journald.conf.d/*.conf; do [ -r "$_x" ] && cat "$_x"; done | journald_limits)
+  [ "$(journal_finding "$(dir_kb "$R/var/log/journal")" "$(dir_kb "$R/run/log/journal")" "${_lim%% *}" "${_lim#* }")" = INFO ]
+}
+trim_need() { # an SSD that accepts TRIM, and / not mounted with discard (the tune scan's rule)
+  [ -n "$(trim_disks)" ] || return 1
+  ! awk '$2 == "/" { n = split($4, o, ","); for (i = 1; i <= n; i++) if (o[i] == "discard") f = 1 } END { exit !f }' "$R/proc/mounts" 2>/dev/null
+}
+
 sleep_risk() { # what the scanner concludes when the sleep targets are not masked: sleeps | desktop | unmasked
   _lap=no; for _x in /proc/acpi/button/lid/*; do [ -e "$_x" ] && _lap=yes; done
   _lv=$(for _x in /etc/systemd/logind.conf /usr/lib/systemd/logind.conf.d/*.conf /run/systemd/logind.conf.d/*.conf /etc/systemd/logind.conf.d/*.conf; do [ -r "$_x" ] && cat "$_x"; done | logind_values)
@@ -183,6 +311,10 @@ needed() { # $1 id, $2 state
       [ -n "$(to_mask "$2")" ] || return 1
       case "$(sleep_risk)" in sleeps|desktop) return 0 ;; esac
       return 1 ;;
+    sysctl.tune) [ "$(field "$2" file)" = absent ] && [ "$(inotify_finding "$(field "$2" instances)" "$(field "$2" watches)")" != OK ] ;;
+    journald.cap) [ "$(field "$2" file)" = absent ] && journal_need ;;
+    services.unused:*) [ "$(svc_offer "${1#*:}" "$(desktop)")" = fix ] && any_on "$2" ;;
+    fstrim.timer) [ "$(field "$2" enabled)" = disabled ] && trim_need ;;
     *) return 1 ;;
   esac
 }
@@ -200,13 +332,28 @@ note_of() { # $1 id -> why a fix the scanner would report is not offered (empty:
         return 0
       fi
       [ "$(unit_active "$_u.service")" = other ] && echo "$_u.service is changing state (activating or deactivating); run this script again in a moment" ;;
+    sysctl.tune)
+      _i=$(proc_num fs/inotify/max_user_instances); _w=$(proc_num fs/inotify/max_user_watches)
+      { is_num "$_i" && is_num "$_w"; } || return 0
+      [ "$(inotify_finding "$_i" "$_w")" = OK ] && return 0
+      [ "$(dropin_state "$(sysctl_dropin)" "$SYSCTL_MARK")" = absent ] || echo "$(sysctl_dropin) exists already (from an earlier run or written by hand); this script writes it only when it is absent, so edit it yourself (or undo the earlier record first)" ;;
+    journald.cap)
+      [ "$(dropin_state "$(journald_dropin)" "$JOURNALD_MARK")" = absent ] && return 0
+      journal_need && echo "$(journald_dropin) exists already (from an earlier run or written by hand); this script writes it only when it is absent" ;;
+    services.unused:*)
+      _sv=${1#*:}; [ "$(svc_offer "$_sv" "$(desktop)")" = fix ] || return 0
+      _st=$(svc_state "$_sv")
+      if ! valid_state services.unused "$_st" && any_on "$_st"; then echo "a unit is in a state this script does not change ($_st); it handles only units that are enabled, disabled or missing and active or inactive, so change it yourself if you want"; fi ;;
   esac
   return 0
 }
-done_ok() { # $1 id, $2 state after the change
+done_ok() { # $1 key, $2 state after the change
   case "$1" in
-    ssh.start) [ "$(field "$2" enabled)" = enabled ] && [ "$(field "$2" active)" = active ] ;;
+    ssh.start|fstrim.timer) [ "$(field "$2" enabled)" = enabled ] && [ "$(field "$2" active)" = active ] ;;
     power.sleep) [ -z "$(to_mask "$2")" ] ;;
+    sysctl.tune) [ "$(field "$2" file)" = lanq ] && [ "$(inotify_finding "$(field "$2" instances)" "$(field "$2" watches)")" = OK ] ;;
+    journald.cap) [ "$(field "$2" file)" = lanq ] ;;
+    services.unused:*) ! any_on "$2" ;;
     *) return 1 ;;
   esac
 }
@@ -214,34 +361,73 @@ expected_after() {
   case "$1" in
     ssh.start) echo "unit=$(field "$2" unit) enabled=enabled active=active" ;;
     power.sleep) echo "sleep=masked suspend=masked hibernate=masked hybrid-sleep=masked" ;;
+    sysctl.tune) echo "file=lanq instances=$(raise_to "$(field "$2" instances)" "$INOTIFY_INSTANCES") watches=$(raise_to "$(field "$2" watches)" "$INOTIFY_WATCHES")" ;;
+    journald.cap) echo "file=lanq" ;;
+    services.unused:*) printf '%s\n' "$2" | awk '{ for (i = 2; i <= NF; i++) { sub(/=enabled:/, "=disabled:", $i); sub(/:active$/, ":inactive", $i) } print }' ;;
+    fstrim.timer) echo "enabled=enabled active=active" ;;
   esac
 }
-check_of() { case "$1" in ssh.start) echo "ssh.server: sshd is installed but not running" ;; power.sleep) echo "power.sleep: the sleep targets are not all masked, so the machine may suspend mid-job" ;; esac; }
+check_of() {
+  case "$1" in
+    ssh.start) echo "ssh.server: sshd is installed but not running" ;;
+    power.sleep) echo "power.sleep: the sleep targets are not all masked, so the machine may suspend mid-job" ;;
+    sysctl.tune) echo "sysctl.inotify: the inotify limits are below the suggested $INOTIFY_INSTANCES instances and $INOTIFY_WATCHES watches" ;;
+    journald.cap) echo "journald.size: the systemd journal is large and has no size cap of its own" ;;
+    services.unused:*) echo "services.unused: ${1#*:} is enabled or running on a build box" ;;
+    fstrim.timer) echo "fstrim: an SSD that accepts TRIM, but fstrim.timer is disabled" ;;
+  esac
+}
 summary() {
   case "$1" in
     ssh.start) echo "$(field "$2" unit).service is $(field "$2" active), $(field "$2" enabled) at boot" ;;
-    power.sleep) echo "$2" ;;
+    sysctl.tune) echo "max_user_instances $(field "$2" instances), max_user_watches $(field "$2" watches); $(sysctl_dropin) is $(field "$2" file)" ;;
+    journald.cap) echo "$(journald_dropin) is $(field "$2" file)" ;;
+    fstrim.timer) echo "fstrim.timer is $(field "$2" active), $(field "$2" enabled) at boot" ;;
+    *) echo "$2" ;;
   esac
 }
 
 # region FIXES
 # The ONE place that changes this machine, keyed by fix id. fix_command prints the exact commands shown and recorded;
-# fix_change runs them. $3 is the before state (fresh, or from a validated record). Unit and target names come only
-# from fixed lists (ssh|sshd, the four sleep targets); nothing in a record is ever run as code.
-fix_command() { # $1 id, $2 apply|undo, $3 before
-  case "$1|$2" in
+# fix_change runs them. $3 is the before state (fresh, or from a validated record). Unit, target, file and sysctl names
+# come only from fixed lists (ssh|sshd, the four sleep targets, svc_units, the two drop-in paths, the two inotify keys);
+# a record supplies only states that passed valid_state, and nothing in a record is ever run as code.
+fix_command() { # $1 key, $2 apply|undo, $3 before
+  case "${1%%:*}|$2" in
     "ssh.start|apply") echo "systemctl enable --now $(field "$3" unit).service" ;;
     "ssh.start|undo")
       [ "$(field "$3" enabled)" = disabled ] && echo "systemctl disable $(field "$3" unit).service"
       [ "$(field "$3" active)" = inactive ] && echo "systemctl stop $(field "$3" unit).service" ;;
     "power.sleep|apply") echo "systemctl mask $(to_mask "$3")" ;;
     "power.sleep|undo") echo "systemctl unmask $(to_mask "$3")" ;;
+    "sysctl.tune|apply") echo "write $(sysctl_dropin): $(sysctl_args "$3" apply)"; echo "sysctl -w $(sysctl_args "$3" apply)" ;;
+    "sysctl.tune|undo") echo "rm $(sysctl_dropin)"; echo "sysctl -w $(sysctl_args "$3" undo)" ;;
+    "journald.cap|apply") echo "write $(journald_dropin): SystemMaxUse=1G RuntimeMaxUse=256M"; echo "systemctl restart systemd-journald.service" ;;
+    "journald.cap|undo") echo "rm $(journald_dropin)"; echo "systemctl restart systemd-journald.service" ;;
+    "services.unused|apply") echo "systemctl disable --now $(svc_pick "$3" on)" ;;
+    "services.unused|undo")
+      [ -n "$(svc_pick "$3" enabled)" ] && echo "systemctl enable $(svc_pick "$3" enabled)"
+      [ -n "$(svc_pick "$3" active)" ] && echo "systemctl start $(svc_pick "$3" active)" ;;
+    "fstrim.timer|apply") echo "systemctl enable --now fstrim.timer" ;;
+    "fstrim.timer|undo")
+      [ "$(field "$3" enabled)" = disabled ] && echo "systemctl disable fstrim.timer"
+      [ "$(field "$3" active)" = inactive ] && echo "systemctl stop fstrim.timer" ;;
   esac
   return 0
 }
+# A new file: written to a temp file in the same folder, then renamed into place (root's, mode 0600 from umask 077).
+put_file() { # $1 path, $2 text
+  _pd=${1%/*}
+  [ -L "$_pd" ] && return 1
+  mkdir -p -- "$_pd" || return 1
+  _pt=$(mktemp "$_pd/.lanq-makeready.XXXXXX") || return 1
+  if printf '%s\n' "$2" > "$_pt" && mv -f -- "$_pt" "$1"; then return 0; fi
+  rm -f -- "$_pt"
+  return 1
+}
 # shellcheck disable=SC2046 # the target list is words from a fixed list, split on purpose
-fix_change() { # $1 id, $2 apply|undo, $3 before
-  case "$1|$2" in
+fix_change() { # $1 key, $2 apply|undo, $3 before
+  case "${1%%:*}|$2" in
     "ssh.start|apply") systemctl enable --now "$(field "$3" unit).service" </dev/null ;;
     "ssh.start|undo")
       _undo_rc=0
@@ -250,6 +436,26 @@ fix_change() { # $1 id, $2 apply|undo, $3 before
       return "$_undo_rc" ;;
     "power.sleep|apply") systemctl mask $(to_mask "$3") </dev/null ;;
     "power.sleep|undo") systemctl unmask $(to_mask "$3") </dev/null ;;
+    "sysctl.tune|apply") put_file "$(sysctl_dropin)" "$(sysctl_text "$3")" && sysctl -w $(sysctl_args "$3" apply) </dev/null >/dev/null ;;
+    "sysctl.tune|undo")
+      _undo_rc=0
+      rm -f -- "$(sysctl_dropin)" || _undo_rc=1
+      sysctl -w $(sysctl_args "$3" undo) </dev/null >/dev/null || _undo_rc=1
+      return "$_undo_rc" ;;
+    "journald.cap|apply") put_file "$(journald_dropin)" "$(journald_text)" && systemctl restart systemd-journald.service </dev/null ;;
+    "journald.cap|undo") rm -f -- "$(journald_dropin)" && systemctl restart systemd-journald.service </dev/null ;;
+    "services.unused|apply") systemctl disable --now $(svc_pick "$3" on) </dev/null ;;
+    "services.unused|undo")
+      _undo_rc=0
+      if [ -n "$(svc_pick "$3" enabled)" ]; then systemctl enable $(svc_pick "$3" enabled) </dev/null || _undo_rc=1; fi
+      if [ -n "$(svc_pick "$3" active)" ]; then systemctl start $(svc_pick "$3" active) </dev/null || _undo_rc=1; fi
+      return "$_undo_rc" ;;
+    "fstrim.timer|apply") systemctl enable --now fstrim.timer </dev/null ;;
+    "fstrim.timer|undo")
+      _undo_rc=0
+      if [ "$(field "$3" enabled)" = disabled ]; then systemctl disable fstrim.timer </dev/null || _undo_rc=1; fi
+      if [ "$(field "$3" active)" = inactive ]; then systemctl stop fstrim.timer </dev/null || _undo_rc=1; fi
+      return "$_undo_rc" ;;
     *) return 1 ;;
   esac
 }
@@ -354,8 +560,8 @@ load_record() {
   _n=$(wc -l < "$_f" | tr -d ' ')
   if [ "$_n" -lt 10 ] || [ "$_n" -gt 74 ]; then LOAD_ERR="unexpected number of lines"; return 1; fi
   _T='[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
-  _S='[a-z0-9 .=-]{1,200}'
-  _I='    \{"seq": [1-9][0-9]{0,2}, "id": "(ssh\.start|power\.sleep)", "status": "(pending|applied|failed|undone|skipped)", "time": "'$_T'", "before": "'$_S'", "command": "[A-Za-z0-9 ._/;-]{0,255}", "after": "'$_S'"\}'
+  _S='[a-z0-9 .=:-]{1,200}'
+  _I='    \{"seq": [1-9][0-9]{0,2}, "id": "(ssh\.start|power\.sleep|sysctl\.tune|journald\.cap|services\.unused|fstrim\.timer)", "status": "(pending|applied|failed|undone|skipped)", "time": "'$_T'", "before": "'$_S'", "command": "[A-Za-z0-9 ._/;=:-]{0,255}[A-Za-z0-9 ._/;=:-]{0,255}", "after": "'$_S'"\}'
   _ln=0
   while IFS= read -r _l; do
     _ln=$((_ln + 1))
@@ -398,6 +604,12 @@ show_fix() { # id state
   if [ "$1" = power.sleep ] && [ "$(sleep_risk)" = desktop ]; then
     out "  note:    a desktop is running and its own power setting (GNOME, per user) cannot be read from here (a root shell has no session bus), so this cannot tell whether it really sleeps; masking is harmless if it does not"
   fi
+  case "$1" in
+    sysctl.tune) out "  note:    raises the limits now and at every boot (the file is read at boot); it never lowers a value" ;;
+    journald.cap) out "  WARNING: when journald restarts it deletes the oldest journal files down to the new caps (1 GB on disk, 256 MB in /run). Undo removes the caps, but the deleted logs cannot be restored." ;;
+    services.unused:cups) out "  note:    cups-browsed needs cups, so it stops too while cups is stopped; printing from this machine stops" ;;
+    services.unused:bluetooth) out "  note:    Bluetooth keyboards, mice and headsets stop working on this machine" ;;
+  esac
   fix_command "$1" apply "$2" | while IFS= read -r _c; do out "  command: $_c"; done
   fix_command "$1" undo "$2" | while IFS= read -r _c; do out "  undo:    $_c"; done
 }
@@ -408,33 +620,35 @@ do_apply() { # $1 = 1 for a dry run
   if [ "$_dry" = 1 ]; then out "lanq-makeready-fix $TOOL_VERSION dry run: shows each applicable fix and its undo; nothing is changed"
   else out "lanq-makeready-fix $TOOL_VERSION: changes only what you confirm, one fix at a time (default no)"; fi
   if [ "$_root" = yes ] && [ "$_dry" != 1 ]; then _why=$(record_dir_problem); if [ -n "$_why" ]; then err "lanq-makeready-fix: $_why"; return 1; fi; fi
-  for _id in $FIX_IDS; do
-    _note=$(note_of "$_id")
-    if [ -n "$_note" ]; then out ""; out "$_id  (check $(check_of "$_id")): not offered: $_note"; continue; fi
-    _s=$(state_of "$_id")
-    { [ -n "$_s" ] && needed "$_id" "$_s"; } || continue
+  for _key in $KEYS; do
+    _id=${_key%%:*}
+    _note=$(note_of "$_key")
+    if [ -n "$_note" ]; then out ""; out "$_key  (check $(check_of "$_key")): not offered: $_note"; continue; fi
+    _s=$(state_of "$_key")
+    { [ -n "$_s" ] && needed "$_key" "$_s"; } || continue
     _shown=$((_shown + 1))
-    show_fix "$_id" "$_s"
+    show_fix "$_key" "$_s"
     if [ "$_root" = no ]; then out "  skipped: needs root (run it yourself with sudo at this machine); this script never elevates itself"; continue; fi
     if [ "$_dry" = 1 ]; then out "  dry run: not applied"; continue; fi
     if ! confirm; then out ""; out "  not applied"; continue; fi
     out ""
-    _s2=$(state_of "$_id")   # the precondition, re-read just before the change
-    if [ -z "$_s2" ] || ! needed "$_id" "$_s2"; then out "  no longer needed (the state changed); nothing done"; continue; fi
+    _s2=$(state_of "$_key")   # the precondition, re-read just before the change
+    if [ -z "$_s2" ] || ! needed "$_key" "$_s2"; then out "  no longer needed (the state changed); nothing done"; continue; fi
     if [ "$_s2" != "$_s" ]; then out "  the state changed since it was shown; nothing done (run the script again)"; continue; fi
     [ -n "$REC_PATH" ] || new_record
     _seq=$(($(item_count) + 1))
-    _cmd=$(fix_command "$_id" apply "$_s2" | awk 'NR != 1 { printf " ; " } { printf "%s", $0 }')
-    REC_ITEMS=$(printf '%s\n%s|%s|pending|%s|%s|%s|%s' "$REC_ITEMS" "$_seq" "$_id" "$(now_utc)" "$_s2" "$_cmd" "$(expected_after "$_id" "$_s2")" | grep '^[0-9]')
+    _cmd=$(fix_command "$_key" apply "$_s2" | awk 'NR != 1 { printf " ; " } { printf "%s", $0 }')
+    REC_ITEMS=$(printf '%s\n%s|%s|pending|%s|%s|%s|%s' "$REC_ITEMS" "$_seq" "$_id" "$(now_utc)" "$_s2" "$_cmd" "$(expected_after "$_key" "$_s2")" | grep '^[0-9]')
     if ! save_record; then err "  nothing changed: the undo record could not be written"; return 1; fi
-    fix_change "$_id" apply "$_s2"; _rc=$?
-    _s3=$(state_of "$_id"); [ -n "$_s3" ] || _s3=unknown
-    if [ "$_rc" = 0 ] && [ "$_s3" != unknown ] && done_ok "$_id" "$_s3"; then set_item "$_seq" applied "$(now_utc)" "$_s3"; out "  applied and verified"
+    fix_change "$_key" apply "$_s2"; _rc=$?
+    _s3=$(state_of "$_key"); [ -n "$_s3" ] || _s3=unknown
+    if [ "$_rc" = 0 ] && [ "$_s3" != unknown ] && done_ok "$_key" "$_s3"; then set_item "$_seq" applied "$(now_utc)" "$_s3"; out "  applied and verified"
     else set_item "$_seq" failed "$(now_utc)" "$_s3"; _failed=$((_failed + 1)); out "  FAILED (exit $_rc; now: $_s3); recorded, so --undo can put back what changed"; fi
     save_record || _failed=$((_failed + 1))
   done
-  if [ "$_shown" = 0 ]; then out "Nothing to fix here (fixes: $FIX_IDS)."
-  elif [ "$_root" = no ]; then out ""; out "To apply, run it yourself with sudo at this machine: sudo sh lanq-makeready-fix.sh"; fi
+  _t=""; [ "$KEYS" = "$TUNE_KEYS" ] && _t=" --tune"
+  if [ "$_shown" = 0 ]; then out "Nothing to fix here (fixes: $KEYS)."
+  elif [ "$_root" = no ]; then out ""; out "To apply, run it yourself with sudo at this machine: sudo sh lanq-makeready-fix.sh$_t"; fi
   if [ -n "$REC_PATH" ]; then out ""; out "Undo record: $REC_PATH"; out "To undo:     sudo sh lanq-makeready-fix.sh --undo $REC_PATH"; fi
   [ "$_failed" = 0 ] || return 1
   return 0
@@ -456,9 +670,10 @@ do_undo() { # $1 record file
     _line=$(printf '%s\n' "$REC_ITEMS" | grep "^$_s|")
     _id=$(printf '%s' "$_line" | cut -d'|' -f2); _st=$(printf '%s' "$_line" | cut -d'|' -f3); _tm=$(printf '%s' "$_line" | cut -d'|' -f4)
     _b=$(printf '%s' "$_line" | cut -d'|' -f5); _a=$(printf '%s' "$_line" | cut -d'|' -f7)
+    _key=$_id; [ "$_id" = services.unused ] && _key="$_id:$(field "$_b" svc)"   # a known name: the state passed valid_state
     out ""
-    out "undo $_id  (check $(check_of "$_id")), $_st at $_tm"
-    _cur=$(state_of "$_id")
+    out "undo $_key  (check $(check_of "$_key")), $_st at $_tm"
+    _cur=$(state_of "$_key")
     out "  before the fix: $_b"
     out "  after the fix:  $_a"
     out "  now:            $_cur"
@@ -467,13 +682,13 @@ do_undo() { # $1 record file
       if save_record; then out "  never applied (the record was written, the change was not made); marked skipped"; else _failed=$((_failed + 1)); fi
       continue
     fi
-    fix_command "$_id" undo "$_b" | while IFS= read -r _c; do out "  command: $_c"; done
+    fix_command "$_key" undo "$_b" | while IFS= read -r _c; do out "  command: $_c"; done
     if [ -z "$_cur" ] || [ "$_cur" != "$_a" ]; then out "  changed since; left alone"; continue; fi
     if ! confirm; then out ""; out "  left as it is"; continue; fi
     out ""
-    if [ "$(state_of "$_id")" != "$_a" ]; then out "  changed since; left alone"; continue; fi
-    fix_change "$_id" undo "$_b"; _rc=$?
-    _now=$(state_of "$_id")
+    if [ "$(state_of "$_key")" != "$_a" ]; then out "  changed since; left alone"; continue; fi
+    fix_change "$_key" undo "$_b"; _rc=$?
+    _now=$(state_of "$_key")
     if [ "$_rc" = 0 ] && [ "$_now" = "$_b" ]; then
       set_item "$_s" undone "$(now_utc)" "$_a"
       if save_record; then out "  undone and verified"; else _failed=$((_failed + 1)); fi
@@ -509,9 +724,10 @@ do_list() { # both places: this user's records and root's
 
 main() {
   unalias -a 2>/dev/null   # an alias must never stand in for a command this script runs
-  MODE=apply; UNDO_FILE=""; _modes=0
+  MODE=apply; UNDO_FILE=""; _modes=0; KEYS=$FIX_IDS; _tune=0
   while [ $# -gt 0 ]; do
     case "$1" in
+      --tune) KEYS=$TUNE_KEYS; _tune=1 ;;
       --dry-run) MODE=dry; _modes=$((_modes + 1)) ;;
       --undo) if [ $# -lt 2 ] || [ -z "$2" ]; then err "lanq-makeready-fix: --undo needs a record file"; return 2; fi; MODE=undo; UNDO_FILE=$2; _modes=$((_modes + 1)); shift ;;
       --list) MODE=list; _modes=$((_modes + 1)) ;;
@@ -521,6 +737,7 @@ main() {
     shift
   done
   if [ "$_modes" -gt 1 ]; then err "lanq-makeready-fix: use only one of --dry-run, --undo and --list"; return 2; fi
+  case "$_tune:$MODE" in 1:undo|1:list) err "lanq-makeready-fix: --tune goes with an apply run or --dry-run; --undo and --list handle every fix without it"; return 2 ;; esac
   if _why=$(refusal "$MODE"); then err "lanq-makeready-fix: $_why"; return 3; fi
   if [ "${LANQ_MAKEREADY_FIX_LIB:-}" = 1 ] && ! type __lanq_makeready_fix_test_harness >/dev/null 2>&1; then
     err "lanq-makeready-fix: LANQ_MAKEREADY_FIX_LIB=1 is only for the test runner (it must source this file); unset it."; return 2
