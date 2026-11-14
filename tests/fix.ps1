@@ -93,6 +93,12 @@ Assert-Equal (Test-FixRecordDirTrusted $rdT) '' 'M-B: the record folder under th
 $script:Psd['C:\ProgramData'] = 'O:SYG:SYD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
 $w = Test-FixRecordDirTrusted $rdT
 Assert-True ($w -match 'C:\\ProgramData' -and $w -match 'rename or replace' -and $w -match 'Everyone' -and $w -match [regex]::Escape('icacls "C:\ProgramData" /remove:g *S-1-1-0')) 'M-B: C:\ProgramData with Everyone full control: refused, says what is wrong and how to restore the default (text only)'
+$script:Psd['C:\ProgramData'] = 'O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)'
+$w = Test-FixRecordDirTrusted $rdT
+Assert-True ($w -match [regex]::Escape('icacls "C:\ProgramData" /grant:r *S-1-5-32-545:(OI)(CI)(RX) *S-1-5-32-545:(CI)(WD,AD,WEA,WA)') -and $w -notmatch 'remove:g') 'L-2 (round 5): Users may modify C:\ProgramData: the advice restores the default Users rights (never removes Users)'
+$script:Psd['C:\ProgramData'] = 'O:SYG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;CI;0x116;;;BU)(A;OICI;0x1301bf;;;AU)'
+$w = Test-FixRecordDirTrusted $rdT
+Assert-True ($w -match [regex]::Escape('icacls "C:\ProgramData" /remove:g *S-1-5-11') -and $w -notmatch 'grant:r') 'L-2 (round 5): Authenticated Users may modify it: a targeted removal of that entry (not in the default)'
 $script:Psd['C:\ProgramData'] = ''
 Assert-True ((Test-FixRecordDirTrusted $rdT) -match 'link or its permissions cannot be read') 'M-B: C:\ProgramData a link (or unreadable): refused'
 $script:Psd['C:\ProgramData'] = $PdDefault; $script:Psd['C:'] = 'O:SYG:SYD:PAI(A;OICI;FA;;;BA)(A;;0x40;;;AU)'
@@ -690,6 +696,13 @@ Set-Item -Path Function:\Save-FixRecord -Value $origSave
 Reset-Fake; $F.LongPaths = 0; $script:DirWhy = 'the record folder X is not safe (it is owned by S-1-5-21-1). Nothing was changed.'
 $rc = Invoke-Fake 'apply' '' @('y')
 Assert-True ($rc -eq 1 -and $Calls.Count -eq 0 -and $script:Asked -eq 0 -and (OutText) -match 'not safe') 'R1: an unsafe record folder stops the run before the first question'
+$script:DirWhy = ''
+Reset-Fake; $F.Standby = 1800; $rc = Invoke-Fake 'apply' '' @('y'); $rp = Get-LatestRecord
+$script:DirWhy = 'C:\ProgramData (the folder above the record folder) lets others rename or replace what is in it: Everyone may delete or rename. Nothing was changed.'
+$rc = Invoke-Fake 'undo' $rp @('y')
+Assert-True ($rc -eq 2 -and $Calls.Count -eq 0 -and $Reads.Count -eq 0 -and $script:Asked -eq 0 -and (OutText) -match 'rename or replace') 'L-1 (round 5): -Undo refuses when the record folder or the folder above it is not trusted, before it reads the record'
+$rc = Invoke-Fake 'list'
+Assert-True ($rc -eq 2 -and (OutText) -match 'rename or replace' -and (OutText) -notmatch 'power.sleep applied') 'L-1 (round 5): -List refuses too, before it reads any record'
 $script:DirWhy = ''
 Reset-Fake
 $rec0 = New-FixRecord; [void](New-Item -ItemType Directory -Path $RecDir); [System.IO.File]::WriteAllText($rec0.Path + '.tmp', 'planted'); $FixOut.Clear()
@@ -1500,7 +1513,12 @@ if ($ptFn.Count -eq 1) {
   if ($ppFn.Count -eq 1) {
     . ([scriptblock]::Create($ppFn[0].Extent.Text))
     foreach ($x in '\\server\share\lanq-rc', '\\?\UNC\server\share\x', '//server/share/x', 'Z:x') { Assert-True ((Test-PoolPath $x) -ne '') "L-4: refused: $x" }
-    foreach ($x in 'C:\ProgramData\lanq-rc', 'C:\ProgramData\lanq-rc\tests\pool-defender.ps1', 'C:\') { Assert-Equal (Test-PoolPath $x) '' "L-4: a local path passes: $x" }
+    foreach ($x in 'C:\ProgramData\lanq-rc', 'C:\ProgramData\lanq-rc\tests\pool-defender.ps1', 'C:\') { Assert-Equal (Test-PoolPath $x 'Fixed' $true) '' "L-4: a local path passes: $x" }
+    Assert-True ((Test-PoolPath 'Z:\lanq-rc' 'Network' $true) -match 'not a fixed') 'L-3 (round 5): a mapped network drive letter is refused'
+    Assert-True ((Test-PoolPath 'E:\lanq-rc' 'Removable' $true) -match 'not a fixed') 'L-3 (round 5): a removable drive is refused'
+    Assert-True ((Test-PoolPath 'S:\lanq-rc' 'Fixed' $false) -match 'subst') 'L-3 (round 5): a subst drive letter (no volume of its own) is refused'
+    Assert-Equal (Test-PoolPath "$env:SystemDrive\") '' 'L-3 (round 5): the real system drive passes the real checks (DriveInfo, Get-Volume)'
+    Assert-True (@($ptAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -match '^(subst|Add-Type)' }, $true)).Count -eq 0) 'L-3 (round 5): no P/Invoke, no subst.exe parsing'
   }
 }
 Assert-True ($poolText -match 'exactly one new record' -and $poolText -match 'INTERRUPTED' -and $poolText -match 'finally' -and $poolText -match 'Test-SelfTestDir' -and $poolText -match 'Test-WorkDirSame' -and $poolText -match 'Test-PoolTrust' -and $poolText -match 'Get-FixRecordDirProblem' -and $poolText -notmatch 'Sort-Object -Property LastWriteTimeUtc') 'M-A/M-B/L-6: the pool harness undoes only the one record its own apply wrote, is interrupt-safe, re-checks every folder, refuses a checkout others may change'
