@@ -99,8 +99,8 @@ controls, for one folder it makes itself, and proves it. Reviewers check every c
 > principal can redirect, rename or recreate any part of the excluded path.
 
 - **No path from anyone.** The one exclusion is `<drive>:\lanq-work\`, on the drive Windows is on; the Dev Drive rung
-  adds none. No argument, environment variable or record field can change it (a test parses the script and allows
-  only that string). There is no `-Path` and no configuration.
+  adds none. No argument, environment variable or record field can change it. A syntactic test of the script's
+  AST allows only that string, but it is a tripwire for review, not a proof. There is no `-Path` and no configuration.
 - **The script makes the folder.** `lanq-work` is created with its owner (Administrators) and its permissions in one
   call, then read back: owner, exact permissions, empty, not a link, its file id. The build user can add and change
   files inside but cannot rename, delete or re-permission the folder, and OWNER RIGHTS takes away its right to
@@ -118,11 +118,15 @@ controls, for one folder it makes itself, and proves it. Reviewers check every c
 - **Self-test folders cannot be swapped.** Each is made admin-only in the record folder and moved into place (a move
   fails when the name exists), and checked again before every write and delete; a folder that is not ours is never
   written to or deleted.
-- **Undo** removes only that exclusion string. The folder and a Dev Drive are never deleted.
+- **lanq-work is never empty** (review round 2). It is made with a permanent admin-only child `.lanq-pin` in an
+  admin-only place and moved into place, so the build user can never turn it into a junction (that works only on an
+  empty folder) and cannot delete the pin. The pin is checked on every read-back and reuse, and lanq-work (not a
+  link, the same file id, the pin there) right before every move into it, write and delete there.
+- **Undo** removes only that exclusion string. The folder, its `.lanq-pin` and a Dev Drive are never deleted.
 - **No P/Invoke or Add-Type** in the product scripts (the non-admin checks are done in the CI test with LogonUser).
 
-New places the fix script writes, all only after you type the path to confirm: `%SystemDrive%\lanq-work` (or
-`<Dev Drive>:\lanq-work`); the Defender exclusion `<drive>:\lanq-work\`; self-test folders on the drive root
+New places the fix script writes, all only after you type the path to confirm: `%SystemDrive%\lanq-work` and its
+`.lanq-pin` (or `<Dev Drive>:\lanq-work` and its pin, staged in `<Dev Drive>:\.lanq-stage-<id>`); the Defender exclusion `<drive>:\lanq-work\`; self-test folders on the drive root
 (`lanq-selftest-<id>`, `lanq-work-<id>`, `lanq-work<id>`, `lanq-work.<id>`, `lanq-work.`, `lanq-work` with a trailing space,
 `lanq-work-<id>-ads`) and `lanq-work\lanq-selftest-<id>`, each created admin-only in the record folder (as
 `stage-<id>-<n>`), moved into place and removed again (a sibling name that

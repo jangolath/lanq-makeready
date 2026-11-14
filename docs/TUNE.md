@@ -111,9 +111,21 @@ administrator. Use an account that runs nothing but builds: whatever it writes i
 
 #### The folder: `lanq-work`
 
-Both rungs make `lanq-work` the same way: created with its owner and permissions in one call, then read back
-(owner, permissions, empty, not a link, its file id). The path is fixed and not configurable: `%SystemDrive%\lanq-work`
-for the exclusion, `<Dev Drive>:\lanq-work` on a Dev Drive. No path is ever taken from the command line or a record.
+Both rungs make `lanq-work` the same way: created with its owner and permissions in one call, together with a
+permanent child `.lanq-pin` (owner Administrators, Administrators and SYSTEM only), in an admin-only place (the record
+folder, or a holder on the Dev Drive), then moved into place and read back (owner, permissions, the pin, nothing else
+in it, not a link, its file id). A move fails when `lanq-work` already exists, so a folder someone made first stops
+the run. The path is fixed and not configurable: `%SystemDrive%\lanq-work` for the exclusion, `<Dev Drive>:\lanq-work`
+on a Dev Drive. No path is ever taken from the command line or a record.
+
+**Why `.lanq-pin`.** The build user may add files and folders to lanq-work, and with that right an account can turn an
+*empty* folder into a junction (a link to somewhere else). A folder that is not empty cannot be turned into one, and
+the build user cannot delete the pin (it has no delete-child right on lanq-work and no right on the pin). So
+lanq-work is never empty where the build user can reach it. The pin stays for good: undo keeps it with the folder, the
+fix uses an existing lanq-work only with its pin as made, and the tune scan's `defender.drift` reports a missing or
+changed pin. Do not delete it; if you remove lanq-work yourself, remove the pin with it.
+During the self-test, lanq-work is checked again (not a link, the same file id, the pin there) right before each move
+into it, each write and each delete there.
 
 ```text
 O:BAG:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200af;;;<build user>)(A;OICIIO;0x1301bf;;;<build user>)(A;OICIIO;0x1301bf;;;OW)
@@ -199,7 +211,8 @@ what is in it (DELETE_CHILD) or change its permissions or owner, the drive root 
 and the hash of its permissions (and they are the ones above for the same build user). There is no marker file in the
 folder. Otherwise: look at it, `takeown.exe /a /r /d y /f "C:\lanq-work"`, rename it, and run the script again.
 
-**Undo** (`-Undo <record>`) removes only the exclusion string. The folder is kept; this script never deletes it.
+**Undo** (`-Undo <record>`) removes only the exclusion string. The folder and its `.lanq-pin` are kept; this script
+never deletes them.
 
 **Drift.** Run elevated, the tune scan's `defender.drift` checks the exclusion against the record: the same string,
 folder, owner, permissions, file id and volume, and a sample of the top two levels. On any drift it reports WARN
@@ -220,7 +233,7 @@ run). **CI** = `tests/real-defender.ps1`, Pass 4 of the `real-fix-windows` job (
 
 | Ids | What | Where |
 |---|---|---|
-| A1-A2 | no path from the user (unknown argument), the drive Windows is on, one `Add-MpPreference` with the fixed string only (AST guard) | F |
+| A1-A2 | no path from the user (unknown argument), the drive Windows is on, one `Add-MpPreference` with the fixed string only (a syntactic AST check: a tripwire, not a proof) | F |
 | A3 | not a fixed drive; USB, VHD, SD or MMC disk; not NTFS; unreadable volume | F |
 | A4-A6 | lanq-work is a link; squatted (another owner); our permissions but no record (no marker) | F |
 | A7-A9 | `DisableLocalAdminMerge`, group policy, MDM; Defender for Endpoint; passive mode, real-time protection off, scan direction, hidden exclusions | F |
@@ -240,7 +253,7 @@ run). **CI** = `tests/real-defender.ps1`, Pass 4 of the `real-fix-windows` job (
 | E9+ | review round 1: an error mid-matrix still rolls back; a failed record with the exclusion left vouches for nothing; a pre-made or tampered self-test folder is never written to or deleted; the rollback is read back; the settle wait | F |
 | E9 | the self-test failure paths: positive control missed, a sibling not caught, the inside one caught, a sibling form that exists already: rolled back, exit 1, cleaned up | F |
 | G1 | the Dev Drive is attached again after a restart | **build-02** (`tests/pool-defender.ps1 -DevDrive`, twice) |
-| G2 | the AST guard: EICAR written, folders created or deleted, disks changed, diskpart or fsutil writes only inside `Invoke-FixChange`; no Add-Type or P/Invoke | F |
+| G2 | the AST guard (syntactic, a tripwire for review, not a proof): EICAR written, folders created or deleted, disks changed, diskpart or fsutil writes only inside `Invoke-FixChange`; no Add-Type or P/Invoke | F |
 | G3 | `defender.drift` and `devdrive` in the tune scan; the functions it copies from the fix script stay identical | F, CI (drift) |
 | G4 | Linux: `--defender-exclusions` exits 2 | F |
 
@@ -364,13 +377,23 @@ the script's append-only list and have the name shape, or the record is rejected
 
 #### Before a release: build-02
 
-`tests/pool-defender.ps1` runs E1-E8 (and, with `-DevDrive`, G1) on a real pool PC. Unlike the CI script it creates no
-accounts, removes no existing exclusion and never touches real-time protection or any other Defender setting. It runs
-the real fix script (you type the path, as always), checks the result, undoes it (you answer `y`), and prints a
-PASS/FAIL summary (exit 1 on any FAIL). It also prints the answers to two open questions: the exact form Defender
-stores `C:\lanq-work\` in, and whether `fsutil devdrv query` shows WdFilter attached right after the format.
+`tests/pool-defender.ps1` runs E1-E8, L2 (and, with `-DevDrive`, G1) on a real pool PC. Unlike the CI script it
+creates no accounts, removes no existing exclusion and never touches real-time protection or any other Defender
+setting. It runs the real fix script (you type the path, as always) and checks that exactly one new record says
+`defender.exclude applied`. It then runs its own checks:
+- E2-E8 with fresh names, in folders made admin-only in the record folder and moved into place, re-checked before every
+  write and delete;
+- L2: a test file written through a junction in lanq-work to a folder outside it must be caught.
 
-1. At build-02 itself (not over SSH), in an elevated PowerShell, from a checkout of the release candidate:
+Then it undoes exactly that one record (you answer `y`) and prints a PASS/FAIL summary (exit 1 on any FAIL). It stops
+at once when `C:\lanq-work\` is already excluded. Its folders are removed in a `finally` block; if it is interrupted
+after the apply it prints `INTERRUPTED ... -Undo <record>`: run that. It also prints the answers to two open
+questions: the exact form Defender stores `C:\lanq-work\` in, and whether `fsutil devdrv query` shows WdFilter
+attached right after the format.
+
+1. Copy the release candidate to a folder only Administrators may change (for example under `C:\ProgramData`; the
+   script refuses to run elevated from a folder others could change, such as a user's checkout). Then, at build-02
+   itself (not over SSH), in an elevated PowerShell, from that copy:
 
    ```powershell
    powershell -NoProfile -ExecutionPolicy Bypass -File tests\pool-defender.ps1 -BuildUser <the build account>

@@ -28,6 +28,16 @@
     - Fail-closed reads: scan direction and case sensitivity in any language. The tune scan orders and checks the
       records it reads, and drift re-checks the drive root, the bus and Dev Drive.
     - New `tests/pool-defender.ps1`: the pool-safe E1-E8 and G1 run for build-02.
+  - Review round 2:
+    - lanq-work keeps a permanent admin-only `.lanq-pin`, so the build user can never empty it and turn it into a
+      junction. It is staged with the folder and moved into place, checked on reuse, and lanq-work is re-checked
+      before every move, write and delete during the self-test. Undo keeps the pin; drift reports it missing.
+    - Threat-history hits need the exact `file:_<path>`.
+    - An unreadable exclusion list after the rollback says FAILED.
+    - Only the newest record item for a folder vouches for it.
+    - Drift treats an unknown bus or Dev Drive state as drift.
+    - `tests/pool-defender.ps1` undoes only the record its own apply wrote and is interrupt-safe. It refuses a checkout
+      others could change, and checks scanning through a junction (L2).
   - **Not offered** (report only, exit 0) on any doubt: Defender not active, real-time protection off or one-way,
     exclusions hidden, managed by policy or MDM, Defender for Endpoint onboarded, an existing exclusion that covers
     lanq-work (reported, never recorded or undone) or a variant of it, a drive that is not fixed, internal and NTFS,
