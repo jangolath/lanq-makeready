@@ -950,7 +950,13 @@ function Save-FixRecord($Rec) { $r = & $origSave2 $Rec; if ($script:SaveHook) { 
 Reset-Tune; Set-TuneQuiet; $script:SaveHook = $mkJ; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' $WRF; $j = Read-Rec (Get-LatestRecord)
 Assert-True (($Calls -join '|') -eq "Add-MpPreference $NGP" -and (OutText) -match 'is refused now: .*junction or link' -and $j.items[0].status -eq 'skipped') 'TOCTOU: a junction made after the record was written: checked again right before the change, not excluded, recorded as skipped'
 Set-Item -Path Function:\Save-FixRecord -Value $origSave2; & $unJ
-foreach ($wr in @('C:/.', 'C:/lq/.', 'C:/Windows', 'C:/Users', 'C:/ProgramData')) { Assert-True ((Get-TuneArgError @{ Hours = $null; WorkRoot = $wr } $true $true 'dry') -match 'refused|-WorkRoot must') "-WorkRoot $wr refused (exit 2)" }
+foreach ($wr in @('C:/.', 'C:/lq/.', 'C:/', 'C:/x/../y')) { Assert-True ((Get-TuneArgError @{ Hours = $null; WorkRoot = $wr } $true $true 'dry') -match '-WorkRoot must') "invalid -WorkRoot $wr refused (exit 2)" }
+foreach ($wr in @('C:/Users/builder/lq', 'C:/Windows', 'C:/lq')) { Assert-Equal (Get-TuneArgError @{ Hours = $null; WorkRoot = $wr } $true $true 'dry') '' "valid -WorkRoot $wr accepted (eligibility is decided per item)" }
+$pwr = ($upf + '\lq').Replace('\', '/')
+Reset-Tune; Set-TuneQuiet; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' $pwr
+Assert-True ($rc -eq 0 -and ($Calls -join '|') -eq "Add-MpPreference $NGP" -and (OutText) -match 'is refused: .*use a top-level build folder such as C:\\lq or D:\\build') 'a valid work_root inside a profile: not excluded (note: use a top-level build folder), the NuGet cache still is'
+Reset-Tune; Set-TuneQuiet; $Pw.Max = 90; $rc = Invoke-Tune 'apply' @('y') 'tune' '' $pwr
+Assert-True ($rc -eq 0 -and ($Calls -join '|') -match 'PROCTHROTTLEMAX 100') 'a valid work_root inside a profile: the other tune fixes run normally'
 Reset-Tune; Set-TuneQuiet; $env:NUGET_PACKAGES = 'C:\ProgramData'; $rc = Invoke-Tune 'apply' @('y', 'y') 'defender' '' $WRF
 Assert-True (($Calls -join '|') -eq "Add-MpPreference $WRP" -and (OutText) -match 'C:\\ProgramData is refused') 'NUGET_PACKAGES pointing at a protected folder: not offered, says why; work_root still offered'
 $env:NUGET_PACKAGES = $NGP

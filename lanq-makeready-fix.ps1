@@ -1527,7 +1527,9 @@ function Get-TuneArgError($Ua, [bool]$TuneOn, [bool]$Def, [string]$Mode) {
   if ($TuneOn -and @('undo', 'list') -contains $Mode) { return '-Tune goes with -WhatIf or alone; -Undo and -List handle every record' }
   if ($null -ne $Ua.Hours -and ($Ua.Hours -notmatch '^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$' -or $Ua.Hours.Split('-')[0] -eq $Ua.Hours.Split('-')[1])) { return '-Hours must look like 00:00-07:00 (HH:mm-HH:mm, start different from end)' }
   if ($null -ne $Ua.WorkRoot -and ("$($Ua.WorkRoot)".Replace('\', '/') -cnotmatch '^[A-Za-z]:/[A-Za-z0-9_.-][A-Za-z0-9_./-]*$' -or "$($Ua.WorkRoot)" -match '\.\.')) { return '-WorkRoot must be a folder like C:/lq (letters, digits, _ . / -; no spaces, no .., not a whole drive), as in LanQueue machines.yml' }
-  if ($null -ne $Ua.WorkRoot) { $why = Get-BuildDirProblem "$($Ua.WorkRoot)"; if ($why) { return "-WorkRoot $($Ua.WorkRoot) is refused: $why" } }
+  # valid is enough here (LanQueue's rule, no '.' part, not a whole drive); whether it may be excluded is decided per
+  # item (Get-ExcludeProblem), so a work_root inside a profile skips only that exclusion, with a note
+  if ($null -ne $Ua.WorkRoot -and "$($Ua.WorkRoot)".Replace('\', '/') -match '(^|/)\.(/|$)') { return '-WorkRoot must not have a . part (like C:/lq/.)' }
   return ''
 }
 

@@ -105,7 +105,8 @@ symbolic link anywhere on the existing path. The fix also requires the folder to
 Administrators, SYSTEM or you ("create the folder first"), and checks all of this again right before the change.
 
 `-WorkRoot` itself only has to be a valid LanQueue work_root for the scan (a drive path with no `.` part, not a whole
-drive), so a work_root inside a profile still scans; `defender.paths` then says it cannot be excluded and why.
+drive), in the scan and in the fix script, so a work_root inside a profile still scans and the other fixes still run;
+`defender.paths` and the fix then say it cannot be excluded and why (the NuGet cache is still offered when it qualifies).
 
 ### The curated list
 
