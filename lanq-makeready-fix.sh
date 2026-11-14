@@ -21,7 +21,7 @@
 #
 # Usage: sh lanq-makeready-fix.sh [--tune] [--dry-run] | --undo FILE | --list
 # Exit:  0 = done or nothing to do, 1 = a change failed or did not verify, 2 = bad arguments or a rejected record,
-#        3 = refused (over SSH, from stdin, no interactive console).
+#        3 = refused (over SSH, from stdin, no interactive console; --tune inside a container).
 
 TOOL_VERSION=0.5.0
 RECORD_SCHEMA=lanq-makeready-fix/v1
@@ -128,7 +128,7 @@ valid_state() { # $1 id, $2 text
     ssh.start) printf '%s\n' "$2" | grep -qxE 'unit=(ssh|sshd) enabled=(enabled|disabled) active=(active|inactive)' ;;
     power.sleep) printf '%s\n' "$2" | grep -qxE 'sleep=[a-z-]{1,20} suspend=[a-z-]{1,20} hibernate=[a-z-]{1,20} hybrid-sleep=[a-z-]{1,20}' ;;
     sysctl.tune) printf '%s\n' "$2" | grep -qxE 'file=(absent|lanq) instances=[0-9]{1,10} watches=[0-9]{1,10}' ;;
-    journald.cap) printf '%s\n' "$2" | grep -qxE 'file=(absent|lanq)' ;;
+    journald.cap) printf '%s\n' "$2" | grep -qxE 'file=(absent|lanq) dir=(absent|present) sys=(own|none) run=(own|none)' ;;
     services.unused) printf '%s\n' "$2" | grep -qxE 'svc=[a-z][a-z0-9-]{0,31}( (service|socket|path)=(enabled|disabled|none):(active|inactive)){1,3}' || return 1
       _sv=$(field "$2" svc); svc_known "$_sv" || return 1
       [ "$(printf '%s\n' "$2" | tr ' ' '\n' | sed -n '2,$s/=.*//p' | tr '\n' ' ')" = "$(for _u in $(svc_units "$_sv"); do printf '%s ' "${_u##*.}"; done)" ] ;;
@@ -141,7 +141,7 @@ state_of() { # $1 key (an id, or services.unused:<service>) -> state text, empty
     ssh.start) _u=$(ssh_unit) || return 0; _t="unit=$_u enabled=$(unit_enabled "$_u.service") active=$(unit_active "$_u.service")" ;;
     power.sleep) _t="sleep=$(unit_enabled sleep.target) suspend=$(unit_enabled suspend.target) hibernate=$(unit_enabled hibernate.target) hybrid-sleep=$(unit_enabled hybrid-sleep.target)" ;;
     sysctl.tune) _t="file=$(dropin_state "$(sysctl_dropin)" "$SYSCTL_MARK") instances=$(proc_num fs/inotify/max_user_instances) watches=$(proc_num fs/inotify/max_user_watches)" ;;
-    journald.cap) _t="file=$(dropin_state "$(journald_dropin)" "$JOURNALD_MARK")" ;;
+    journald.cap) _t="file=$(dropin_state "$(journald_dropin)" "$JOURNALD_MARK") dir=$(if [ -d "$(journald_dir)" ]; then echo present; else echo absent; fi) $(journald_own)" ;;
     services.unused:*) _t=$(svc_state "${1#*:}") ;;
     fstrim.timer) _t="enabled=$(unit_enabled fstrim.timer) active=$(unit_active fstrim.timer)" ;;
     *) return 0 ;;
@@ -200,10 +200,11 @@ journal_finding() { # $1 persistent KB, $2 volatile (/run, RAM) KB, $3 SystemMax
   if [ "$4" = - ] && [ "$2" -ge 262144 ]; then echo INFO; return 0; fi
   echo OK
 }
-svc_offer() { # $1 service key, $2 desktop running (yes|no) -> fix | report | none (none: not worth a line on this machine)
+svc_offer() { # $1 service key, $2 desktop running (yes|no), $3 Bluetooth input device (yes|no) -> fix | report | none
   case "$1" in
     cups-browsed) echo fix ;;
-    cups|bluetooth|modemmanager) if [ "$2" = yes ]; then echo none; else echo fix; fi ;;
+    bluetooth) if [ "$2" = yes ] || [ "$3" = yes ]; then echo none; else echo fix; fi ;;
+    cups|modemmanager) if [ "$2" = yes ]; then echo none; else echo fix; fi ;;
     avahi) if [ "$2" = yes ]; then echo none; else echo report; fi ;;
     *) echo none ;;
   esac
@@ -221,7 +222,19 @@ trim_disks() { # non-rotational disks that accept discard (TRIM)
 # end of the copied tune functions
 
 sysctl_dropin() { echo "$R/etc/sysctl.d/99-zz-lanq-makeready.conf"; }
-journald_dropin() { echo "$R/etc/systemd/journald.conf.d/99-zz-lanq-makeready.conf"; }
+journald_dir() { echo "$R/etc/systemd/journald.conf.d"; }
+journald_dropin() { echo "$(journald_dir)/99-zz-lanq-makeready.conf"; }
+journald_confs() { # journald.conf and its drop-ins in the order journald reads them; $1 = skip this script's drop-in
+  for _x in "$R"/etc/systemd/journald.conf "$R"/usr/lib/systemd/journald.conf.d/*.conf "$R"/run/systemd/journald.conf.d/*.conf "$R"/etc/systemd/journald.conf.d/*.conf; do
+    [ "${1:-}" = own ] && [ "$_x" = "$(journald_dropin)" ] && continue
+    [ -r "$_x" ] && cat "$_x"
+  done
+}
+journald_own() { # "sys=own|none run=own|none": the caps set by the admin (this script's drop-in left out)
+  _lim=$(journald_confs own | journald_limits)
+  if [ "${_lim%% *}" = - ]; then printf 'sys=none '; else printf 'sys=own '; fi
+  if [ "${_lim#* }" = - ]; then printf 'run=none'; else printf 'run=own'; fi
+}
 svc_units() { # the FIXED unit table: service key -> its units (never read from a record)
   case "$1" in
     cups) echo "cups.service cups.socket cups.path" ;;
@@ -251,7 +264,30 @@ svc_pick() { # $1 services.unused state, $2 on|enabled|active -> the matching un
   printf '%s' "$_o"
 }
 any_on() { printf '%s\n' "$1" | tr ' ' '\n' | grep -qE '=enabled:|:active$'; }
-desktop() { if [ "$(unit_active display-manager.service)" = active ]; then echo yes; else echo no; fi; }
+lc_sessions() { # logind session ids (nothing without loginctl)
+  command -v loginctl >/dev/null 2>&1 || return 0
+  if command -v timeout >/dev/null 2>&1; then timeout 5 loginctl list-sessions --no-legend 2>/dev/null | awk '{ print $1 }'
+  else loginctl list-sessions --no-legend 2>/dev/null | awk '{ print $1 }'; fi
+}
+lc_type() { # $1 session id -> "Type=..."
+  case "$1" in ''|*[!A-Za-z0-9]*) return 0 ;; esac
+  if command -v timeout >/dev/null 2>&1; then timeout 5 loginctl show-session "$1" -p Type 2>/dev/null
+  else loginctl show-session "$1" -p Type 2>/dev/null; fi
+}
+# A desktop in use: a display manager, or a logind session of type x11 or wayland (the tune scan's rule)
+desktop() {
+  if [ "$(unit_active display-manager.service)" = active ]; then echo yes; return 0; fi
+  for _sid in $(lc_sessions); do case "$(lc_type "$_sid")" in Type=x11|Type=wayland) echo yes; return 0 ;; esac; done
+  echo no
+}
+bt_input() { for _h in "$R"/sys/bus/hid/devices/0005:*; do [ -e "$_h" ] && return 0; done; return 1; } # a Bluetooth keyboard, mouse or pad
+bt_flag() { if bt_input; then echo yes; else echo no; fi; }
+virt_container() { command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt -c -q 2>/dev/null; }
+fx_container() { # docker, podman, LXC, systemd-nspawn (the tune scan's rule)
+  [ -e "$R/.dockerenv" ] || [ -e "$R/run/.containerenv" ] || [ -s "$R/run/systemd/container" ] && return 0
+  grep -qE '(docker|lxc|kubepods|containerd|libpod)' "$R/proc/1/cgroup" 2>/dev/null && return 0
+  virt_container
+}
 dropin_state() { # $1 file, $2 its first line when this script wrote it -> absent | lanq | other
   if [ ! -e "$1" ] && [ ! -L "$1" ]; then echo absent
   elif [ -f "$1" ] && [ ! -L "$1" ] && [ "$(head -n 1 "$1" 2>/dev/null)" = "$2" ]; then echo lanq
@@ -272,14 +308,23 @@ sysctl_text() { # $1 before state -> the drop-in text
   echo "$SYSCTL_MARK"
   for _a in $(sysctl_args "$1" apply); do echo "${_a%%=*} = ${_a#*=}"; done
 }
-journald_text() { printf '%s\n[Journal]\nSystemMaxUse=1G\nRuntimeMaxUse=256M\n' "$JOURNALD_MARK"; }
+journald_keys() { # $1 journald.cap before state -> the caps this fix writes: only those the admin has not set
+  _o=""
+  [ "$(field "$1" sys)" = none ] && _o="SystemMaxUse=1G"
+  [ "$(field "$1" run)" = none ] && _o="$_o${_o:+ }RuntimeMaxUse=256M"
+  printf '%s' "$_o"
+}
+journald_text() { # $1 before state
+  printf '%s\n[Journal]\n' "$JOURNALD_MARK"
+  for _k in $(journald_keys "$1"); do echo "$_k"; done
+}
 dir_kb() { # size of a folder in KB, bounded (0 when absent or unreadable)
   [ -d "$1" ] || { echo 0; return 0; }
   if command -v timeout >/dev/null 2>&1; then _k=$(timeout 10 du -sk -- "$1" 2>/dev/null | head -n 1); else _k=$(du -sk -- "$1" 2>/dev/null | head -n 1); fi
   _k=${_k%%[!0-9]*}; if is_num "$_k"; then echo "$_k"; else echo 0; fi
 }
 journal_need() { # true when the tune scan reports journald.size INFO
-  _lim=$(for _x in "$R"/etc/systemd/journald.conf "$R"/usr/lib/systemd/journald.conf.d/*.conf "$R"/run/systemd/journald.conf.d/*.conf "$R"/etc/systemd/journald.conf.d/*.conf; do [ -r "$_x" ] && cat "$_x"; done | journald_limits)
+  _lim=$(journald_confs | journald_limits)
   [ "$(journal_finding "$(dir_kb "$R/var/log/journal")" "$(dir_kb "$R/run/log/journal")" "${_lim%% *}" "${_lim#* }")" = INFO ]
 }
 trim_need() { # an SSD that accepts TRIM, and / not mounted with discard (the tune scan's rule)
@@ -312,8 +357,8 @@ needed() { # $1 id, $2 state
       case "$(sleep_risk)" in sleeps|desktop) return 0 ;; esac
       return 1 ;;
     sysctl.tune) [ "$(field "$2" file)" = absent ] && [ "$(inotify_finding "$(field "$2" instances)" "$(field "$2" watches)")" != OK ] ;;
-    journald.cap) [ "$(field "$2" file)" = absent ] && journal_need ;;
-    services.unused:*) [ "$(svc_offer "${1#*:}" "$(desktop)")" = fix ] && any_on "$2" ;;
+    journald.cap) [ "$(field "$2" file)" = absent ] && [ -n "$(journald_keys "$2")" ] && journal_need ;;
+    services.unused:*) [ "$(svc_offer "${1#*:}" "$(desktop)" "$(bt_flag)")" = fix ] && any_on "$2" ;;
     fstrim.timer) [ "$(field "$2" enabled)" = disabled ] && trim_need ;;
     *) return 1 ;;
   esac
@@ -341,7 +386,9 @@ note_of() { # $1 id -> why a fix the scanner would report is not offered (empty:
       [ "$(dropin_state "$(journald_dropin)" "$JOURNALD_MARK")" = absent ] && return 0
       journal_need && echo "$(journald_dropin) exists already (from an earlier run or written by hand); this script writes it only when it is absent" ;;
     services.unused:*)
-      _sv=${1#*:}; [ "$(svc_offer "$_sv" "$(desktop)")" = fix ] || return 0
+      _sv=${1#*:}
+      if [ "$_sv" = bluetooth ] && [ "$(desktop)" = no ] && bt_input && any_on "$(svc_state bluetooth)"; then echo "a Bluetooth keyboard, mouse or other input device is connected (/sys/bus/hid/devices/0005:*), so bluetooth stays on"; return 0; fi
+      [ "$(svc_offer "$_sv" "$(desktop)" "$(bt_flag)")" = fix ] || return 0
       _st=$(svc_state "$_sv")
       if ! valid_state services.unused "$_st" && any_on "$_st"; then echo "a unit is in a state this script does not change ($_st); it handles only units that are enabled, disabled or missing and active or inactive, so change it yourself if you want"; fi ;;
   esac
@@ -362,7 +409,7 @@ expected_after() {
     ssh.start) echo "unit=$(field "$2" unit) enabled=enabled active=active" ;;
     power.sleep) echo "sleep=masked suspend=masked hibernate=masked hybrid-sleep=masked" ;;
     sysctl.tune) echo "file=lanq instances=$(raise_to "$(field "$2" instances)" "$INOTIFY_INSTANCES") watches=$(raise_to "$(field "$2" watches)" "$INOTIFY_WATCHES")" ;;
-    journald.cap) echo "file=lanq" ;;
+    journald.cap) echo "file=lanq dir=present sys=$(field "$2" sys) run=$(field "$2" run)" ;;
     services.unused:*) printf '%s\n' "$2" | awk '{ for (i = 2; i <= NF; i++) { sub(/=enabled:/, "=disabled:", $i); sub(/:active$/, ":inactive", $i) } print }' ;;
     fstrim.timer) echo "enabled=enabled active=active" ;;
   esac
@@ -377,11 +424,30 @@ check_of() {
     fstrim.timer) echo "fstrim: an SSD that accepts TRIM, but fstrim.timer is disabled" ;;
   esac
 }
+# Undo succeeded when the state is back to before. services.unused: each unit has its enabled state back, and every unit
+# that was active is active again (starting cups.path or cups.socket may start cups.service too). journald.cap: the
+# folder this fix created may stay when something else put files in it.
+undo_ok() { # $1 key, $2 state now, $3 before
+  case "$1" in
+    services.unused:*)
+      [ -n "$2" ] && [ "$(field "$2" svc)" = "$(field "$3" svc)" ] || return 1
+      for _u in $(svc_units "$(field "$3" svc)"); do
+        _n=$(field "$2" "${_u##*.}"); _b=$(field "$3" "${_u##*.}")
+        [ "${_n%%:*}" = "${_b%%:*}" ] || return 1
+        [ "${_b#*:}" = inactive ] || [ "${_n#*:}" = active ] || return 1
+      done ;;
+    journald.cap)
+      [ "$2" = "$3" ] && return 0
+      [ "$(field "$3" dir)" = absent ] && [ "$(field "$2" dir)" = present ] || return 1
+      [ "$(printf '%s' "$2" | sed 's/ dir=present / dir=absent /')" = "$3" ] && [ -n "$(ls -A -- "$(journald_dir)" 2>/dev/null)" ] ;;
+    *) [ "$2" = "$3" ] ;;
+  esac
+}
 summary() {
   case "$1" in
     ssh.start) echo "$(field "$2" unit).service is $(field "$2" active), $(field "$2" enabled) at boot" ;;
     sysctl.tune) echo "max_user_instances $(field "$2" instances), max_user_watches $(field "$2" watches); $(sysctl_dropin) is $(field "$2" file)" ;;
-    journald.cap) echo "$(journald_dropin) is $(field "$2" file)" ;;
+    journald.cap) echo "$(journald_dropin) is $(field "$2" file); caps of your own: SystemMaxUse $(field "$2" sys), RuntimeMaxUse $(field "$2" run)" ;;
     fstrim.timer) echo "fstrim.timer is $(field "$2" active), $(field "$2" enabled) at boot" ;;
     *) echo "$2" ;;
   esac
@@ -402,8 +468,13 @@ fix_command() { # $1 key, $2 apply|undo, $3 before
     "power.sleep|undo") echo "systemctl unmask $(to_mask "$3")" ;;
     "sysctl.tune|apply") echo "write $(sysctl_dropin): $(sysctl_args "$3" apply)"; echo "sysctl -w $(sysctl_args "$3" apply)" ;;
     "sysctl.tune|undo") echo "rm $(sysctl_dropin)"; echo "sysctl -w $(sysctl_args "$3" undo)" ;;
-    "journald.cap|apply") echo "write $(journald_dropin): SystemMaxUse=1G RuntimeMaxUse=256M"; echo "systemctl restart systemd-journald.service" ;;
-    "journald.cap|undo") echo "rm $(journald_dropin)"; echo "systemctl restart systemd-journald.service" ;;
+    "journald.cap|apply")
+      [ "$(field "$3" dir)" = absent ] && echo "mkdir -m 755 $(journald_dir)"
+      echo "write $(journald_dropin): $(journald_keys "$3")"; echo "systemctl restart systemd-journald.service" ;;
+    "journald.cap|undo")
+      echo "rm $(journald_dropin)"
+      [ "$(field "$3" dir)" = absent ] && echo "rmdir $(journald_dir) when empty"
+      echo "systemctl restart systemd-journald.service" ;;
     "services.unused|apply") echo "systemctl disable --now $(svc_pick "$3" on)" ;;
     "services.unused|undo")
       [ -n "$(svc_pick "$3" enabled)" ] && echo "systemctl enable $(svc_pick "$3" enabled)"
@@ -419,7 +490,7 @@ fix_command() { # $1 key, $2 apply|undo, $3 before
 put_file() { # $1 path, $2 text
   _pd=${1%/*}
   [ -L "$_pd" ] && return 1
-  mkdir -p -- "$_pd" || return 1
+  [ -d "$_pd" ] || mkdir -m 755 -- "$_pd" || return 1
   _pt=$(mktemp "$_pd/.lanq-makeready.XXXXXX") || return 1
   if printf '%s\n' "$2" > "$_pt" && mv -f -- "$_pt" "$1"; then return 0; fi
   rm -f -- "$_pt"
@@ -442,8 +513,11 @@ fix_change() { # $1 key, $2 apply|undo, $3 before
       rm -f -- "$(sysctl_dropin)" || _undo_rc=1
       sysctl -w $(sysctl_args "$3" undo) </dev/null >/dev/null || _undo_rc=1
       return "$_undo_rc" ;;
-    "journald.cap|apply") put_file "$(journald_dropin)" "$(journald_text)" && systemctl restart systemd-journald.service </dev/null ;;
-    "journald.cap|undo") rm -f -- "$(journald_dropin)" && systemctl restart systemd-journald.service </dev/null ;;
+    "journald.cap|apply") put_file "$(journald_dropin)" "$(journald_text "$3")" && systemctl restart systemd-journald.service </dev/null ;;
+    "journald.cap|undo")
+      rm -f -- "$(journald_dropin)" || return 1
+      if [ "$(field "$3" dir)" = absent ] && [ -z "$(ls -A -- "$(journald_dir)" 2>/dev/null)" ]; then rmdir -- "$(journald_dir)" || return 1; fi
+      systemctl restart systemd-journald.service </dev/null ;;
     "services.unused|apply") systemctl disable --now $(svc_pick "$3" on) </dev/null ;;
     "services.unused|undo")
       _undo_rc=0
@@ -606,9 +680,10 @@ show_fix() { # id state
   fi
   case "$1" in
     sysctl.tune) out "  note:    raises the limits now and at every boot (the file is read at boot); it never lowers a value" ;;
-    journald.cap) out "  WARNING: when journald restarts it deletes the oldest journal files down to the new caps (1 GB on disk, 256 MB in /run). Undo removes the caps, but the deleted logs cannot be restored." ;;
+    journald.cap) out "  WARNING: when journald restarts it deletes the oldest journal files down to the new caps ($(journald_keys "$2"); caps you set yourself are left as they are). Undo removes the caps, but the deleted logs cannot be restored." ;;
     services.unused:cups) out "  note:    cups-browsed needs cups, so it stops too while cups is stopped; printing from this machine stops" ;;
     services.unused:bluetooth) out "  note:    Bluetooth keyboards, mice and headsets stop working on this machine" ;;
+    services.unused:modemmanager) out "  note:    a mobile-broadband (cellular modem) connection on this machine drops and does not come back until ModemManager runs again" ;;
   esac
   fix_command "$1" apply "$2" | while IFS= read -r _c; do out "  command: $_c"; done
   fix_command "$1" undo "$2" | while IFS= read -r _c; do out "  undo:    $_c"; done
@@ -689,7 +764,7 @@ do_undo() { # $1 record file
     if [ "$(state_of "$_key")" != "$_a" ]; then out "  changed since; left alone"; continue; fi
     fix_change "$_key" undo "$_b"; _rc=$?
     _now=$(state_of "$_key")
-    if [ "$_rc" = 0 ] && [ "$_now" = "$_b" ]; then
+    if [ "$_rc" = 0 ] && undo_ok "$_key" "$_now" "$_b"; then
       set_item "$_s" undone "$(now_utc)" "$_a"
       if save_record; then out "  undone and verified"; else _failed=$((_failed + 1)); fi
     else _failed=$((_failed + 1)); out "  FAILED (exit $_rc; now: $_now)"; fi
@@ -750,6 +825,7 @@ main() {
   umask 077
   if [ "$MODE" = list ]; then do_list; return $?; fi
   if ! have_systemd; then out "lanq-makeready-fix: systemd is not running here, so no fix applies (nothing changed)"; return 0; fi
+  if [ "$_tune" = 1 ] && fx_container; then err "lanq-makeready-fix: refused: this is a container (docker, podman, LXC or systemd-nspawn). The tune fixes change host settings; run them on the host. Nothing was changed."; return 3; fi
   case "$MODE" in
     undo) do_undo "$UNDO_FILE" ;;
     dry) do_apply 1 ;;

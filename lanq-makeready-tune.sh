@@ -44,7 +44,7 @@ tadvice() {
 
 add_item() { # id title status detail advice-key needs-admin-to-read fix-id(or empty) security(true|false)
   _adv=$(tadvice "$5")
-  if [ "${REDACT:-0}" = 1 ]; then _det=$(rv "$4"); _adv=$(rv "$_adv"); else _det=$4; fi
+  if [ "${REDACT:-0}" = 1 ]; then _det=$(rv "$4"); else _det=$4; fi   # advice is fixed text: never rewritten
   ITEMS="${ITEMS}$1${SEP}$2${SEP}$3${SEP}${_det}${SEP}${_adv}${SEP}${6:-false}${SEP}${7:-}${SEP}${8:-false}${NL}"
 }
 item_status() { printf '%s' "$ITEMS" | awk -F"$SEP" -v i="$1" '$1 == i { print $3 }'; }
@@ -107,10 +107,11 @@ journal_finding() { # $1 persistent KB, $2 volatile (/run, RAM) KB, $3 SystemMax
   if [ "$4" = - ] && [ "$2" -ge 262144 ]; then echo INFO; return 0; fi
   echo OK
 }
-svc_offer() { # $1 service key, $2 desktop running (yes|no) -> fix | report | none (none: not worth a line on this machine)
+svc_offer() { # $1 service key, $2 desktop running (yes|no), $3 Bluetooth input device (yes|no) -> fix | report | none
   case "$1" in
     cups-browsed) echo fix ;;
-    cups|bluetooth|modemmanager) if [ "$2" = yes ]; then echo none; else echo fix; fi ;;
+    bluetooth) if [ "$2" = yes ] || [ "$3" = yes ]; then echo none; else echo fix; fi ;;
+    cups|modemmanager) if [ "$2" = yes ]; then echo none; else echo fix; fi ;;
     avahi) if [ "$2" = yes ]; then echo none; else echo report; fi ;;
     *) echo none ;;
   esac
@@ -157,12 +158,23 @@ mb() { echo $(( $1 / 1024 )); }
 have_systemd() { [ -d "$R/run/systemd/system" ] && have systemctl; }
 unit_en() { _v=$(run_t 5 systemctl is-enabled "$1" 2>/dev/null | head -n 1); echo "${_v:-none}"; }
 unit_act() { _v=$(run_t 5 systemctl is-active "$1" 2>/dev/null | head -n 1); echo "${_v:-unknown}"; }
-in_container() {
-  [ -e "$R/.dockerenv" ] || [ -e "$R/run/.containerenv" ] && return 0
-  grep -qE '(docker|lxc|kubepods|containerd|libpod)' "$R/proc/1/cgroup" 2>/dev/null
+in_container() { # docker, podman, LXC, systemd-nspawn
+  [ -e "$R/.dockerenv" ] || [ -e "$R/run/.containerenv" ] || [ -s "$R/run/systemd/container" ] && return 0
+  grep -qE '(docker|lxc|kubepods|containerd|libpod)' "$R/proc/1/cgroup" 2>/dev/null && return 0
+  have systemd-detect-virt && run_t 5 systemd-detect-virt -c -q 2>/dev/null
 }
 is_root() { [ "$(id -u 2>/dev/null)" = 0 ]; }
-desktop_running() { have_systemd && [ "$(unit_act display-manager.service)" = active ]; }
+gui_session() { # a logind session of type x11 or wayland (a desktop in use, even without a display manager)
+  have loginctl || return 1
+  for _sid in $(run_t 5 loginctl list-sessions --no-legend 2>/dev/null | awk '{ print $1 }'); do
+    case "$_sid" in ''|*[!A-Za-z0-9]*) continue ;; esac
+    due 5 || return 1
+    case "$(run_t 5 loginctl show-session "$_sid" -p Type 2>/dev/null)" in Type=x11|Type=wayland) return 0 ;; esac
+  done
+  return 1
+}
+desktop_running() { have_systemd && { [ "$(unit_act display-manager.service)" = active ] || gui_session; }; }
+bt_input() { for _h in "$R"/sys/bus/hid/devices/0005:*; do [ -e "$_h" ] && return 0; done; return 1; } # a Bluetooth keyboard, mouse or pad
 # A host-level check: SKIP inside a container (it would describe the host, which the container cannot change),
 # and SKIP when the scan's time budget is spent.
 host_check() { # id title seconds
@@ -218,12 +230,14 @@ check_journald() {
 }
 
 check_services() {
-  host_check services.unused "Services a build box rarely needs" 40 || return 0
+  host_check services.unused "Services a build box rarely needs" 5 || return 0
   if ! have_systemd; then add_item services.unused "Services a build box rarely needs" SKIP "systemd is not running here" "" false "" false; return 0; fi
   _dt=no; desktop_running && _dt=yes
+  _bt=no; bt_input && _bt=yes
   _found=""; _st=OK; _fix=""; _sec=false; _key=""; _late=no
   for _e in cups:cups.service:cups.socket:cups.path cups-browsed:cups-browsed.service avahi:avahi-daemon.service:avahi-daemon.socket bluetooth:bluetooth.service modemmanager:ModemManager.service; do
-    _svc=${_e%%:*}; _o=$(svc_offer "$_svc" "$_dt")
+    _svc=${_e%%:*}; _o=$(svc_offer "$_svc" "$_dt" "$_bt")
+    [ "$_late" = yes ] && break
     [ "$_o" = none ] && continue
     _on=""
     for _u in $(printf '%s' "${_e#*:}" | tr ':' ' '); do
@@ -239,13 +253,16 @@ check_services() {
     if [ "$_svc" = cups-browsed ]; then _st=WARN; _sec=true; fi
   done
   if [ "$_late" = yes ]; then add_item services.unused "Services a build box rarely needs" SKIP "time budget: the scan stopped during this probe" "" false "" false; return 0; fi
-  if [ "$_st" = OK ]; then add_item services.unused "Services a build box rarely needs" OK "none of cups, cups-browsed, avahi-daemon, bluetooth, ModemManager is enabled or running$( [ "$_dt" = yes ] && echo ' (a desktop is running, so only cups-browsed is checked)')" "" false "" false; return 0; fi
+  _note=""; [ "$_dt" = yes ] && _note=" (a desktop is in use, so only cups-browsed is checked)"
+  [ "$_dt" = no ] && [ "$_bt" = yes ] && _note=" (a Bluetooth input device is connected, so bluetooth is left out)"
+  if [ "$_st" = OK ]; then add_item services.unused "Services a build box rarely needs" OK "none of cups, cups-browsed, avahi-daemon, bluetooth, ModemManager is enabled or running$_note" "" false "" false; return 0; fi
+  _found="$_found$_note"
   case "$_found" in *avahi*) [ "$_key" = svc.fix ] && _found="$_found (avahi-daemon is report only: host.local names)" ;; esac
   add_item services.unused "Services a build box rarely needs" "$_st" "$_found" "$_key" false "$_fix" "$_sec"
 }
 
 check_unattended() {
-  host_check unattended.reboot "Automatic update reboots" 10 || return 0
+  host_check unattended.reboot "Automatic update reboots" 5 || return 0
   _parts=""
   if [ -x "$R/usr/bin/unattended-upgrade" ] || [ -d "$R/etc/apt/apt.conf.d" ]; then
     _v=$(for _x in "$R"/etc/apt/apt.conf "$R"/etc/apt/apt.conf.d/*; do [ -f "$_x" ] && [ -r "$_x" ] && cat "$_x"; done | apt_values)
@@ -258,9 +275,14 @@ check_unattended() {
   if [ -z "$_parts" ] && [ -r "$R/etc/dnf/automatic.conf" ]; then
     _v=$(dnf_values < "$R/etc/dnf/automatic.conf"); set -- $_v
     _timer=no
-    if have_systemd; then for _u in dnf-automatic.timer dnf-automatic-install.timer dnf5-automatic.timer; do [ "$(unit_en "$_u")" = enabled ] && _timer=yes; done; fi
+    _inst=no
+    if have_systemd; then for _u in dnf-automatic.timer dnf-automatic-install.timer dnf5-automatic.timer; do
+      due 5 || { add_item unattended.reboot "Automatic update reboots" SKIP "time budget: the scan stopped during this probe" "" false "" false; return 0; }
+      [ "$(unit_en "$_u")" = enabled ] || continue
+      _timer=yes; [ "$_u" = dnf-automatic-install.timer ] && _inst=yes
+    done; fi
     case "$2" in when-changed|when-needed)
-      if [ "$_timer" = yes ] && { [ "$1" = yes ] || [ "$(unit_en dnf-automatic-install.timer)" = enabled ]; }; then _parts=$(reboot_finding 06:00 "$HOURS" dnf-automatic); fi ;;
+      if [ "$_timer" = yes ] && { [ "$1" = yes ] || [ "$_inst" = yes ]; }; then _parts=$(reboot_finding 06:00 "$HOURS" dnf-automatic); fi ;;
     esac
   fi
   if [ -z "$_parts" ]; then add_item unattended.reboot "Automatic update reboots" OK "no automatic reboot after updates is set up (unattended-upgrades, dnf-automatic)" "" false "" false; return 0; fi
@@ -269,10 +291,11 @@ check_unattended() {
 }
 
 check_pkgcache() {
-  due 30 || { add_item pkgcache "Package cache" SKIP "time budget: the scan stopped before this probe" "" false "" false; return 0; }
+  due 1 || { add_item pkgcache "Package cache" SKIP "time budget: the scan stopped before this probe" "" false "" false; return 0; }
   _t=0; _w=""
   for _d in var/cache/apt/archives var/cache/dnf var/cache/yum var/cache/apk var/cache/pacman/pkg var/cache/zypp/packages; do
     [ -d "$R/$_d" ] || continue
+    due 10 || { add_item pkgcache "Package cache" SKIP "time budget: the scan stopped during this probe" "" false "" false; return 0; }
     _k=$(dir_kb "$R/$_d"); _t=$((_t + _k)); _w="$_w${_w:+, }/$_d $(mb "$_k") MB"
   done
   if [ -z "$_w" ]; then add_item pkgcache "Package cache" OK "no package cache folder found" "" false "" false
@@ -404,6 +427,7 @@ render_json() {
   printf '  "host": {'
   if [ "$REDACT" = 1 ]; then printf '"hostname": "<redacted>", "user": "<redacted>", '; else printf '"hostname": "%s", "user": "%s", ' "$(json_esc "$F_HOST")" "$(json_esc "$F_USER")"; fi
   _os=${F_OSNAME:-$F_OS}; [ "$REDACT" = 1 ] && _os=$(rv "$_os")
+  _os=$(printf '%s' "$_os" | cut -c1-128)
   printf '"os": "%s", "arch": "%s"},\n' "$(json_esc "$_os")" "$(json_esc "$F_ARCH")"
   printf '  "context": {"container": %s, "elevated": %s' "${CONTAINER:-false}" "${ELEVATED:-false}"
   if [ -n "$WORK_ROOT" ]; then _wr=$WORK_ROOT; [ "$REDACT" = 1 ] && _wr=$(rv "$_wr"); printf ', "workRoot": "%s"' "$(json_esc "$_wr")"; fi

@@ -104,7 +104,7 @@ cmd_words() {
       }
     }' | sort -u
 }
-allowed=" printf echo awk sed tr cut head wc grep cat command id uname date sort uniq read test shift exit return true false break continue umask unalias type set ls cd pwd loginctl timeout gsettings du mkdir mktemp mv rm fi done esac then else elif do in while for if case until [ ]] "
+allowed=" printf echo awk sed tr cut head wc grep cat command id uname date sort uniq read test shift exit return true false break continue umask unalias type set ls cd pwd loginctl timeout gsettings du systemd-detect-virt mkdir mktemp mv rm fi done esac then else elif do in while for if case until [ ]] "
 forbidden=" sudo su doas pkexec chmod chown ln cp tee curl wget nc ssh scp dd eval bash sh exec source apt apt-get dnf yum apk "
 mutating='systemctl[^|;&]*[[:space:]](enable|disable|start|stop|restart|reload|try-restart|reload-or-restart|mask|unmask|daemon-reload|set-default|edit|kill|isolate|link|preset|preset-all|revert|reboot|poweroff|halt|suspend|hibernate|hybrid-sleep|set-property|set-environment)([[:space:]]|$)'
 fix_guard() { # FILE -> one line per violation
@@ -120,13 +120,13 @@ fix_guard() { # FILE -> one line per violation
   done
   for _w in $(printf '%s\n' "$_outside$nl$_inside" | cmd_words); do case "$forbidden" in *" $_w "*) echo "forbidden command word: $_w" ;; esac; done
   for _w in $(printf '%s\n' "$_inside" | cmd_words); do
-    case "$_w" in systemctl|sysctl|echo|printf|return|field|to_mask|svc_pick|sysctl_args|sysctl_text|sysctl_dropin|journald_text|journald_dropin|put_file|mkdir|mktemp|mv|rm|fix_command|fix_change|'esac'|'fi'|'done'|'then'|'else'|'elif') ;; *) echo "command word in FIXES other than systemctl, sysctl, the file writer and helpers: $_w" ;; esac
+    case "$_w" in systemctl|sysctl|echo|printf|return|field|to_mask|svc_pick|sysctl_args|sysctl_text|sysctl_dropin|journald_text|journald_dropin|journald_dir|journald_keys|put_file|mkdir|mktemp|mv|rm|rmdir|ls|fix_command|fix_change|'esac'|'fi'|'done'|'then'|'else'|'elif') ;; *) echo "command word in FIXES other than systemctl, sysctl, the file writer and helpers: $_w" ;; esac
   done
   printf '%s\n' "$_outside" | grep -vE '^[[:space:]]*#' | grep -nE "$mutating" | sed 's/^/mutating systemctl outside FIXES: /'
   printf '%s\n' "$_outside" | grep -vE '^[[:space:]]*#' | grep -nE '(^|[^A-Za-z_])sysctl[[:space:]]+-' | sed 's/^/sysctl outside FIXES: /'
   # per command, not per line: each command naming systemctl, loginctl, gsettings or timeout must be one of these reads
   printf '%s\n' "$_outside" | grep -vE '^[[:space:]]*#' | awk '{ sub(/[ \t]#.*$/, ""); n = split($0, a, /;|&&|[|][|]|[|]/); for (i = 1; i <= n; i++) if (a[i] ~ /systemctl|loginctl|gsettings|timeout/) print a[i] }' |
-    grep -vE '^[^"]*("[$][(])?(systemctl is-(enabled|active) "[$]1" 2>/dev/null|command -v (systemctl|loginctl|timeout|gsettings) >/dev/null 2>&1|timeout 10 du -sk -- "[$]1" 2>/dev/null |timeout 5 loginctl show-session "[$]1" -p Remote -p Service 2>/dev/null|loginctl show-session "[$]1" -p Remote -p Service 2>/dev/null|_gt=[$][(]gsettings get org[.]gnome[.]settings-daemon[.]plugins[.]power sleep-inactive-ac-type 2>/dev/null)' |
+    grep -vE '^[^"]*("[$][(])?(systemctl is-(enabled|active) "[$]1" 2>/dev/null|command -v (systemctl|loginctl|timeout|gsettings) >/dev/null 2>&1|timeout 10 du -sk -- "[$]1" 2>/dev/null |timeout 5 loginctl show-session "[$]1" -p Remote -p Service 2>/dev/null|loginctl show-session "[$]1" -p Remote -p Service 2>/dev/null|(timeout 5 )?loginctl list-sessions --no-legend 2>/dev/null |(timeout 5 )?loginctl show-session "[$]1" -p Type 2>/dev/null|systemd-detect-virt -c -q 2>/dev/null|_gt=[$][(]gsettings get org[.]gnome[.]settings-daemon[.]plugins[.]power sleep-inactive-ac-type 2>/dev/null)' |
     sed 's/^/a command outside FIXES that is not an allowed read: /'
   # awk programs never write or pipe; sed scripts never write (w) or run (e) anything
   printf '%s\n' "$_outside$nl$_inside" | grep -vE '^[[:space:]]*#' | grep 'awk' | awk -F"'" '{ for (i = 2; i <= NF; i += 2) { p = $i; gsub(/"[^"]*"/, "", p); if (length($i) > 1 && p ~ /[>|]|system|getline/) { print "awk program writes, pipes or runs: " $0; next } } }'
@@ -142,17 +142,20 @@ fix_guard() { # FILE -> one line per violation
     -e '  _t=$(mktemp "$_d/.fix.XXXXXX" 2>/dev/null) || { err "lanq-makeready-fix: cannot write in $_d"; return 1; }' \
     -e '  if render_record > "$_t" && mv -f -- "$_t" "$REC_PATH"; then return 0; fi' \
     -e '  rm -f -- "$_t"' | sed 's/^/file change other than the record: /'
-  printf '%s\n' "$_inside" | grep -vE '^[[:space:]]*#' | grep -E '(^|[^A-Za-z_])(rm|mv|mkdir|mktemp)[[:space:]]' | grep -vxF \
+  printf '%s\n' "$_inside" | grep -vE '^[[:space:]]*#' | grep -E '(^|[^A-Za-z_])(rm|rmdir|mv|mkdir|mktemp)[[:space:]]' | grep -vxF \
     -e '    "sysctl.tune|undo") echo "rm $(sysctl_dropin)"; echo "sysctl -w $(sysctl_args "$3" undo)" ;;' \
-    -e '    "journald.cap|undo") echo "rm $(journald_dropin)"; echo "systemctl restart systemd-journald.service" ;;' \
-    -e '  mkdir -p -- "$_pd" || return 1' \
+    -e '      [ "$(field "$3" dir)" = absent ] && echo "mkdir -m 755 $(journald_dir)"' \
+    -e '      echo "rm $(journald_dropin)"' \
+    -e '      [ "$(field "$3" dir)" = absent ] && echo "rmdir $(journald_dir) when empty"' \
+    -e '      if [ "$(field "$3" dir)" = absent ] && [ -z "$(ls -A -- "$(journald_dir)" 2>/dev/null)" ]; then rmdir -- "$(journald_dir)" || return 1; fi' \
+    -e '  [ -d "$_pd" ] || mkdir -m 755 -- "$_pd" || return 1' \
     -e '  _pt=$(mktemp "$_pd/.lanq-makeready.XXXXXX") || return 1' \
     -e '  if printf '"'"'%s\n'"'"' "$2" > "$_pt" && mv -f -- "$_pt" "$1"; then return 0; fi' \
     -e '  rm -f -- "$_pt"' \
     -e '      rm -f -- "$(sysctl_dropin)" || _undo_rc=1' \
-    -e '    "journald.cap|undo") rm -f -- "$(journald_dropin)" && systemctl restart systemd-journald.service </dev/null ;;' | sed 's/^/file change in FIXES other than the drop-ins: /'
+    -e '      rm -f -- "$(journald_dropin)" || return 1' | sed 's/^/file change in FIXES other than the drop-ins: /'
   # put_file writes only the two fixed drop-ins
-  printf '%s\n' "$_inside" | grep -o 'put_file [^&;]*' | grep -vxF -e 'put_file "$(sysctl_dropin)" "$(sysctl_text "$3")" ' -e 'put_file "$(journald_dropin)" "$(journald_text)" ' -e 'put_file() { ' | sed 's/^/put_file of another file: /'
+  printf '%s\n' "$_inside" | grep -o 'put_file [^&;]*' | grep -vxF -e 'put_file "$(sysctl_dropin)" "$(sysctl_text "$3")" ' -e 'put_file "$(journald_dropin)" "$(journald_text "$3")" ' -e 'put_file() { ' | sed 's/^/put_file of another file: /'
   printf '%s\n' "$_outside$nl$_inside" | awk "$scan_awk"'
     /^[ \t]*#/ { next }
     { raw = $0
@@ -202,6 +205,8 @@ awk '/^# endregion FIXES$/ { print "bad_in() { put_file /etc/passwd x; }" } { pr
 if [ -n "$(fix_guard "$mut_dir/m.sh")" ]; then ok "guard: put_file of another file inside FIXES is flagged"; else bad "guard put_file other" "not flagged" flagged; fi
 awk '/^# endregion FIXES$/ { print "bad_in2() { rm -f -- /etc/shadow; }" } { print }' "$fix" > "$mut_dir/m.sh"
 if [ -n "$(fix_guard "$mut_dir/m.sh")" ]; then ok "guard: rm of another file inside FIXES is flagged"; else bad "guard rm other" "not flagged" flagged; fi
+awk '/^# endregion FIXES$/ { print "bad_in3() { rmdir -- /etc/systemd; }" } { print }' "$fix" > "$mut_dir/m.sh"
+if [ -n "$(fix_guard "$mut_dir/m.sh")" ]; then ok "guard: rmdir of another folder inside FIXES is flagged"; else bad "guard rmdir other" "not flagged" flagged; fi
 awk '/^# region FIXES$/ { print; print "fix_x() { reboot; }"; next } { print }' "$fix" > "$mut_dir/m.sh"
 if [ -n "$(fix_guard "$mut_dir/m.sh")" ]; then ok "guard: a non-systemctl command inside FIXES is flagged"; else bad "guard inside FIXES" "not flagged" flagged; fi
 awk '/^# endregion FIXES$/ { print "# endregion FIXES" } { print }' "$fix" > "$mut_dir/m.sh"
@@ -253,7 +258,7 @@ record_dir_problem() { if [ -n "${FAKE_DIRBAD:-}" ]; then echo "the record folde
 sleep_risk() { echo "${FAKE_RISK:-sleeps}"; }
 audit_session_id() { :; }
 latest_record() { for _r in "$RECDIR"/fix-*.json; do [ -e "$_r" ] && _last=$_r; done; [ -n "${_last:-}" ] && echo "$_last"; _last=""; }
-systemctl() {
+fake_systemctl() {
   case "$1" in
     is-enabled) echo "$2" >> "$FAKE/reads"; cat "$FAKE/u.$2.en" 2>/dev/null || return 1; [ "$(cat "$FAKE/u.$2.en")" != disabled ] ;;
     is-active) _fv=$(cat "$FAKE/u.$2.act" 2>/dev/null || echo inactive); echo "$_fv"; [ "$_fv" = active ] ;;
@@ -280,7 +285,11 @@ sysctl() { # the fake: -w KEY=VALUE writes the fake root's /proc/sys file
   [ "$1" = -w ] || return 1; shift
   for _kv in "$@"; do printf '%s\n' "${_kv#*=}" > "$R/proc/sys/$(printf '%s' "${_kv%%=*}" | tr . /)"; done
 }
+lc_sessions() { cat "$FAKE/sessions" 2>/dev/null; }   # fake logind: one session id per line
+lc_type() { cat "$FAKE/type.$1" 2>/dev/null; }
+virt_container() { [ -e "$FAKE/virt" ]; }            # fake systemd-detect-virt -c
 dir_kb() { case "$1" in */var/log/journal) cat "$FAKE/jkb" 2>/dev/null || echo 0 ;; */run/log/journal) cat "$FAKE/rkb" 2>/dev/null || echo 0 ;; *) echo 0 ;; esac; }
+systemctl() { fake_systemctl "$@"; }
 if [ "$(type systemctl 2>/dev/null | head -n 1 | grep -c function)" = 1 ]; then ok "systemctl is the fake"; else echo "ABORT: systemctl is not faked"; exit 1; fi
 if [ "$(type sysctl 2>/dev/null | head -n 1 | grep -c function)" = 1 ]; then ok "sysctl is the fake"; else echo "ABORT: sysctl is not faked"; exit 1; fi
 reset_fake() { # everything fine: ssh enabled and active, sleep targets masked
@@ -289,7 +298,7 @@ reset_fake() { # everything fine: ssh enabled and active, sleep targets masked
   for t in sleep suspend hibernate hybrid-sleep; do echo masked > "$FAKE/u.$t.target.en"; done
   FAKE_ROOT=1; FAKE_CONSOLE=1; FAKE_OS=Linux; ON_ANSWER=""; FAKE_RISK=sleeps; FAKE_UNTRUSTED=""; FAKE_DIRBAD=""
   R=$FAKE/root   # tune reads: a fake root where every tune check is fine (no unit files: no services)
-  mkdir -p "$R/proc/sys/fs/inotify" "$R/etc" "$R/proc"; echo 8192 > "$R/proc/sys/fs/inotify/max_user_instances"; echo 524288 > "$R/proc/sys/fs/inotify/max_user_watches"
+  mkdir -p "$R/proc/sys/fs/inotify" "$R/etc/systemd" "$R/proc"; echo 8192 > "$R/proc/sys/fs/inotify/max_user_instances"; echo 524288 > "$R/proc/sys/fs/inotify/max_user_watches"
   printf '/dev/sda1 / ext4 rw,relatime 0 0\n' > "$R/proc/mounts"
 }
 setu() { echo "$2" > "$FAKE/u.$1"; } # setu ssh.service.en disabled
@@ -549,13 +558,13 @@ for fn in inotify_finding journald_limits journal_finding svc_offer trim_disks; 
   b=$(awk -v f="$fn() {" 'index($0, f) == 1 { p = 1 } p { print } p && /^}/ { exit }' "$fix")
   if [ -n "$a" ] && [ "$a" = "$b" ]; then ok "tune: $fn is the tune scan's, unchanged"; else bad "tune: $fn copy" differs same; fi
 done
-for s in 'sysctl.tune|file=absent instances=128 watches=8192' 'sysctl.tune|file=lanq instances=1024 watches=524288' 'journald.cap|file=absent' \
+for s in 'sysctl.tune|file=absent instances=128 watches=8192' 'sysctl.tune|file=lanq instances=1024 watches=524288' 'journald.cap|file=absent dir=absent sys=none run=none' 'journald.cap|file=lanq dir=present sys=own run=none' \
   'services.unused|svc=cups service=enabled:active socket=enabled:active path=none:inactive' 'services.unused|svc=modemmanager service=disabled:active' \
   'services.unused|svc=cups-browsed service=enabled:inactive' 'fstrim.timer|enabled=disabled active=inactive'; do
   if valid_state "${s%%|*}" "${s#*|}"; then ok "tune state accepted: $s"; else bad "tune state accepted: $s" rejected accepted; fi
 done
 for s in 'sysctl.tune|file=other instances=128 watches=8192' 'sysctl.tune|file=absent instances=x watches=8192' 'sysctl.tune|file=absent instances=128' \
-  'journald.cap|file=other' 'services.unused|svc=sshd service=enabled:active' 'services.unused|svc=cups service=enabled:active' \
+  'journald.cap|file=other dir=present sys=none run=none' 'journald.cap|file=absent' 'journald.cap|file=absent dir=absent sys=1G run=none' 'services.unused|svc=sshd service=enabled:active' 'services.unused|svc=cups service=enabled:active' \
   'services.unused|svc=cups-browsed service=masked:inactive' 'services.unused|svc=cups-browsed socket=enabled:active' 'services.unused|svc=Bluetooth service=enabled:active' \
   'services.unused|svc=avahi service=enabled:active' 'services.unused|svc=bluetooth service=enabled:active;reboot' 'fstrim.timer|enabled=static active=inactive'; do
   if valid_state "${s%%|*}" "${s#*|}"; then bad "tune state rejected: $s" accepted rejected; else ok "tune state rejected: $s"; fi
@@ -593,8 +602,56 @@ eq "$([ -e "$(sysctl_dropin)" ] && echo left || echo removed)" removed "sysctl.t
 case_tune "sysctl.tune (watches only)" 'echo 8192 > "$R/proc/sys/fs/inotify/max_user_watches"' \
   "sysctl -w fs.inotify.max_user_watches=524288" "sysctl -w fs.inotify.max_user_watches=8192"
 case_tune "journald.cap (2 GB journal)" 'echo 2000000 > "$FAKE/jkb"' "systemctl restart systemd-journald.service" "systemctl restart systemd-journald.service" \
-  'contains "$(cat "$(journald_dropin)")" "SystemMaxUse=1G" "journald.cap: the drop-in caps the journal"; contains "$OUT" "the deleted logs cannot be restored" "journald.cap: the prompt says trimmed logs cannot be restored"'
+  'contains "$(cat "$(journald_dropin)")" "SystemMaxUse=1G" "journald.cap: the drop-in caps the journal"; contains "$OUT" "the deleted logs cannot be restored" "journald.cap: the prompt says trimmed logs cannot be restored"; eq "$(ls -ld "$(journald_dir)" | cut -c1-10)" drwxr-xr-x "L2: journald.conf.d created with mode 755"; contains "$(cat "$rec")" "\"before\": \"file=absent dir=absent sys=none run=none\"" "L2: the record says the folder was absent"'
+eq "$([ -d "$(journald_dir)" ] && echo left || echo removed)" removed "L2: undo removes the empty journald.conf.d it created"
 case_tune "journald.cap (volatile journal in /run)" 'echo 300000 > "$FAKE/rkb"' "systemctl restart systemd-journald.service" "systemctl restart systemd-journald.service"
+case_tune "M1 journald.cap (SystemMaxUse set by hand, a big /run journal)" 'echo 300000 > "$FAKE/rkb"; mkdir -p "$(journald_dir)"; printf "[Journal]\nSystemMaxUse=3G\n" > "$(journald_dir)/10-admin.conf"' \
+  "systemctl restart systemd-journald.service" "systemctl restart systemd-journald.service" \
+  'eq "$(sed 1d "$(journald_dropin)")" "[Journal]${nl}RuntimeMaxUse=256M" "M1: only the unset key is written; the admin cap is kept"; contains "$OUT" "write $(journald_dropin): RuntimeMaxUse=256M" "M1: the command names only that key"; lacks "$OUT" "mkdir -m 755" "M1: the folder existed: no mkdir"'
+eq "$(cat "$(journald_dir)/10-admin.conf" 2>/dev/null | sed -n 2p)" "SystemMaxUse=3G" "M1: undo leaves the admin's drop-in and folder alone"
+reset_fake; echo 2000000 > "$FAKE/jkb"; echo 300000 > "$FAKE/rkb"; printf '[Journal]\nSystemMaxUse=3G\nRuntimeMaxUse=100M\n' > "$R/etc/systemd/journald.conf"; runfix '' --tune --dry-run
+lacks "$OUT" "journald.cap  (" "M1: both caps set by hand: never offered"
+reset_fake; echo 2000000 > "$FAKE/jkb"; runfix 'y\n' --tune; rec=$(latest_record); : > "$(journald_dir)/50-other.conf"; runfix 'y\n' --undo "$rec"
+contains "$OUT" "undone and verified" "L2: a folder something else put a file in stays, and undo still verifies"
+eq "$([ -e "$(journald_dir)/50-other.conf" ] && echo kept)" kept "L2: the other file is kept"
+
+echo "M2: desktop sessions, Bluetooth input devices, ModemManager"
+reset_fake; for u in cups.service bluetooth.service; do setu $u.en enabled; setu $u.act active; done; echo 3 > "$FAKE/sessions"; echo Type=wayland > "$FAKE/type.3"; runfix '' --tune --dry-run
+lacks "$OUT" "services.unused:cups  (" "M2: a wayland session (no display manager): cups not offered"; lacks "$OUT" "services.unused:bluetooth  (" "M2: a wayland session: bluetooth not offered"
+reset_fake; setu cups.service.en enabled; setu cups.service.act active; printf '3\n4\n' > "$FAKE/sessions"; echo Type=tty > "$FAKE/type.3"; echo Type=x11 > "$FAKE/type.4"; runfix '' --tune --dry-run
+lacks "$OUT" "services.unused:cups  (" "M2: an x11 session: cups not offered"
+reset_fake; setu cups.service.en enabled; setu cups.service.act active; echo 3 > "$FAKE/sessions"; echo Type=tty > "$FAKE/type.3"; runfix '' --tune --dry-run
+contains "$OUT" "services.unused:cups  (" "M2: only a tty session (headless): cups offered"
+reset_fake; setu bluetooth.service.en enabled; setu bluetooth.service.act active; mkdir -p "$R/sys/bus/hid/devices/0005:046D:B342.0001"; runfix '' --tune --dry-run
+lacks "$OUT" "services.unused:bluetooth  (check services.unused: bluetooth is enabled or running on a build box)${nl}" "M2: a Bluetooth HID device: bluetooth not offered"
+contains "$OUT" "not offered: a Bluetooth keyboard, mouse or other input device is connected" "M2: a Bluetooth HID device: a note says why"
+reset_fake; setu bluetooth.service.en enabled; setu bluetooth.service.act active; mkdir -p "$R/sys/bus/hid/devices/0003:046D:C52B.0002"; runfix '' --tune --dry-run
+contains "$OUT" "services.unused:bluetooth  (" "M2: only a USB HID device: bluetooth offered"
+reset_fake; setu ModemManager.service.en enabled; setu ModemManager.service.act active; runfix '' --tune --dry-run
+contains "$OUT" "a mobile-broadband (cellular modem) connection on this machine drops" "M2: the ModemManager prompt warns about mobile broadband"
+
+echo "L3: --tune refuses inside a container"
+for c in .dockerenv run/.containerenv; do
+  reset_fake; echo 128 > "$R/proc/sys/fs/inotify/max_user_instances"; mkdir -p "$R/run"; : > "$R/$c"; runfix 'y\n' --tune
+  if [ "$RC" = 3 ] && [ -z "$(calls)" ]; then ok "L3: /$c: --tune refused, exit 3"; else bad "L3 /$c" "$RC $(calls)" "3, none"; fi
+done
+reset_fake; echo 128 > "$R/proc/sys/fs/inotify/max_user_instances"; mkdir -p "$R/run/systemd"; echo lxc > "$R/run/systemd/container"; runfix 'y\n' --tune --dry-run
+eq "$RC" 3 "L3: /run/systemd/container (LXC, nspawn): refused"; contains "$OUT" "this is a container" "L3: says why"
+reset_fake; echo 128 > "$R/proc/sys/fs/inotify/max_user_instances"; : > "$FAKE/virt"; runfix 'y\n' --tune --dry-run; eq "$RC" 3 "L3: systemd-detect-virt -c: refused"
+reset_fake; : > "$R/.dockerenv"; unmask_all; runfix '' --dry-run; eq "$RC" 0 "L3: without --tune a container is not refused (the v1 fixes keep their rules)"
+
+echo "L6: cups undo tolerates a path or socket unit starting cups.service"
+eq "$(if undo_ok services.unused:cups 'svc=cups service=enabled:active socket=enabled:active path=enabled:active' 'svc=cups service=enabled:inactive socket=enabled:active path=enabled:active'; then echo ok; fi)" ok "L6: an extra active unit after undo is fine"
+eq "$(if undo_ok services.unused:cups 'svc=cups service=enabled:inactive socket=enabled:active path=enabled:active' 'svc=cups service=enabled:active socket=enabled:active path=enabled:active'; then echo ok; else echo no; fi)" no "L6: a unit that was active and is not: failed"
+eq "$(if undo_ok services.unused:cups 'svc=cups service=disabled:active socket=enabled:active path=enabled:active' 'svc=cups service=enabled:active socket=enabled:active path=enabled:active'; then echo ok; else echo no; fi)" no "L6: an enabled state not put back: failed"
+reset_fake; setu cups.path.en enabled; setu cups.path.act active; setu cups.service.en enabled; setu cups.service.act inactive; runfix 'y\n' --tune; rec=$(latest_record)
+systemctl() { # the fake, plus: starting cups.path starts cups.service as well (path activation)
+  case "$1" in start) case " $* " in *" cups.path "*) echo active > "$FAKE/u.cups.service.act" ;; esac ;; esac
+  fake_systemctl "$@"
+}
+runfix 'y\n' --undo "$rec"
+contains "$OUT" "undone and verified" "L6: cups.path started cups.service on undo: still undone and verified"; eq "$RC" 0 "L6: exit 0"
+systemctl() { fake_systemctl "$@"; }
 case_tune "services.unused (cups-browsed)" 'setu cups-browsed.service.en enabled; setu cups-browsed.service.act active' \
   "systemctl disable --now cups-browsed.service" "systemctl enable cups-browsed.service|systemctl start cups-browsed.service"
 case_tune "services.unused (cups: service and socket, no path unit)" 'setu cups.service.en enabled; setu cups.service.act active; setu cups.socket.en enabled; setu cups.socket.act active' \
@@ -668,7 +725,7 @@ tamper "service units that do not match the fixed table" 's/svc=cups-browsed ser
 tamper "service name with a command" 's/svc=cups-browsed /svc=cups-browsed;reboot /'
 tamper "unknown tune fix id" 's/"id": "services.unused"/"id": "services.all"/'
 reset_fake; echo 2000000 > "$FAKE/jkb"; runfix 'y\n' --tune; rec=$(latest_record)
-sed 's/"status": "applied"/"status": "pending"/' "$rec" > "$rec.x" && mv "$rec.x" "$rec"; rm -f "$(journald_dropin)"
+sed 's/"status": "applied"/"status": "pending"/' "$rec" > "$rec.x" && mv "$rec.x" "$rec"; rm -f "$(journald_dropin)"; rmdir "$(journald_dir)"
 runfix 'y\n' --undo "$rec"
 if [ -z "$(calls)" ]; then ok "journald.cap: pending and never applied: nothing run"; else bad "journald pending" "$(calls)" none; fi
 contains "$(cat "$rec")" '"status": "skipped"' "journald.cap: pending, never applied: marked skipped"
