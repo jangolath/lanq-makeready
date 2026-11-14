@@ -438,9 +438,14 @@ that already runs as admin or root on the PC.
 - Services: Start and DelayedAutostart come from the registry (PowerShell 5.1 cannot read Delayed Start) and are put
   back with `sc.exe config start=` (`delayed-auto` when needed). The delayed flag is compared only for automatic
   services.
-- Defender exclusions are not automated: whether a folder can be trusted (who can write to it, where it really is, what runs from it) is hard to verify safely from a script, and a wrong exclusion silently turns off scanning. An earlier draft of 0.5.0 had an exclusion fix with an allow-list, ACL, drive and final-path checks; review
-  kept finding ways around it, so it was removed before release. `-DefenderExclusions` exits 2, and the tune scan
-  gives the manual procedure. The scan-time fix (`defender.scantime`) stays; it is not an exclusion.
+- Defender exclusions (0.6.0): an earlier draft of 0.5.0 took a path and tried to prove it safe with a deny-list; four
+  review rounds each found a way around it, so 0.5.0 shipped report-only. 0.6.0 turns it around: the script makes one
+  fixed folder itself (`%SystemDrive%\lanq-work`, owner Administrators, fixed permissions, no path from anyone), adds
+  one exclusion string for it, and proves it with a self-test (a positive control, then the EICAR test file must stay
+  inside and be caught in every sibling form). An existing folder counts only when a trusted record matches its
+  volume, file id and permissions; there is no marker. A Dev Drive comes first and needs no exclusion. Any doubt is
+  "not offered". docs/TUNE.md (the ladder) and SECURITY.md (the invariant and residual risks) have the details. The
+  scan-time fix (`defender.scantime`) is unrelated; it is not an exclusion.
 - The commands that come from Windows modules (ScheduledTasks, Defender, Storage, NetAdapter) are CDXML functions, not
   cmdlets; the shadow check requires each to come from its module, so a function or alias of the same name refuses the
   run (only in tune mode, since looking them up loads the modules).

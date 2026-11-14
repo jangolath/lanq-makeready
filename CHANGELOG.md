@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.6.0 (unreleased)
+
+- **The Defender ladder** (Windows, `lanq-makeready-fix.ps1 -Tune`). Defender scanning of build folders now has two
+  fixes, each with its own switch, each needing `-BuildUser <the dedicated local build account>`, each confirmed by
+  typing the path it makes (no `-Yes`, no path argument). Details: docs/TUNE.md, "The Defender ladder".
+  - **`devdrive.create`** (`-CreateDevDrive [-SizeGB 100]`, 50 to 65536): a VHDX-backed Dev Drive in
+    `%ProgramData%\lanq-makeready\devdrive` (Administrators and SYSTEM only), made with diskpart (fixed input),
+    `Initialize-Disk`, `New-Partition` and `Format-Volume -DevDrive`, checked with `fsutil devdrv query` (trusted,
+    antivirus allowed, WdFilter attached), with `<letter>:\lanq-work` on it. No exclusion. Windows 11 build
+    22621.2338 or later. Undo never removes a Dev Drive; it says how. Whether the VHDX comes back by itself after a
+    restart is checked on the pool before release (no startup task yet).
+  - **`defender.exclude`** (`-DefenderExclusions`): makes `%SystemDrive%\lanq-work` itself, with its owner
+    (Administrators) and fixed permissions in one call (the build user may add and change files inside, never rename,
+    delete or re-permission the folder; an inherited OWNER RIGHTS entry stops it from re-permissioning its own files),
+    reads it back, runs a positive control with the EICAR test file, adds the one exclusion `<drive>:\lanq-work\`,
+    reads it back (exactly one new entry, exactly that string), and checks that the test file stays inside lanq-work
+    and is still caught in `lanq-work-x`, `lanq-workx`, `lanq-work.x`, `lanq-work.`, `lanq-work` with a trailing space
+    and a stream. Any miss rolls the exclusion back (exit 1). Undo removes only the exclusion; the folder is kept.
+  - **Not offered** (report only, exit 0) on any doubt: Defender not active, real-time protection off or one-way,
+    exclusions hidden, managed by policy or MDM, Defender for Endpoint onboarded, an existing exclusion that covers
+    lanq-work (reported, never recorded or undone) or a variant of it, a drive that is not fixed, internal and NTFS,
+    a Dev Drive, a drive root others may rename in or re-permission, case sensitivity, or a lanq-work this script
+    cannot vouch for. An existing lanq-work counts only when a trusted fix record matches its volume GUID, file id and
+    permissions hash; there is no marker file.
+  - `-BuildUser` must be a local, enabled user account (exit 2 otherwise); the prompt shows its SID and warns when it
+    is an administrator. `NUGET_PACKAGES` goes per job only (machines.yml `env:`); the script never sets it.
+  - The EICAR test file is built at run time from a transformed constant; no script contains it. No P/Invoke or
+    Add-Type in the product scripts.
+- **Fix record**: new ids `defender.exclude` and `devdrive.create` and their state shapes, additive under
+  `lanq-makeready-fix/v1` (a 0.5 script rejects a record that holds them, exit 2).
+- **Tune scan**: `defender.paths` gets a lanq-work row and may carry fix id `defender.exclude` (a change for lanq,
+  which maps fix ids through its own table); the advice is now the ladder. New checks `defender.drift` (security,
+  needs admin: the lanq-work exclusion against its record, the folder's owner, permissions, file id and volume, and a
+  sample of its top two levels) and `devdrive` (fix id `devdrive.create`; WARN when antivirus is disallowed on a Dev
+  Drive). Exclusion entries with a variable are no longer expanded in the scanning account's context (Defender expands
+  them as SYSTEM). fsutil runs only from a fixed allow-list of reads. The scan stays under 800 lines.
+- **Linux**: `lanq-makeready-fix.sh` refuses `--defender-exclusions` and `--create-dev-drive` with exit 2 (Windows
+  only).
+- **Tests**: the review's matrix (A1-A10, B1-B8, C1-C4, D1-D7, E1-E9, G1-G4; the list is in docs/TUNE.md) written
+  first. Fakes in `tests/fix.ps1` and `tests/tune.ps1` (folders only in a temp sandbox, harmless test text, never
+  the real EICAR file), the guard extended with mutants, and a new CI pass, `tests/real-defender.ps1` ("Pass 4
+  (defender)"): a real apply on a disposable runner, two local non-admin users and LogonUser probes, drift and undo.
+  The EICAR checks there are best effort (the runner image turns real-time protection off; the pass prints a notice
+  and simulates only the scan results); E1-E8 and G1 run on a pool PC before release.
+- Version 0.6.0 in the scanners, tune scripts and fix scripts. The scanners are otherwise unchanged.
+
 ## 0.5.0 (2026-11-14)
 
 - **Tune scan**, in new, separate, read-only scripts: `lanq-makeready-tune.ps1` (Windows PowerShell 5.1 and

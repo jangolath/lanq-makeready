@@ -1,4 +1,4 @@
-# Tune scan and tune fixes (0.5)
+# Tune scan and tune fixes (0.5; the Defender ladder 0.6)
 
 The **scanner** (`lanq-makeready.ps1` / `.sh`) answers "can this PC be a worker?". The **tune scan**
 (`lanq-makeready-tune.ps1` / `lanq-makeready-tune.sh`) answers a different question: "what makes this worker slower
@@ -24,8 +24,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "& .\lanq-makeready-tune.
 | `-Hours HH:mm-HH:mm` | the job window (LanQueue `allowed_hours`): scheduled scans and maintenance inside it are reported |
 | `-WorkRoot C:/lq` | LanQueue's `work_root` for this PC. Same rule as LanQueue: a drive path with forward slashes, letters, digits and `_ . / -`, no spaces, no `..` |
 
-No admin rights are needed. Run elevated, a few checks say more (Defender exclusions, disk reliability counters,
-TRIM); without admin they say `SKIP (needs admin)`.
+No admin rights are needed. Run elevated, a few checks say more (Defender exclusions and their drift, Dev Drives, disk
+reliability counters, TRIM); without admin they say `SKIP (needs admin)`.
 
 **Time.** The scan has its own 90-second deadline. Each slow probe (CIM, storage, network adapters, scheduled tasks,
 Defender, `powercfg`) runs with a budget inside it; a probe that runs out of time reports `SKIP` with "time budget" and
@@ -43,7 +43,7 @@ problems and the `administrators_authorized_keys` ACL (fix `ssh.aclkeys`). The t
 ```text
 {
   "schema": "lanq-makeready-tune/v1",
-  "tool": {"name": "lanq-makeready-tune", "version": "0.5.0"},
+  "tool": {"name": "lanq-makeready-tune", "version": "0.6.0"},
   "generatedAt": "2026-11-14T03:09:23Z",
   "host": {"hostname": "...", "user": "...", "os": "windows" | "linux" | "macos", "arch": "x64"},
   "context": {"container": false, "elevated": false, "workRoot": "C:/lq", "hours": "22:00-07:00"},
@@ -76,8 +76,10 @@ problems and the `administrators_authorized_keys` ACL (fix `ssh.aclkeys`). The t
 | `visual.fx` | INFO: Remote Desktop is on | none | "Adjust for best performance" is per user |
 | `dotnet.env` | INFO: `DOTNET_CLI_TELEMETRY_OPTOUT`, `DOTNET_NOLOGO` or `DOTNET_GENERATE_ASPNET_CERTIFICATE` is not set for the machine | `dotnet.env` | LanQueue's machines.yml `env:` does the same per job without touching the PC; after a machine-level change restart sshd |
 | `wsl.reclaim` | INFO: WSL is installed and `%USERPROFILE%\.wslconfig` has no `autoMemoryReclaim` | none | a per-user file; `wsl --shutdown` after editing |
-| `defender.paths` | INFO (admin): real-time scanning covers work_root or the NuGet packages folder. SKIP when not elevated, or when Defender is not the active antivirus (AMRunningMode not Normal) | none (report only) | says scanned/excluded per folder (and for temp: an excluded temp folder is WARN); the exclusion list is compared inside the probe and never printed. The advice is the manual procedure below |
+| `defender.paths` | INFO (admin): real-time scanning covers work_root, the NuGet packages folder or lanq-work (a lanq-work row appears once the folder exists or is excluded). SKIP when not elevated, or when Defender is not the active antivirus (AMRunningMode not Normal) | `defender.exclude` (on INFO, while lanq-work is not excluded) | says scanned/excluded per folder (and for temp: an excluded temp folder is WARN); the exclusion list is compared inside the probe and never printed, and an entry with a variable is never expanded in this account's context (Defender expands it as SYSTEM). The advice is [the ladder](#the-defender-ladder-060) |
 | `defender.schedule` | INFO: the scheduled scan (or the daily quick scan) falls inside `-Hours` | `defender.scantime` (not for a window of 23 hours or more, where an hour after it is still inside) | replaces the plan's "Defender CPU load" check: the scan's timing is what matters on a build box |
+| `defender.drift` | WARN (admin, security): the lanq-work exclusion is not as the fix made it: a changed or variant string, no trusted fix record, the folder gone, a link, another owner or permissions, another file id or volume, a case-sensitive drive root or `ObCaseInsensitive` not 1, or a sampled entry (top two levels, at most 2000, 5 s) that is a link or that others may change. OK when there is no lanq-work exclusion or nothing drifted. SKIP when not elevated (the usual run over SSH) | none | the advice is to undo the exclusion now (`-Undo <record>` or `Remove-MpPreference`) |
+| `devdrive` | INFO (admin): no Dev Drive. WARN: a Dev Drive with antivirus filters disallowed (`disallowAv`). INFO: an untrusted Dev Drive. SKIP before Windows 11 build 22621.2338, or when not elevated (`fsutil devdrv query` needs admin) | `devdrive.create` (when there is none) | the first rung of the ladder |
 | `av.other` | INFO: another antivirus is active (Security Center; not on Windows Server) | none | its real-time scanning slows builds too; use its own exclusions or a Dev Drive |
 | `pagefile` | INFO: the page file is on a spinning disk while an SSD exists, or a fixed size is below the RAM | none | the scanner checks that one exists (swap) |
 | `disk.health` | WARN: a disk reports unhealthy, wear 90% or more, or uncorrected read errors (counters need admin). INFO: TRIM is off with an SSD | none | |
@@ -91,36 +93,141 @@ problems and the `administrators_authorized_keys` ACL (fix `ssh.aclkeys`). The t
 
 Inside a Windows container the host-level checks report SKIP.
 
-### Defender exclusions: by hand only
+### The Defender ladder (0.6.0)
 
-Defender exclusions are not automated in 0.5.0: whether a folder can be trusted (who can write to it, where it really is, what runs from it) is hard to verify safely from a script, and a wrong exclusion silently turns off scanning. The tune scan reports, per folder, whether real-time scanning covers it (`defender.paths`); the
-fix script has no exclusion fix (`-DefenderExclusions` exits 2). To speed up builds:
+Real-time scanning of every file a build writes slows builds down. The fix script offers two rungs, each with its own
+switch, each confirmed by typing what it makes, and the scan's `defender.paths` and `devdrive` items point at them. Pick
+the first one that works on the PC:
 
-1. **Prefer a Dev Drive.** On Windows 11 22H2 or later, a Dev Drive (at least 50 GB) in performance mode keeps
-   protection on and scans asynchronously: Settings > System > Storage > Advanced storage settings > Disks & volumes >
-   Create Dev Drive, then put work_root and `NUGET_PACKAGES` there.
-2. **If you exclude, exclude only** a top-level build folder (for example `C:\lq` or `D:\build`) and your own
-   `%USERPROFILE%\.nuget\packages`. Never temp, a profile folder (Desktop, Documents, Downloads, AppData, ...), a
-   Windows, program, tool or vendor folder, a folder on PATH, a network or `subst` drive, or a whole drive.
-3. **Lock the folder down first**, on a new, empty folder, so only Administrators, SYSTEM and the account LanQueue
-   builds as (the SSH worker account) can change what is never scanned. In an elevated PowerShell (the grants are in
-   single quotes, because PowerShell would read `(OI)` as a command):
+1. **A Dev Drive** (first choice). Defender keeps scanning it, asynchronously, in performance mode. No exclusion.
+2. **The lanq-work exclusion.** One fixed folder the fix script makes itself, and one exclusion for exactly that folder,
+   proven by a self-test.
+3. **Report only.** When anything below is in doubt, the fix is "not offered" (exit 0) and the scan keeps reporting.
 
-   ```powershell
-   New-Item -ItemType Directory C:\lq
-   icacls C:\lq /setowner '*S-1-5-32-544'
-   icacls C:\lq /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '<worker-account>:(OI)(CI)F'
-   ```
+Both rungs need `-BuildUser <account>`: the **dedicated local account LanQueue builds as** (the SSH worker account).
+It must be a local, enabled user account (`S-1-5-21-...`): not a group, a built-in or service account, Administrator,
+Guest, DefaultAccount or WDAGUtilityAccount (exit 2 otherwise). The prompt shows its SID, and warns when it is an
+administrator. Use an account that runs nothing but builds: whatever it writes into lanq-work is not scanned.
 
-   In an elevated cmd the same grant needs no quotes:
-   `icacls C:\lq /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F <worker-account>:(OI)(CI)F`.
-   `<worker-account>` is the account LanQueue builds as (the SSH worker account). Then check it: `icacls C:\lq` should
-   list only Administrators, SYSTEM and that account. Files created in the folder later inherit these entries. A
-   top-level folder needs nothing more. Never run these commands on a drive root.
-4. **Add the exclusion** in an elevated PowerShell: `Add-MpPreference -ExclusionPath C:\lq`
-5. **Undo** at any time: `Remove-MpPreference -ExclusionPath C:\lq`
+#### The folder: `lanq-work`
 
-Paths only, never processes or file types. An organization's Defender policy may override or remove local exclusions.
+Both rungs make `lanq-work` the same way: created with its owner and permissions in one call, then read back
+(owner, permissions, empty, not a link, its file id). The path is fixed and not configurable: `%SystemDrive%\lanq-work`
+for the exclusion, `<Dev Drive>:\lanq-work` on a Dev Drive. No path is ever taken from the command line or a record.
+
+```text
+O:BAG:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200af;;;<build user>)(A;OICIIO;0x1301bf;;;<build user>)(A;OICIIO;0x1301bf;;;OW)
+```
+
+- Owner Administrators; nothing inherited from the drive root (`P`).
+- SYSTEM and Administrators: full control.
+- The build user, on the folder itself: list, add files, add folders, traverse, read attributes and permissions. No
+  delete, rename, permissions, owner, attributes or delete-child: it cannot move lanq-work away or swap it.
+- The build user, on what is created inside: Modify without permissions or owner rights.
+- OWNER RIGHTS (`OW`), inherited: the same Modify. This takes away the owner's usual right to change the permissions of
+  its own files, so the build user cannot let anyone else in that way.
+
+Point work_root at it (`C:/lanq-work`, LanQueue machines.yml). Set `NUGET_PACKAGES=C:\lanq-work\.nuget\packages`
+**per job only** (machines.yml `env:`, or the build account's own environment), **never for the whole machine**: then an
+administrator's own `dotnet build` would run build files from a folder the build account can change. The script never
+sets it.
+
+#### Rung 1: `-Tune -CreateDevDrive -BuildUser <account> [-SizeGB 100]`
+
+Windows 11 22H2 build 22621.2338 or later. `C:` cannot be a Dev Drive, so the script makes a VHDX-backed one:
+
+1. the folder `%ProgramData%\lanq-makeready\devdrive` (Administrators and SYSTEM only);
+2. `diskpart` with fixed input: `create vdisk file="...\lanq-devdrive.vhdx" maximum=<SizeGB x 1024> type=expandable`,
+   `attach vdisk` (`-SizeGB` from 50 to 65536, default 100; the drive needs that much free space and 10 GB more);
+3. `Initialize-Disk -PartitionStyle GPT`, `New-Partition -UseMaximumSize -AssignDriveLetter`,
+   `Format-Volume -DevDrive -NewFileSystemLabel lanq-dev` (ReFS);
+4. a check with `fsutil devdrv query <letter>:`: trusted, antivirus allowed, WdFilter attached (otherwise exit 1);
+5. `<letter>:\lanq-work`, as above. No exclusion: a Dev Drive needs none.
+
+You type the VHDX path to confirm. **Undo never removes a Dev Drive** (its files would be lost); it says how:
+`Dismount-DiskImage -ImagePath <the VHDX>`, then delete that file.
+
+**After a restart.** A VHDX attached this way is not documented to come back by itself. Check it after the first
+restart; if the drive is gone, attach it again in an elevated PowerShell: `Mount-DiskImage -ImagePath
+'C:\ProgramData\lanq-makeready\devdrive\lanq-devdrive.vhdx'`. This is verified on the pool (build-02, test G1) before
+0.6.0 is released; if it does not come back, a later version adds a startup task for it (`devdrive.mount`).
+
+#### Rung 2: `-Tune -DefenderExclusions -BuildUser <account>`
+
+Elevated, at the PC, `-WhatIf` first. You type the path (`C:\lanq-work`) to confirm. Then:
+
+1. the record item is written (`pending`);
+2. `%SystemDrive%\lanq-work` is created (only when it does not exist) and read back, as above;
+3. **positive control**: the EICAR test file in an admin-only folder `<drive>:\lanq-selftest-<id>` must be removed by
+   Defender, or listed in its threat history, within 30 s; otherwise nothing is added (exit 1);
+4. `Add-MpPreference -ExclusionPath '<drive>:\lanq-work\'` (with the trailing backslash), then read back: exactly one new
+   entry, exactly that string;
+5. **the matrix**: the EICAR test file inside lanq-work must stay for 15 s; in each sibling form anyone could create on
+   the drive root (`lanq-work-<id>`, `lanq-work<id>`, `lanq-work.<id>`, and through `\\?\` `lanq-work.` and `lanq-work` with a trailing space,
+   and a stream on a file in a sibling) it must still be caught. Any miss: `Remove-MpPreference`, the item is
+   `failed`, exit 1;
+6. `applied`. The self-test folders are removed in every case.
+
+The EICAR file is harmless by design; Defender shows notifications and keeps threat-history entries for the self-test.
+The script builds it at run time and never contains it.
+
+**Not offered** (exit 0, the reason is printed) when Defender cannot be read, is not the active antivirus, real-time
+protection is off, `RealTimeScanDirection` is not 0, the exclusions are hidden from administrators, local exclusions
+are ignored (`DisableLocalAdminMerge`), exclusions are set by group policy or MDM, Microsoft Defender for Endpoint is
+onboarded (the self-test would alert a security team), an existing exclusion already covers lanq-work (it is
+reported, never recorded or undone), an existing exclusion uses a variable or wildcard that might, a variant of the
+string exists (no trailing backslash, a trailing dot), the drive is not fixed, is on a USB, VHD, SD or MMC disk, is a
+Dev Drive or is not NTFS, the drive root lets others than Administrators, SYSTEM and TrustedInstaller delete or rename
+what is in it (DELETE_CHILD) or change its permissions or owner, the drive root is case-sensitive or
+`ObCaseInsensitive` is not 1, or lanq-work exists and this script cannot vouch for it.
+
+**An existing lanq-work** is used only when a trusted fix record's after state matches its volume GUID, its file id
+and the hash of its permissions (and they are the ones above for the same build user). There is no marker file in the
+folder. Otherwise: look at it, `takeown.exe /a /r /d y /f "C:\lanq-work"`, rename it, and run the script again.
+
+**Undo** (`-Undo <record>`) removes only the exclusion string. The folder is kept; this script never deletes it.
+
+**Drift.** Run elevated, the tune scan's `defender.drift` checks the exclusion against the record: the same string,
+folder, owner, permissions, file id and volume, and a sample of the top two levels. On any drift it reports WARN
+(security) and says to undo the exclusion. Over SSH the tune scan runs without admin, so `defender.drift` says
+`SKIP (needs admin)`: run it elevated at the PC now and then.
+
+`EnableLinkedConnections=1` is shown as a warning (drive letters a user maps are then visible to elevated programs); it
+does not affect lanq-work on the system drive.
+
+By hand, outside the script, the same rules hold: never exclude temp, a profile, Windows or program folder, a folder
+on PATH, a network or `subst` drive, or a whole drive. Paths only, never processes or file types.
+
+#### Test matrix
+
+The ids in the tests and the CHANGELOG. **F** = `tests/fix.ps1` / `tests/tune.ps1` / `tests/fix.sh` (fakes, every
+run). **CI** = `tests/real-defender.ps1`, Pass 4 of the `real-fix-windows` job (real, on a disposable runner).
+**build-02** = run on a pool PC before release.
+
+| Ids | What | Where |
+|---|---|---|
+| A1-A2 | no path from the user (unknown argument), the drive Windows is on, one `Add-MpPreference` with the fixed string only (AST guard) | F |
+| A3 | not a fixed drive; USB, VHD, SD or MMC disk; not NTFS; unreadable volume | F |
+| A4-A6 | lanq-work is a link; squatted (another owner); our permissions but no record (no marker) | F |
+| A7-A9 | `DisableLocalAdminMerge`, group policy, MDM; Defender for Endpoint; passive mode, real-time protection off, scan direction, hidden exclusions | F |
+| A10 | an existing broader exclusion (`C:\`) | F, CI (the runner's own `C:\` exclusion) |
+| B1 | the permissions, exactly (owner, protected, masks, OWNER RIGHTS) | F, CI (read back from Windows) |
+| B2-B3 | the drive-root evaluator: default roots pass; DELETE_CHILD, WRITE_DAC, WRITE_OWNER, GENERIC_ALL/WRITE, a user owner, a NULL DACL, a conditional entry fail | F |
+| B4, B7 | the folder read back after creating it is not ours (a race), or not empty: no exclusion, exit 1 | F |
+| B5 | a case-sensitive drive root, `ObCaseInsensitive` not 1 | F |
+| B6 | `-BuildUser`: unknown, a group, a built-in account, disabled; an administrator warns | F |
+| B8 | as the build user (LogonUser): it can add files and folders, cannot rename, delete, re-permission or set attributes on lanq-work, cannot let others into its own file (OWNER RIGHTS); another user cannot write or rename | CI, build-02 |
+| C1 | record shapes accepted and rejected; the schema | F |
+| C2 | apply, record before the change, undo removes only the exclusion, the folder stays | F, CI |
+| C3 | an existing folder is used again only with a matching trusted record | F, CI |
+| C4 | read-back: no new entry, a variant, two entries: rolled back, exit 1 | F |
+| D1-D7 | Dev Drive: build, `-SizeGB`, VHDX exists, free space, the exact steps, an untrusted or antivirus-disallowed result, undo leaves it, WhatIf | F |
+| E1-E8 | for real: positive control; the test file stays inside lanq-work; caught in `lanq-work-x`, `lanq-workx`, `lanq-work.x`, `lanq-work.`, `lanq-work` with a trailing space, and a stream | CI (best effort: the runner image turns real-time protection off and the script prints a `::notice::` when it has to simulate the scan results) and **build-02 (required)** |
+| E9 | the self-test failure paths: positive control missed, a sibling not caught, the inside one caught, a sibling form that exists already: rolled back, exit 1, cleaned up | F |
+| G1 | the Dev Drive is attached again after a restart | **build-02** |
+| G2 | the AST guard: EICAR written, folders created or deleted, disks changed, diskpart or fsutil writes only inside `Invoke-FixChange`; no Add-Type or P/Invoke | F |
+| G3 | `defender.drift` and `devdrive` in the tune scan; the functions it copies from the fix script stay identical | F, CI (drift) |
+| G4 | Linux: `--defender-exclusions` exits 2 | F |
 
 `-WorkRoot` only has to be a valid LanQueue work_root (a drive path with no `.` part, not a whole drive).
 
@@ -154,10 +261,17 @@ offered only when the tune scan would report it. Undo is the usual `-Undo <recor
 | `do.mode` | the policy `DODownloadMode` = 0 (HTTP only) under `HKLM\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization`, only when no policy sets it yet. Settings then shows "managed by your organization" | the policy value removed |
 | `dotnet.env` | the unset ones of `DOTNET_CLI_TELEMETRY_OPTOUT=1`, `DOTNET_NOLOGO=1`, `DOTNET_GENERATE_ASPNET_CERTIFICATE=false` in the machine environment (registry). Restart sshd so new SSH sessions see them | those values removed |
 | `defender.scantime` | needs `-Hours`. `Set-MpPreference -ScanScheduleTime` (and the quick scan time, if that one is in the window) to one hour after the window ends | the old times. Not offered when Defender is not the active antivirus |
+| `devdrive.create` | `-CreateDevDrive -BuildUser <account> [-SizeGB 100]`, alone: a VHDX-backed Dev Drive with `<letter>:\lanq-work` ([rung 1](#rung-1--tune--createdevdrive--builduser-account--sizegb-100)) | none: a Dev Drive is never removed by the script (it says how) |
+| `defender.exclude` | `-DefenderExclusions -BuildUser <account>`, alone: `%SystemDrive%\lanq-work` and the one exclusion `<drive>:\lanq-work\`, after a self-test ([rung 2](#rung-2--tune--defenderexclusions--builduser-account)) | `Remove-MpPreference` of that string; the folder is kept |
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\lanq-makeready-fix.ps1 -Tune -CreateDevDrive -BuildUser lqbuild -WhatIf
+powershell -NoProfile -ExecutionPolicy Bypass -File .\lanq-makeready-fix.ps1 -Tune -DefenderExclusions -BuildUser lqbuild -WhatIf
+```
 
 ### Report only, never fixed
 
-Defender exclusions (see above), cache clean-up, the Windows Update restart policy (`wu.reboot`), Windows Search, visual effects, WSL, the page file,
+Cache clean-up, the Windows Update restart policy (`wu.reboot`), Windows Search, visual effects, WSL, the page file,
 disk health and fullness, drivers, autologon, other antivirus, OneDrive, BIOS settings and the maintenance time.
 
 ## For AI agents
