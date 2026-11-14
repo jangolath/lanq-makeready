@@ -2,6 +2,11 @@
 
 ## 0.6.0 (unreleased)
 
+- **Security: the record folder's parent is checked.** On a PC whose `C:\ProgramData` (or drive root) lets non-admins
+  rename or replace what is in it (not the Windows default), a non-admin could swap the record folder for a link and
+  redirect the elevated record save; this was possible in 0.5.0 too. Every elevated fix now refuses on such PCs
+  before it makes, reads or writes a record. The message says what is wrong and gives the `icacls` command that
+  restores the default. The Windows default `C:\ProgramData` passes.
 - **The Defender ladder** (Windows, `lanq-makeready-fix.ps1 -Tune`). Defender scanning of build folders now has two
   fixes, each with its own switch, each needing `-BuildUser <the dedicated local build account>`, each confirmed by
   typing the path it makes (no `-Yes`, no path argument). Details: docs/TUNE.md, "The Defender ladder".
@@ -45,6 +50,12 @@
       (inherit-only entries do not count). docs/TUNE.md gives the copy and `icacls` steps that pass.
     - The L2 junction sits in an admin-only folder of the script's own and is removed even on interrupt.
     - Clean-up compares lanq-work with the file id seen at the start.
+  - Review round 4:
+    - The record folder's parent and the drive root are checked (see Security above).
+    - lanq-work is staged admin-only with its pin before it gets its own permissions.
+    - `tests/pool-defender.ps1` stops unless the record folder it makes is trusted, and re-checks it before clean-up.
+      It removes the L2 link only while its folder and lanq-work are still its own, and refuses network paths.
+      docs/TUNE.md says to verify the release candidate before copying it.
   - **Not offered** (report only, exit 0) on any doubt: Defender not active, real-time protection off or one-way,
     exclusions hidden, managed by policy or MDM, Defender for Endpoint onboarded, an existing exclusion that covers
     lanq-work (reported, never recorded or undone) or a variant of it, a drive that is not fixed, internal and NTFS,

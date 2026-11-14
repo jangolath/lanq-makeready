@@ -37,17 +37,22 @@ function Test-PoolTrust([string]$Sddl, [bool]$IsFile) {
   }
   return ''
 }
+# '' for a local path (a drive letter and a backslash); a network or drive-relative path is refused (round 4, L-4).
+function Test-PoolPath([string]$Path) {
+  if ($Path -match '^(\\\\|//)' -or $Path -notmatch '^[A-Za-z]:\\') { return 'it is not a local path (a network share or a drive-relative path)' }
+  return ''
+}
 if ($env:GITHUB_ACTIONS -eq 'true') { [Console]::Error.WriteLine('pool-defender.ps1: this is for a pool PC; CI runs tests/real-defender.ps1.'); exit 2 }
 # L-6/M-2: this folder, every folder above it, and both files, before the fix script is dot-sourced (elevated)
 $chk = @(); $d = $PSScriptRoot
 while ($d) { $chk += , @($d, $false); $up = Split-Path -Parent $d; if (-not $up -or $up -eq $d) { break }; $d = $up }
 $chk += , @($fixPath, $true); $chk += , @($PSCommandPath, $true)
 foreach ($c in $chk) {
-  $w = ''
-  try {
+  $w = Test-PoolPath $c[0]
+  if (-not $w) { try {
     $fi = Get-Item -LiteralPath $c[0] -Force -ErrorAction Stop
     if ($fi.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { $w = 'it is a link' } else { $w = Test-PoolTrust (Get-Acl -LiteralPath $c[0] -ErrorAction Stop).Sddl $c[1] }
-  } catch { $w = 'its permissions cannot be read' }
+  } catch { $w = 'its permissions cannot be read' } }
   if ($w) { [Console]::Error.WriteLine("pool-defender.ps1: $($c[0]) is not safe to run elevated ($w). Copy the release candidate to a folder only Administrators may change and lock it down first (docs/TUNE.md, Before a release: build-02). Nothing was changed."); exit 2 }
 }
 $env:LANQ_MAKEREADY_FIX_LIB = '1'
@@ -74,7 +79,9 @@ function New-PoolDir([string]$Dst, [string]$Tag, [int]$N) {
 if (-not (Test-FixElevated)) { [Console]::Error.WriteLine('pool-defender.ps1: run it in an elevated PowerShell at the PC.'); exit 2 }
 $why = Get-FixRefusal 'apply' $true
 if ($why) { [Console]::Error.WriteLine("pool-defender.ps1: $why"); exit 3 }
-$why = Get-FixRecordDirProblem
+# M-A (round 4): make the record folder now (only under a C:\ProgramData nobody else may swap it in) and stop unless it
+# is trusted; the result is never discarded.
+$why = Initialize-FixRecordDir
 if ($why) { [Console]::Error.WriteLine("pool-defender.ps1: $why"); exit 2 }
 $L = Get-SystemDriveLetter; $entry = Get-LanqWorkEntry $L; $work = Get-LanqWorkPath $L
 $st = Get-MpComputerStatus
@@ -86,7 +93,6 @@ if (-not $DevDrive) {
   $ex0 = $null; try { $ex0 = @(Get-MpExclusions) } catch { Stop-Pool "the exclusions cannot be read ($($_.Exception.Message))" }
   if (@($ex0) -contains $entry) { Stop-Pool "before: $entry is already excluded; undo that first (lanq-makeready-fix.ps1 -Undo <its record>)" }
   Check $true "before: $entry is not excluded yet"
-  if (-not [System.IO.Directory]::Exists((Get-FixRecordDir))) { [void](Initialize-FixRecordDir) }
   if ("$(Get-FixRecordDir)".Substring(0, 1).ToUpperInvariant() -cne $L) { Stop-Pool "the record folder is not on $L`: (the test folders could not be moved into place)" }
   $before = @(Get-RecordNames); $rec = ''; $tag = New-TestTag; $n = 0; $fid = ''
   try {
@@ -140,7 +146,7 @@ if (-not $DevDrive) {
         $jn = ($jp -replace '^\\\\\?\\', '') + '\jn'
         $mk = Invoke-Native (Join-Path $SysDir 'cmd.exe') @('/d', '/c', 'mklink', '/J', $jn, "$L`:\$tn")
         if ($mk.Code -eq 0) {
-          [void]$script:Links.Add($jn)
+          [void]$script:Links.Add(@($jn, $jp))
           $f = "$jn\eicar-$tag-jn.com"; $t0 = [DateTime]::Now.AddSeconds(-5); $hit = $false
           if ((Test-SelfTestDir $jp) -and (Test-WorkDirSame $work $fid)) {
             try { [System.IO.File]::WriteAllBytes($f, (Get-EicarBytes)) } catch { $hit = (Test-VirusError $_.Exception) }
@@ -151,7 +157,12 @@ if (-not $DevDrive) {
       } else { Check $false 'L2: the test folders could not be put in place' }
     }
   } finally {
-    foreach ($l in @($script:Links)) { try { if ([System.IO.Directory]::Exists($l)) { [System.IO.Directory]::Delete($l) } } catch { Write-Host "  could not remove the link $l (remove it yourself; never its target)" -ForegroundColor Yellow } }   # the link only, never its target
+    $rdBad = Get-FixRecordDirProblem   # M-A (round 4): nothing staged there is deleted unless the record folder is still trusted
+    if ($rdBad) { Write-Host "  left everything alone: $rdBad" -ForegroundColor Yellow; $script:Made.Clear(); $script:Links.Clear() }
+    foreach ($l in @($script:Links)) {   # the link only, never its target; only while its folder and lanq-work are still ours (L-1)
+      if ((Test-SelfTestDir $l[1]) -and $fid -and (Test-WorkDirSame $work $fid)) { try { if ([System.IO.Directory]::Exists($l[0])) { [System.IO.Directory]::Delete($l[0]) } } catch { Write-Host "  could not remove the link $($l[0]) (remove it yourself; never its target)" -ForegroundColor Yellow } }
+      else { Write-Host "  left alone: the link $($l[0]) (its folder or lanq-work changed; look at it)" -ForegroundColor Yellow }
+    }
     for ($j = $script:Made.Count - 1; $j -ge 0; $j--) {
       $q = "$($script:Made[$j])"
       if ($q -like "*\lanq-work\*" -and -not ($fid -and (Test-WorkDirSame $work $fid))) { Write-Host "  left alone: $q (lanq-work changed)" -ForegroundColor Yellow; continue }   # L-e: the file id seen at the start

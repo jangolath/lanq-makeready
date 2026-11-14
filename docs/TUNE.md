@@ -391,7 +391,10 @@ after the apply it prints `INTERRUPTED ... -Undo <record>`: run that. It also pr
 questions: the exact form Defender stores `C:\lanq-work\` in, and whether `fsutil devdrv query` shows WdFilter
 attached right after the format.
 
-1. At build-02 itself (not over SSH), in an elevated PowerShell, make a copy of the release candidate that only
+1. Take the release candidate from the release itself, and check it before you copy it: `SHA256SUMS` and
+   `gh attestation verify` (see the README), or the commit you were asked to test (`git rev-parse HEAD` in a checkout
+   only you can change). A copy is only as trustworthy as its source.
+   At build-02 itself (not over SSH), in an elevated PowerShell, make a copy of the release candidate that only
    Administrators and SYSTEM may change, and run it from there. The script refuses to run elevated when its folder,
    any folder above it, or the two scripts it loads could be changed by others (a user's checkout, for example), and it
    checks that before it loads anything:
@@ -399,7 +402,7 @@ attached right after the format.
    ```powershell
    New-Item -ItemType Directory C:\ProgramData\lanq-rc
    cmd /c "icacls C:\ProgramData\lanq-rc /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F"
-   Copy-Item -Recurse <the release candidate>\* C:\ProgramData\lanq-rc\
+   Copy-Item -Recurse <the verified release candidate>\* C:\ProgramData\lanq-rc\
    cd C:\ProgramData\lanq-rc
    powershell -NoProfile -ExecutionPolicy Bypass -File tests\pool-defender.ps1 -BuildUser <the build account>
    ```

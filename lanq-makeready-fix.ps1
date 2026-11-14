@@ -84,7 +84,7 @@ $FixFunctionNames = @('Write-FixLine', 'Write-FixErr', 'Get-FixSessionId', 'Get-
   'Find-Git', 'Get-PathGit', 'Test-OnlyAdminsSystem', 'ConvertFrom-Sddl', 'Test-SafeRestoreDacl', 'Get-DaclCore', 'Get-RestoreDacl', 'Format-Dacl', 'Test-TrustedSddl',
   'Get-AuthKeySummary', 'Get-FixState', 'ConvertFrom-StateText', 'Get-StateText', 'Test-SameState', 'Get-FixNote', 'Test-FixNeeded', 'Test-FixDone', 'Get-ExpectedAfter',
   'Get-StateSummary', 'Get-FixCommand', 'Assert-Native', 'Invoke-FixChange', 'Get-FixRecordDir', 'Get-UtcStamp', 'Get-SafeWord', 'Get-AccountName', 'Test-SafeUndoDacl', 'Get-ExplicitOthers', 'New-FixSecuredDir', 'New-FixSecuredFile',
-  'Get-FixRecordDirProblem', 'Get-PathSddl',
+  'Get-FixRecordDirProblem', 'Get-PathSddl', 'Get-ParentRisk', 'Get-RecordParentProblem',
   'Test-FixRecordDirTrusted', 'Initialize-FixRecordDir', 'Test-FixRecordTrusted', 'New-FixRecord', 'ConvertTo-JsonText', 'ConvertTo-FixJson', 'Save-FixRecord',
   'Test-Props', 'Test-Str', 'ConvertTo-TimeText', 'New-RecordError', 'Read-FixRecord', 'Show-Fix', 'Invoke-FixApply', 'Invoke-FixUndo', 'Show-FixRecords', 'Invoke-FixMain',
   'Get-UndoArg', 'Test-Vendor', 'Test-VendorUndo', 'Test-InWindow', 'Get-HoursMin', 'Format-Min', 'Get-RegVal', 'Get-RegNames', 'Test-RegKey', 'Get-UserSid', 'Get-ActiveScheme',
@@ -1464,8 +1464,10 @@ function Invoke-FixChange([string]$Id, [string]$Mode, $B, $Cur) {
       # build user can reach it (an empty folder could be turned into a junction), and a C:\lanq-work someone made first
       # makes the move fail.
       if ($B.DirState -eq 'absent') {
-        $stage = '\\?\' + (Join-Path (Get-FixRecordDir) "stage-$tag-w"); $dst = '\\?\' + $p
-        New-FixSecuredDir $stage (Get-WorkDirSddl $B.User); New-FixSecuredDir "$stage\$PinName" $AdminOnlySddl
+        $stage = Join-Path (Get-FixRecordDir) "stage-$tag-w"; $dst = $p
+        New-FixSecuredDir $stage $AdminOnlySddl; New-FixSecuredDir "$stage\$PinName" $AdminOnlySddl   # admin-only, with its pin, before the build user gets any right (L-3)
+        $ws = New-Object System.Security.AccessControl.DirectorySecurity; $ws.SetSecurityDescriptorSddlForm((Get-WorkDirSddl $B.User), [System.Security.AccessControl.AccessControlSections]::Access); $di = New-Object System.IO.DirectoryInfo($stage)
+        if ('System.IO.FileSystemAclExtensions' -as [type]) { [System.IO.FileSystemAclExtensions]::SetAccessControl($di, $ws) } else { $di.SetAccessControl($ws) }
         try { [System.IO.Directory]::Move($stage, $dst) } catch { $q = $stage; try { [System.IO.Directory]::Delete($q, $true) } catch { }; throw "$p could not be put in place (someone made it first); no exclusion was added" }
       }
       $why = Get-WorkDirProblem $p $B.User ($B.DirState -eq 'absent')
@@ -1558,9 +1560,11 @@ function Invoke-FixChange([string]$Id, [string]$Mode, $B, $Cur) {
       $v = Get-VolumeFacts $L
       if ($v.DevDrv -ne 'trusted' -or $v.DevAv -ne 'ok' -or -not $v.DevFilter) { throw "the new volume $L`: is not a trusted Dev Drive with antivirus allowed and WdFilter attached (fsutil devdrv query $L`:: $($v.DevDrv), antivirus $($v.DevAv))" }
       # lanq-work with its pin, made in an admin-only holder on the new volume and moved into place (never empty there)
-      $p = Get-LanqWorkPath $L; $hold = '\\?\' + (Get-DriveRoot $L) + ".lanq-stage-$([Guid]::NewGuid().ToString('N'))"; New-FixSecuredDir $hold $AdminOnlySddl
-      $stage = "$hold\$WorkDirName"; $dst = '\\?\' + $p
-      New-FixSecuredDir $stage (Get-WorkDirSddl $B.User); New-FixSecuredDir "$stage\$PinName" $AdminOnlySddl
+      $p = Get-LanqWorkPath $L; $hold = (Get-DriveRoot $L) + ".lanq-stage-$(New-TestTag)"; New-FixSecuredDir $hold $AdminOnlySddl
+      $stage = "$hold\$WorkDirName"; $dst = $p
+      New-FixSecuredDir $stage $AdminOnlySddl; New-FixSecuredDir "$stage\$PinName" $AdminOnlySddl   # admin-only, with its pin, then its permissions (L-3)
+      $ws = New-Object System.Security.AccessControl.DirectorySecurity; $ws.SetSecurityDescriptorSddlForm((Get-WorkDirSddl $B.User), [System.Security.AccessControl.AccessControlSections]::Access); $di = New-Object System.IO.DirectoryInfo($stage)
+      if ('System.IO.FileSystemAclExtensions' -as [type]) { [System.IO.FileSystemAclExtensions]::SetAccessControl($di, $ws) } else { $di.SetAccessControl($ws) }
       try { [System.IO.Directory]::Move($stage, $dst) } catch { $q = $hold; try { [System.IO.Directory]::Delete($q, $true) } catch { }; throw "$p could not be put in place (someone made it first)" }   # L-b: no holder left behind
       $q = $hold; [System.IO.Directory]::Delete($q, $true)
       $why = Get-WorkDirProblem $p $B.User $true
@@ -1621,6 +1625,40 @@ function Test-FixRecordDirTrusted([string]$Dir) {
   $why = Test-TrustedSddl $sd; if ($why) { return $why }
   if ($sd -cnotmatch 'D:P') { return 'it inherits permissions from its parent' }
   if (-not (Test-OnlyAdminsSystem ($sd -replace '^.*?D:', 'D:'))) { return 'others than Administrators and SYSTEM are in its permissions' }
+  return (Get-RecordParentProblem $Dir)
+}
+
+# The folder above the record folder (C:\ProgramData): @{ Why = '' when nobody but Administrators, SYSTEM and
+# TrustedInstaller may rename, replace or re-permission what is in it (DELETE, DELETE_CHILD, WRITE_DAC, WRITE_OWNER,
+# GENERIC_ALL, GENERIC_WRITE on the folder itself; inherit-only entries do not apply to it), else why; Sid = who }.
+# The Windows default passes: Users may add files and folders there, and CREATOR OWNER is inherit-only.
+function Get-ParentRisk([string]$Sddl) {
+  $sd = ConvertFrom-Sddl $Sddl
+  if (-not $Sddl -or -not $sd) { return @{ Why = 'its permissions cannot be read'; Sid = '' } }
+  if (@($BaSid, $SySid, $TiSid) -notcontains "$($sd.Owner)") { return @{ Why = "it is owned by $(Get-AccountName "$($sd.Owner)")"; Sid = "$($sd.Owner)"; Owner = $true } }
+  if ($null -eq $sd.DiscretionaryAcl) { return @{ Why = 'it has no DACL (everyone may change it)'; Sid = '' } }
+  foreach ($a in $sd.DiscretionaryAcl) {
+    if ($a -isnot [System.Security.AccessControl.CommonAce] -or $a.IsCallback) { return @{ Why = 'it has a conditional or object entry this script cannot judge'; Sid = '' } }
+    if ("$($a.AceQualifier)" -ne 'AccessAllowed' -or ([int]$a.AceFlags -band 8) -or @($BaSid, $SySid, $TiSid) -contains "$($a.SecurityIdentifier)") { continue }
+    if (($a.AccessMask -band ($RootRiskMask -bor 0x10000)) -ne 0) { return @{ Why = "$(Get-AccountName "$($a.SecurityIdentifier)") may delete or rename what is in it, or change its permissions"; Sid = "$($a.SecurityIdentifier)" } }
+  }
+  return @{ Why = ''; Sid = '' }
+}
+# '' when the folder above the record folder and the drive root let nobody but Administrators, SYSTEM and
+# TrustedInstaller rename or replace the record folder; else what is wrong and how to restore the default (review
+# round 4, M-B: every elevated fix stops then, before it writes or reads any record).
+function Get-RecordParentProblem([string]$Dir) {
+  $par = Split-Path -Parent $Dir; $root = (Split-Path -Qualifier $Dir) + '\'
+  $psd = Get-PathSddl $par
+  if (-not $psd) { return "$par (the folder above the record folder) is a link or its permissions cannot be read, so the record folder could be swapped. Nothing was changed." }
+  $r = Get-ParentRisk $psd
+  if ($r.Why) {
+    $fix = "icacls `"$par`" /remove:g *$($r.Sid)"; if ($r.Owner) { $fix = "icacls `"$par`" /setowner *S-1-5-18" } elseif (-not $r.Sid) { $fix = "look at icacls `"$par`"" }
+    return ("$par (the folder above the record folder) lets others rename or replace what is in it: $($r.Why). Then the record folder and the records could be swapped, so this script does nothing on this PC. Nothing was changed. " +
+      "Restore the Windows default (Administrators, SYSTEM and TrustedInstaller own and fully control it; CREATOR OWNER full control on what each one creates; Users read, and may add files and folders) as an administrator, for example: $fix   (check the result with icacls `"$par`")")
+  }
+  $rw = Test-RootSddl (Get-PathSddl $root)
+  if ($rw) { return "the drive root $root is not safe to keep the record folder under: $rw. Nothing was changed." }
   return ''
 }
 
@@ -1628,6 +1666,7 @@ function Test-FixRecordDirTrusted([string]$Dir) {
 # before the first question, so an unsafe folder stops the run before anything is asked or changed.
 function Get-FixRecordDirProblem {
   $dir = Get-FixRecordDir
+  $pp = Get-RecordParentProblem $dir; if ($pp) { return $pp }
   if (-not (Test-Path -LiteralPath $dir)) { return '' }
   $why = Test-FixRecordDirTrusted $dir
   if (-not $why) { return '' }
@@ -1637,6 +1676,7 @@ function Get-FixRecordDirProblem {
 
 function Initialize-FixRecordDir {
   $dir = Get-FixRecordDir
+  $pp = Get-RecordParentProblem $dir; if ($pp) { return $pp }   # never made under a folder others may swap
   if (-not (Test-Path -LiteralPath $dir)) {
     try { New-FixSecuredDir $dir } catch { return "could not create $dir ($($_.Exception.Message))" }
   }

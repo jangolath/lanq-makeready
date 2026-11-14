@@ -216,12 +216,12 @@ function Get-FixGuardViolations([string]$Path) {
     'ToString', 'GetSecurityDescriptorSddlForm', 'SetSecurityDescriptorSddlForm', 'GetOwner', 'Translate', 'IsInRole', 'GetCurrent', 'GetCurrentProcess', 'GetFolderPath', 'Matches',
     'ToInt64', 'Exists', 'ReadAllText', 'WriteAllText', 'Move', 'CreateDirectory', 'WriteLine', 'ReadLine', 'IsPathRooted', 'ContainsKey', 'Round', 'ToUniversalTime',
     'GetValueNames', 'GetValueKind', 'GetValue', 'Create', 'AddScript', 'BeginInvoke', 'WaitOne', 'BeginStop', 'EndInvoke', 'Dispose', 'ComputeHash', 'ToBase64String', 'FromBase64String',
-    'GetFullPath', 'ToLowerInvariant', 'GetBytes', 'Write', 'Min', 'Floor', 'ToByte', 'WriteAllBytes', 'Delete', 'GetFileSystemEntries', 'Sleep', 'NewGuid', 'ToUpperInvariant', 'AddSeconds', 'IndexOf', 'StartNew', 'GetAccessControl')
+    'GetFullPath', 'ToLowerInvariant', 'GetBytes', 'Write', 'Min', 'Floor', 'ToByte', 'WriteAllBytes', 'Delete', 'GetFileSystemEntries', 'Sleep', 'NewGuid', 'ToUpperInvariant', 'AddSeconds', 'IndexOf', 'StartNew', 'GetAccessControl', 'SetAccessControl')
   # 0.6.0: the EICAR test file is written, and the self-test folders deleted, only in Invoke-FixChange; lanq-work and the
   # self-test folders are created (with their permissions, in one call) only there too.
   $onlyIn = @{ 'WriteAllText' = @('Save-FixRecord'); 'Move' = @('Save-FixRecord', 'Invoke-FixChange'); 'CreateDirectory' = @('New-FixSecuredDir'); 'Start' = @('Invoke-Native'); 'Kill' = @('Invoke-Native')
     'Remove' = @('Invoke-Native'); 'SetSecurityDescriptorSddlForm' = @('Invoke-FixChange', 'New-FixSecuredDir', 'New-FixSecuredFile'); 'AddScript' = @('Get-FixProcessTable'); 'BeginStop' = @('Get-FixProcessTable')
-    'Write' = @('New-FixSecuredFile', 'Invoke-Native'); 'WriteAllBytes' = @('Invoke-FixChange'); 'Delete' = @('Invoke-FixChange'); 'Sleep' = @('Wait-MpDetection') }
+    'Write' = @('New-FixSecuredFile', 'Invoke-Native'); 'WriteAllBytes' = @('Invoke-FixChange'); 'Delete' = @('Invoke-FixChange'); 'SetAccessControl' = @('Invoke-FixChange'); 'Sleep' = @('Wait-MpDetection') }
   foreach ($m in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
     $mn = $m.Member.Extent.Text; $fn = & $fnOf $m; $ex = $m.Expression.Extent.Text
     if ($okMembers -notcontains $mn) { [void]$bad.Add("member call $ex.$mn"); continue }
@@ -1327,7 +1327,7 @@ Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and (OutText) -match 'not offere
 $script:NotOurs = @(); $rc = Invoke-Dx 'apply' @('C:\lanq-work')
 Assert-True ($rc -eq 0 -and ($Calls -join '|') -eq $MatrixCalls) 'H-A: with its .lanq-pin back the folder is used again'
 $fx3 = [System.IO.File]::ReadAllText($fixPath)
-Assert-True ($fx3 -match '(?s)New-FixSecuredDir \$stage \$AdminOnlySddl; New-FixSecuredDir "\$stage\\\$PinName" \$AdminOnlySddl.{0,400}SetAccessControl') 'L-3 (round 4): lanq-work is staged admin-only, gets its pin, and only then its own permissions'
+Assert-True ($fx3 -match '(?s)New-FixSecuredDir \$stage \$AdminOnlySddl; New-FixSecuredDir "\$stage\\\$PinName" \$AdminOnlySddl.{0,800}SetAccessControl') 'L-3 (round 4): lanq-work is staged admin-only, gets its pin, and only then its own permissions'
 Assert-True (Test-MpResource @('file:_C:\a\eicar-1.com') 'C:\a\eicar-1.com') 'L-1: a threat-history resource that is exactly file:_<path> counts'
 foreach ($r in @('file:_C:\a\eicar-1.com->x.zip', 'file:_C:\x\C:\a\eicar-1.com', 'containerfile:_C:\a\eicar-1.com', 'file:_C:\a\eicar-1.com.zip', 'C:\a\eicar-1.com')) {
   Assert-True (-not (Test-MpResource @($r) 'C:\a\eicar-1.com')) "L-1: a resource that only contains the path does not count: $r"
