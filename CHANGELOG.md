@@ -65,6 +65,10 @@
     of 800, redaction, JSON shape, the 90 s deadline, containers, macOS);
   - tune-fix tests in `tests/fix.sh` (fakes);
   - a `--tune` leg in `tests/real-fix.sh` for disposable CI runners (cups, the sysctl drop-in, fstrim.timer).
+- Linux review fixes: `journald.cap` never overrides an admin's cap (it writes only the caps not already set, and
+  removes a `journald.conf.d` folder it created when undone); desktop detection uses logind x11/wayland sessions;
+  `bluetooth` is never offered while a Bluetooth input device is present; `--tune` refuses inside a container
+  (Docker, Podman, LXC, systemd-nspawn; exit 3).
 - Both tune scripts write the same JSON: `host.hostname` and `host.user` are `"<redacted>"` with `-Redact`/`--redact`, `context.hours` is present when given, and `summary` has `ok`, `info`, `warn` and `skip` (`host.os` is free text: `windows`, or the Linux distribution name).
 - Version 0.5.0 in the scanners, tune scripts and fix scripts. The scanners are otherwise unchanged.
 

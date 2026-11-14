@@ -211,7 +211,7 @@ With `--redact`: hostname, user and any absolute user-profile paths replaced by 
 - **Released together.** Same tag, listed in `SHA256SUMS`, attested. Not embedded in LanQueue: `lanq` never copies or
   runs the fix script.
 - **Local only, confirm each.** It refuses to run over SSH, from stdin or a string, or without an interactive console
-  (exit 3). There is no `--yes`. Each fix is shown as check, current state, exact command and undo, then
+  (exit 3). On Linux, `--tune` also refuses inside a container (Docker, Podman, LXC, systemd-nspawn; exit 3). There is no `--yes`. Each fix is shown as check, current state, exact command and undo, then
   `Apply? [y/N]`; the default is no. It never elevates itself: without admin or root each fix is skipped with a note.
 - **Short, reversible fix list (v1).** Windows: `ssh.start`, `ssh.auto`, `power.sleep`, `longpaths.on`,
   `git.longpaths`, `ssh.aclkeys`. Linux: `ssh.start`, `power.sleep`. Left out on purpose: installing OpenSSH, firewall

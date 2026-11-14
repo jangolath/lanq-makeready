@@ -501,7 +501,7 @@ The record format is in [docs/FIX-RECORD.md](docs/FIX-RECORD.md).
 | `0` | done, nothing to do, a dry run, a list (also without admin or root), help, or every fix skipped (not elevated, macOS, no systemd) |
 | `1` | a change or an undo failed or did not verify, the record could not be written or updated, the record folder is not safe, or `-Undo` / `--undo` without admin or root |
 | `2` | bad arguments, more than one of `-WhatIf`/`-Undo`/`-List`, or a record rejected by undo |
-| `3` | refused: over SSH, from stdin or a string, no interactive console, or (Windows) a function or alias in the way |
+| `3` | refused: over SSH, from stdin or a string, no interactive console, (Windows) a function or alias in the way, or (Linux) `--tune` inside a container (Docker, Podman, LXC, systemd-nspawn) |
 
 ### Limits
 
