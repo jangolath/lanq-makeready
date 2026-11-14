@@ -89,6 +89,7 @@ function Join-Names($Names, [int]$N = 6) {
 # ---------- lanq-work and the Dev Drive (0.6.0): copied from lanq-makeready-fix.ps1 (a test keeps them identical) ----------
 $BaSid = 'S-1-5-32-544'; $SySid = 'S-1-5-18'; $TiSid = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
 $WriteMask = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
+$RootRiskMask = 0x40 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
 $WorkDirSddl = 'O:BAG:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200af;;;{0})(A;OICIIO;0x1301bf;;;{0})(A;OICIIO;0x1301bf;;;OW)'
 function ConvertFrom-Sddl([string]$Sddl) { try { return (New-Object System.Security.AccessControl.RawSecurityDescriptor($Sddl)) } catch { return $null } }
 function Get-AccountName([string]$Sid) {
@@ -150,13 +151,41 @@ function Get-DevDrvInfo([string]$Text) {
 function Test-DevDriveBuild([int]$Build, [int]$Ubr) {
   return ($Build -gt 22621 -or ($Build -eq 22621 -and $Ubr -ge 2338))
 }
+function Test-RootSddl([string]$Sddl) {
+  $sd = ConvertFrom-Sddl $Sddl
+  if (-not $Sddl -or -not $sd) { return 'its permissions cannot be read' }
+  if (@($BaSid, $SySid, $TiSid) -notcontains "$($sd.Owner)") { return "it is owned by $(Get-AccountName "$($sd.Owner)")" }
+  if ($null -eq $sd.DiscretionaryAcl) { return 'it has no DACL (everyone may change it)' }
+  foreach ($a in $sd.DiscretionaryAcl) {
+    if ($a -isnot [System.Security.AccessControl.CommonAce] -or $a.IsCallback) { return 'it has a conditional or object entry this script cannot judge' }
+    if ("$($a.AceQualifier)" -ne 'AccessAllowed' -or ([int]$a.AceFlags -band 8) -or @($BaSid, $SySid, $TiSid) -contains "$($a.SecurityIdentifier)") { continue }
+    if (($a.AccessMask -band $RootRiskMask) -ne 0) { return "$(Get-AccountName "$($a.SecurityIdentifier)") may delete or rename what is in it, or change its permissions or owner" }
+  }
+  return ''
+}
+function Get-CaseSens([string]$Text) {
+  if ($Text -match '(?i)\bis enabled\b') { return $true }
+  if ($Text -match '(?i)\bis disabled\b') { return $false }
+  return $null
+}
+# The order of fix records: their time, then their number (fix-<time>-2.json comes after fix-<time>.json, -10 after -9).
+function Get-RecordSortKey([string]$Name) { if ($Name -match '^fix-([0-9]{8}T[0-9]{6})Z(?:-([0-9]{1,4}))?\.json$') { return ('{0}-{1:0000}' -f $Matches[1], [int]("0$($Matches[2])")) }; return '' }
+# A record the tune scan may read: plain ASCII, at most 256 KB, the fix record schema, the fix tool, Windows (the fix
+# script's own Read-FixRecord checks every field; here only the after state of one item is used, with a strict shape).
+function Test-RecordText([string]$Text) {
+  if ($Text.Length -gt 262144 -or $Text -cmatch '[^\x09\x0A\x0D\x20-\x7E]') { return $false }
+  return ($Text -cmatch '"schema": "lanq-makeready-fix/v1"' -and $Text -cmatch '"tool": \{"name": "lanq-makeready-fix", "version": "[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}"\}' -and $Text -cmatch '"os": "windows"')
+}
 # '' when a sampled entry in lanq-work is fine: owned by Administrators, SYSTEM or the build user, and nobody else (but
 # OWNER RIGHTS) may change it; else why not (the build user let someone in, or an admin did: review H3).
 function Test-SampleSddl([string]$Sddl, [string]$User) {
   $sd = ConvertFrom-Sddl $Sddl
   if (-not $Sddl -or -not $sd -or $null -eq $sd.DiscretionaryAcl) { return 'no readable DACL' }
   if (@($BaSid, $SySid, $User) -notcontains "$($sd.Owner)") { return "owned by $($sd.Owner)" }
-  foreach ($a in $sd.DiscretionaryAcl) { if ("$($a.AceQualifier)" -eq 'AccessAllowed' -and @($BaSid, $SySid, $User, 'S-1-3-4') -notcontains "$($a.SecurityIdentifier)" -and ($a.AccessMask -band $WriteMask) -ne 0) { return "$($a.SecurityIdentifier) may change it" } }
+  foreach ($a in $sd.DiscretionaryAcl) {
+    if ($a -isnot [System.Security.AccessControl.CommonAce] -or $a.IsCallback) { return 'an unusual or conditional entry' }   # fail closed
+    if ("$($a.AceQualifier)" -eq 'AccessAllowed' -and @($BaSid, $SySid, $User, 'S-1-3-4') -notcontains "$($a.SecurityIdentifier)" -and ($a.AccessMask -band $WriteMask) -ne 0) { return "$($a.SecurityIdentifier) may change it" }
+  }
   return ''
 }
 # Why the lanq-work exclusion is not as the fix made it (empty when it is). $Dr: Get-DriftFacts.
@@ -169,6 +198,9 @@ function Get-DriftProblems($Dr) {
   $c = Get-SdCanon $Dr.Sddl; if (-not $c -or $c -cne (Get-SdCanon ($WorkDirSddl -f $Dr.Record.User))) { $p += 'its owner or permissions changed' }
   if ($Dr.FileId -cne $Dr.Record.FileId -or $Dr.Vol -cne $Dr.Record.Vol) { $p += 'it is not the folder the fix made (another file id or volume)' }
   if ($Dr.CaseSens -ne $false) { $p += 'the drive root is case-sensitive (or that could not be read)' }
+  $rw = Test-RootSddl $Dr.RootSddl; if ($rw) { $p += "the drive root is no longer safe: $rw" }
+  if (@('USB', 'File Backed Virtual', 'SD', 'MMC') -contains $Dr.Bus) { $p += "the drive is now on a $($Dr.Bus) disk" }
+  if ($Dr.DevDrv -ne 'no') { $p += 'the drive is now a Dev Drive' }
   if ($Dr.ObCi -ne 1) { $p += 'ObCaseInsensitive is not 1' }
   $bad = @($Dr.Sample.Bad); if ($bad.Count) { $p += "$($bad.Count) of $($Dr.Sample.Count) sampled entries are links or let others change them: $(Join-Names $bad 3)" }
   return $p
@@ -507,9 +539,9 @@ function Invoke-Fsutil([string]$ArgText) {
 # FileId } ($null when there is none). Read like the fix reads records (trusted folder and file only).
 function Get-LanqWorkRecord([string]$L) {
   $best = $null; $dir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'lanq-makeready'
-  foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter 'fix-*.json' -File -ErrorAction SilentlyContinue | Sort-Object -Property Name)) {
-    if ($f.Name -notmatch '^fix-[0-9]{8}T[0-9]{6}Z(-[0-9]{1,4})?\.json$' -or (Test-FixRecordTrusted $f.FullName)) { continue }
-    try { $j = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json } catch { continue }
+  foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter 'fix-*.json' -File -ErrorAction SilentlyContinue | Where-Object { Get-RecordSortKey $_.Name } | Sort-Object -Property { Get-RecordSortKey $_.Name })) {
+    if (Test-FixRecordTrusted $f.FullName) { continue }
+    try { $tx = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop; if (-not (Test-RecordText $tx)) { continue }; $j = $tx | ConvertFrom-Json } catch { continue }
     foreach ($i in @($j.items)) {
       if ("$($i.id)" -eq 'defender.exclude' -and "$($i.status)" -eq 'applied' -and "$($i.after)" -cmatch "^entry=1 dir=lanq path=$L`:\\lanq-work\\ user=(S-1-5-21(?:-[0-9]{1,10}){4}) vol=(\{[0-9a-f-]{36}\}) fileid=(0x[0-9a-f]{1,32}) sd=[0-9a-f]{64}$") {
         $best = @{ User = $Matches[1]; Vol = $Matches[2]; FileId = $Matches[3] }
@@ -536,13 +568,16 @@ function Get-LanqWorkSample([string]$Path, [string]$User) {
 # Elevated only: the lanq-work exclusion ($Def from the Defender probe), its record, the folder, its file id and volume,
 # case sensitivity, and the sample.
 function Get-DriftFacts([string]$L, $Def) {
-  $h = @{ Entry = [bool]$Def.LwEntry; Variant = [bool]$Def.LwVariant; Record = $null; Exists = $false; Reparse = $false; Sddl = ''; FileId = ''; Vol = ''; CaseSens = $null; ObCi = 1; Sample = @{ Count = 0; Bad = @(); Capped = $false } }
+  $h = @{ Entry = [bool]$Def.LwEntry; Variant = [bool]$Def.LwVariant; Record = $null; Exists = $false; Reparse = $false; Sddl = ''; FileId = ''; Vol = ''; CaseSens = $null; ObCi = 1; Sample = @{ Count = 0; Bad = @(); Capped = $false }; RootSddl = ''; Bus = ''; DevDrv = 'no' }
   if (-not ($h.Entry -or $h.Variant)) { return $h }
   $p = "$L`:\lanq-work"; $h.Record = Get-LanqWorkRecord $L
   try { $fi = Get-Item -LiteralPath $p -Force -ErrorAction Stop; $h.Exists = $true; $h.Reparse = ([bool]($fi.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or -not $fi.PSIsContainer) } catch { }
   if ($h.Exists -and -not $h.Reparse) { $h.Sddl = Get-PathSddl $p }
   $x = Invoke-Fsutil "file queryfileid $p"; if ($x -and "$($x.Out)" -match '(0x[0-9a-fA-F]{1,32})') { $h.FileId = $Matches[1].ToLowerInvariant() }
-  $x = Invoke-Fsutil "file queryCaseSensitiveInfo $L`:\"; if ($x -and $x.Code -eq 0) { $h.CaseSens = ("$($x.Out)" -match '(?i)\benabled\b') }
+  $x = Invoke-Fsutil "file queryCaseSensitiveInfo $L`:\"; if ($x -and $x.Code -eq 0) { $h.CaseSens = Get-CaseSens "$($x.Out)" }
+  $h.RootSddl = Get-PathSddl "$L`:\"
+  $x = Invoke-Fsutil "devdrv query $L`:"; if ($x) { $h.DevDrv = (Get-DevDrvInfo "$($x.Out)").State }
+  $b = Invoke-Probe 'bus' 10 { param($l) "$((Get-Disk -Number (Get-Partition -DriveLetter $l -ErrorAction Stop).DiskNumber -ErrorAction Stop).BusType)" } $L; $h.Bus = "$(@($b)[0])"
   $v = Invoke-Probe 'volume' 10 { param($l) "$((Get-Volume -DriveLetter $l -ErrorAction Stop).UniqueId)" } $L
   if ("$v" -match '\{([0-9a-fA-F-]{36})\}') { $h.Vol = '{' + $Matches[1].ToLowerInvariant() + '}' }
   $ob = Get-RegValue 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel' 'ObCaseInsensitive'; if ($null -ne $ob) { $h.ObCi = [int]$ob }

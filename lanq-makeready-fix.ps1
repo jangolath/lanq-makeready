@@ -92,7 +92,7 @@ $FixFunctionNames = @('Write-FixLine', 'Write-FixErr', 'Get-FixSessionId', 'Get-
   'Get-DotnetState', 'Get-DoState', 'Get-FixTargets', 'Get-StateTarget', 'Get-UndoRefusal', 'Get-TargetLabel', 'Get-ScanTarget', 'Get-SvcNorm', 'Get-FixApplyNote', 'Get-TuneArgError', 'Get-CleanName',
   'Get-SystemDriveLetter', 'Get-DriveRoot', 'Get-LanqWorkPath', 'Get-LanqWorkEntry', 'Get-WorkDirSddl', 'Get-SdCanon', 'Get-SdHash', 'Test-WorkDirSd', 'Test-RootSddl', 'Get-BuildUser',
   'Get-BuildUserProblem', 'Get-ExclusionStatus', 'Get-DevDrvInfo', 'Test-DevDriveBuild', 'Get-DefenderFacts', 'Get-VolumeFacts', 'Get-WorkDirFacts', 'Get-DevVhdFacts', 'Get-WorkDirRecords',
-  'Get-WorkDirState', 'Get-WorkDirProblem', 'Get-EicarBytes', 'Test-VirusError', 'Wait-MpDetection', 'Get-MpExclusions', 'Get-SiblingTests', 'Confirm-FixFor')
+  'Get-WorkDirState', 'Get-WorkDirProblem', 'Get-CaseSens', 'Test-SelfTestDir', 'Get-EicarBytes', 'Test-VirusError', 'Wait-MpDetection', 'Get-MpExclusions', 'Get-SiblingTests', 'Confirm-FixFor')
 # Every cmdlet this file runs. A function or alias with one of these names would run instead of the cmdlet, so the
 # script refuses to start when any of them does not resolve to the cmdlet itself (Get-FixCommandShadow).
 $FixCmdletNames = @('Get-Service', 'Set-Service', 'Start-Service', 'Stop-Service', 'Get-Item', 'Set-ItemProperty', 'Remove-ItemProperty', 'Get-Acl', 'Set-Acl',
@@ -162,6 +162,8 @@ $DiskpartExe = Join-Path $SysDir 'diskpart.exe'
 $FsutilExe = Join-Path $SysDir 'fsutil.exe'
 $DevVhdDir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'lanq-makeready\devdrive'
 $DevVhdFile = Join-Path $DevVhdDir 'lanq-devdrive.vhdx'
+$ExclusionSettleSec = 30   # Defender may take a moment to apply a new exclusion: the inside test is tried again until then
+$FixAdded = ''             # the exclusion this run added and proved (it has no applied record yet)
 
 # ---------- output ----------
 
@@ -655,7 +657,7 @@ function Test-DevDriveBuild([int]$Build, [int]$Ubr) {
 function Get-DefenderFacts {
   $s = @{ Known = $false; Mode = ''; Rtp = $false; Rtsd = 0; Ex = @(); Hidden = $false; LocalMerge = $false; PolicyEx = $false; Mdm = $false; Sense = $false }
   try { $st = Get-MpComputerStatus -ErrorAction Stop; $pr = Get-MpPreference -ErrorAction Stop } catch { return $s }
-  $s.Known = $true; $s.Mode = "$($st.AMRunningMode)"; $s.Rtp = [bool]$st.RealTimeProtectionEnabled; $s.Rtsd = [int]$pr.RealTimeScanDirection
+  $s.Known = $true; $s.Mode = "$($st.AMRunningMode)"; $s.Rtp = [bool]$st.RealTimeProtectionEnabled; $s.Rtsd = -1; if ($null -ne $pr.RealTimeScanDirection) { $s.Rtsd = [int]$pr.RealTimeScanDirection }   # unreadable: not offered
   $ex = @($pr.ExclusionPath | Where-Object { $_ } | ForEach-Object { "$_" })
   if ($ex.Count -eq 1 -and $ex[0] -match '^N/A') { $s.Hidden = $true; $ex = @() }
   $s.Ex = $ex
@@ -678,7 +680,7 @@ function Get-VolumeFacts([string]$L) {
   $dd = Get-DevDrvInfo "$((Invoke-Native $FsutilExe @('devdrv', 'query', "$L`:")).Out)"
   $s.DevDrv = $dd.State; $s.DevAv = $dd.Av; $s.DevFilter = $dd.Filter
   $r = Invoke-Native $FsutilExe @('file', 'queryCaseSensitiveInfo', (Get-DriveRoot $L))
-  if ($r.Code -eq 0) { $s.CaseSens = ("$($r.Out)" -match '(?i)\benabled\b') }
+  if ($r.Code -eq 0) { $s.CaseSens = Get-CaseSens "$($r.Out)" }
   $s.RootSddl = Get-PathSddl (Get-DriveRoot $L)
   $s.Known = [bool]$s.Guid
   return $s
@@ -721,25 +723,40 @@ function Get-WorkDirRecords {
     foreach ($i in @($r.Rec.Items)) {
       if ($i.id -ne 'defender.exclude' -or @('applied', 'failed', 'undone') -notcontains $i.status) { continue }
       $a = ConvertFrom-StateText $i.id $i.after
-      if ($a -and $a.DirState -eq 'lanq' -and $a.FileId -ne '-' -and $a.Sd -ne '-') { $out += $a }
+      # a failed item that left the exclusion in place vouches for nothing (review round 1, HIGH-1)
+      if ($a -and $a.DirState -eq 'lanq' -and $a.FileId -ne '-' -and $a.Sd -ne '-' -and -not ($i.status -eq 'failed' -and $a.Has)) { $a.Add('Status', $i.status); $out += $a }
     }
   }
   return $out
 }
 # absent, lanq (made by this script: this run, or a trusted record matches its volume, file id, permissions and user)
-# or other; and why it is other. There is no marker file in the folder: the record is the only proof.
+# or other; why it is other; and whether this script added the exclusion that is there (this run, or an applied item
+# that says so). There is no marker file in the folder: the record is the only proof.
 function Get-WorkDirState($S) {
   $d = $S.Dir
-  if (-not $d.Exists) { return @('absent', '') }
-  if ($d.Reparse) { return @('other', 'it is a link or junction, or not a folder') }
-  if (-not $S.User) { return @('other', 'no build user was given') }
-  if (-not (Test-WorkDirSd $d.Sddl $S.User)) { return @('other', "its owner or permissions are not the ones this script sets for $($S.User)") }
-  if ($script:FixMade -and $script:FixMade -ceq "$($S.Path)|$($d.FileId)") { return @('lanq', '') }
+  if (-not $d.Exists) { return @('absent', '', $false) }
+  if ($d.Reparse) { return @('other', 'it is a link or junction, or not a folder', $false) }
+  if (-not $S.User) { return @('other', 'no build user was given', $false) }
+  if (-not (Test-WorkDirSd $d.Sddl $S.User)) { return @('other', "its owner or permissions are not the ones this script sets for $($S.User)", $false) }
+  $st = 'other'; $v = ($script:FixAdded -and $script:FixAdded -ceq $S.Entry)
+  if ($script:FixMade -and $script:FixMade -ceq "$($S.Path)|$($d.FileId)") { $st = 'lanq' }
   $h = Get-SdHash $d.Sddl
   foreach ($r in @(Get-WorkDirRecords)) {
-    if ($r.Drive -ceq $S.Drive -and $r.Vol -ceq $S.Vol.Guid -and $r.FileId -ceq $d.FileId -and $r.Sd -ceq $h -and $r.User -ceq $S.User) { return @('lanq', '') }
+    if ($r.Drive -ceq $S.Drive -and $r.Vol -ceq $S.Vol.Guid -and $r.FileId -ceq $d.FileId -and $r.Sd -ceq $h -and $r.User -ceq $S.User) { $st = 'lanq'; if ($r.Status -eq 'applied' -and $r.Has) { $v = $true } }
   }
-  return @('other', 'no trusted fix record matches its volume, file id and permissions')
+  if ($st -eq 'lanq') { return @('lanq', '', $v) }
+  return @('other', 'no trusted fix record matches its volume, file id and permissions', $false)
+}
+# True when the self-test folder at $Path is the one this script made: there, not a link, owner Administrators and
+# only Administrators and SYSTEM in its DACL (checked before every write into it and before deleting it).
+function Test-SelfTestDir([string]$Path) {
+  try {
+    $di = New-Object System.IO.DirectoryInfo($Path)
+    if (-not $di.Exists -or ($di.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return $false }
+    if ('System.IO.FileSystemAclExtensions' -as [type]) { $ac = [System.IO.FileSystemAclExtensions]::GetAccessControl($di) } else { $ac = $di.GetAccessControl() }
+    $c = Get-SdCanon ($ac.GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Owner -bor [System.Security.AccessControl.AccessControlSections]::Access))
+    return ([bool]$c -and $c -ceq (Get-SdCanon $AdminOnlySddl))
+  } catch { return $false }
 }
 # '' when the folder at $Path is exactly what this script makes: there, not a link, its owner and permissions as set,
 # empty when it was just made, and its file id readable (the record ties the exclusion to it).
@@ -771,9 +788,17 @@ function Wait-MpDetection([string]$Path, [datetime]$Since, [int]$Sec, [switch]$H
 }
 function Get-MpExclusions { try { return @((Get-MpPreference -ErrorAction Stop).ExclusionPath | Where-Object { $_ } | ForEach-Object { "$_" }) } catch { return @() } }
 # The forms next to lanq-work that the self-test checks are still scanned (anyone may create them on the drive root).
+# The file names carry the run's tag, so a threat-history entry can only be this run's.
 function Get-SiblingTests([string]$Root, [string]$Tag) {
-  return @(@{ Dir = "$Root$WorkDirName-$Tag"; File = 'eicar.com' }, @{ Dir = "$Root$WorkDirName$Tag"; File = 'eicar.com' }, @{ Dir = "$Root$WorkDirName.$Tag"; File = 'eicar.com' },
-    @{ Dir = "$Root$WorkDirName."; File = 'eicar.com' }, @{ Dir = "$Root$WorkDirName "; File = 'eicar.com' }, @{ Dir = "$Root$WorkDirName-$Tag-ads"; File = 'host.txt:eicar'; Ads = $true })
+  $e = "eicar-$Tag.com"
+  return @(@{ Dir = "$Root$WorkDirName-$Tag"; File = $e }, @{ Dir = "$Root$WorkDirName$Tag"; File = $e }, @{ Dir = "$Root$WorkDirName.$Tag"; File = $e },
+    @{ Dir = "$Root$WorkDirName."; File = $e }, @{ Dir = "$Root$WorkDirName "; File = $e }, @{ Dir = "$Root$WorkDirName-$Tag-ads"; File = "host-$Tag.txt:eicar-$Tag"; Host = "host-$Tag.txt"; Ads = $true })
+}
+# fsutil file queryCaseSensitiveInfo: $false (disabled), $true (enabled), $null (anything else, other languages too: fail closed).
+function Get-CaseSens([string]$Text) {
+  if ($Text -match '(?i)\bis enabled\b') { return $true }
+  if ($Text -match '(?i)\bis disabled\b') { return $false }
+  return $null
 }
 
 # The things one fix id may change on this PC: @{ List = targets; Note = why none can be listed }. '' = the single
@@ -901,7 +926,7 @@ function Get-FixState([string]$Id, [string]$Target = '') {
       $o = Get-RegVal 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel' 'ObCaseInsensitive'
       if ($o.Has -and $o.Kind -eq 'DWord') { $s.ObCi = [int]$o.Value } elseif ($null -eq $o.Has -or $o.Has) { $s.ObCi = -1 }
       $k = Get-RegVal 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' 'EnableLinkedConnections'; $s.Linked = ($k.Has -and "$($k.Value)" -eq '1')
-      $w = Get-WorkDirState $s; $s.DirState = $w[0]; $s.DirWhy = $w[1]
+      $w = Get-WorkDirState $s; $s.DirState = $w[0]; $s.DirWhy = $w[1]; $s.Vouched = $w[2]
       return $s
     }
     'devdrive.create' {
@@ -1116,7 +1141,8 @@ function Get-FixNote([string]$Id, $S) {
       if ($x.Broader) { return "an existing exclusion already covers $w; it is reported, never recorded or undone here (remove it yourself if lanq-work should be scanned again)" }
       if ($x.Unknown) { return "an existing exclusion uses a variable or wildcard (or a .. part) that may cover $w; check it yourself: (Get-MpPreference).ExclusionPath" }
       if ($x.Variant) { return "an exclusion for $w exists that is not exactly $($S.Entry) (a changed or variant string); remove it (Remove-MpPreference -ExclusionPath <it>) and run this script again" }
-      if ($S.Has -and $S.DirState -ne 'lanq') { return "the exclusion $($S.Entry) exists, but this script did not add it (no trusted fix record vouches for the folder); remove it: Remove-MpPreference -ExclusionPath '$($S.Entry)'" }
+      if ($S.Has -and -not ($S.DirState -eq 'lanq' -and $S.Vouched)) { return "the exclusion $($S.Entry) exists, but this script did not add it (no applied fix record vouches for it; a failed or interrupted run?); remove it: Remove-MpPreference -ExclusionPath '$($S.Entry)'" }
+      $rd = "$(Get-FixRecordDir)"; if ($rd.Substring(0, 1).ToUpperInvariant() -cne $S.Drive) { return "the record folder $rd is not on the drive $($S.Drive):, so the self-test folders cannot be made there and moved into place" }
       if (-not $v.Known) { return "the drive $($S.Drive): could not be read (Get-Volume, Get-Partition, Get-Disk)" }
       if (-not $v.Fixed) { return "$($S.Drive): is not a fixed drive" }
       if (@('USB', 'File Backed Virtual', 'SD', 'MMC') -contains $v.Bus) { return "$($S.Drive): is on a $($v.Bus) disk; the exclusion is offered only on an internal disk" }
@@ -1179,7 +1205,7 @@ function Test-FixDone([string]$Id, $S) {
     'do.mode' { return ($S.Kind -eq 'DWord' -and $S.Value -eq 0) }
     'dotnet.env' { return ($S.Readable -and @($S.Vals.Values | Where-Object { $_ -eq '-' -or $null -eq $_ }).Count -eq 0) }
     'defender.scantime' { return ($S.Known -and -not (Test-InWindow $S.Time $FixHours) -and -not ($S.Quick -gt 0 -and (Test-InWindow $S.Quick $FixHours))) }
-    'defender.exclude' { return ($S.Has -and $S.DirState -eq 'lanq') }
+    'defender.exclude' { return ($S.Has -and $S.DirState -eq 'lanq' -and $S.Vouched) }
     'devdrive.create' { return ($S.Vhd.Attached -and $S.Vhd.Letter -and $S.Dev.DevDrv -eq 'trusted' -and $S.Dev.DevAv -eq 'ok' -and $S.DirState -eq 'lanq') }
   }
   return $false
@@ -1317,9 +1343,9 @@ function Get-FixCommand([string]$Id, [string]$Mode, $B, $Cur) {
       $w = "$($B.Drive):\$WorkDirName"
       if ($B.DirState -eq 'absent') { $cmd += "New folder $w, owner Administrators, permissions $(Get-WorkDirSddl $B.User)   (set in the same call, then read back; never re-permissioned)" }
       else { $cmd += "use $w (made by this script: a trusted record matches its volume, file id and permissions)" }
-      $cmd += "self-test: the EICAR test file in an admin-only folder $($B.Drive):\lanq-selftest-<id> must be detected (otherwise nothing is added)"
+      $cmd += "self-test: the EICAR test file in an admin-only folder $($B.Drive):\lanq-selftest-<id> must be detected (otherwise nothing is added). Every self-test folder is made admin-only in the record folder and moved into place"
       $cmd += "Add-MpPreference -ExclusionPath '$(Get-LanqWorkEntry $B.Drive)'   (read back: exactly this one new entry)"
-      $cmd += "self-test: EICAR in $w\lanq-selftest-<id> must stay 15 s; in $w-<id>, $w<id>, $w.<id>, '$w.', '$w ' and a stream it must be detected (otherwise Remove-MpPreference)"
+      $cmd += "self-test: EICAR in $w\lanq-selftest-<id> must stay 15 s (tried again for up to $ExclusionSettleSec s while the exclusion applies); in $w-<id>, $w<id>, $w.<id>, '$w.', '$w ' and a stream it must be in the threat history (otherwise Remove-MpPreference, read back)"
     }
     'defender.exclude|undo' { $cmd = @("Remove-MpPreference -ExclusionPath '$(Get-LanqWorkEntry $B.Drive)'   ($($B.Drive):\$WorkDirName is kept: this script never deletes it)") }
     'devdrive.create|apply' {
@@ -1419,45 +1445,77 @@ function Invoke-FixChange([string]$Id, [string]$Mode, $B, $Cur) {
       $why = Get-WorkDirProblem $p $B.User ($B.DirState -eq 'absent')
       if ($why) { throw "$p is not as this script makes it ($why); no exclusion was added" }
       if ($B.DirState -eq 'absent') { $script:FixMade = "$p|$((Get-WorkDirFacts $p).FileId)" }
-      $made = New-Object System.Collections.ArrayList; $fail = ''; $new = @(); $bytes = Get-EicarBytes
+      # Every self-test folder is made admin-only in the record folder (only Administrators and SYSTEM may write there)
+      # and moved into place on the same drive: a move fails when the name exists (a folder, file or link someone made
+      # first), so nobody can slip a folder of their own under the test file or the delete. Before each write and each
+      # delete the folder is checked again (Test-SelfTestDir); a folder that is not ours is never written to or deleted.
+      $made = New-Object System.Collections.ArrayList; $fail = ''; $new = @(); $added = $false; $ok = $false; $err = ''; $left = @(); $bytes = Get-EicarBytes; $k = 0
       try {
         # 2. positive control: Defender must catch the test file in an admin-only folder on the same drive
-        $d = $root + "lanq-selftest-$tag"; New-FixSecuredDir $d $AdminOnlySddl; [void]$made.Add($d)
-        $f = "$d\eicar.com"; $t0 = [DateTime]::Now.AddSeconds(-5); $hit = $false
+        $k++; $stage = Join-Path (Get-FixRecordDir) "stage-$tag-$k"; $dst = $root + "lanq-selftest-$tag"
+        New-FixSecuredDir $stage $AdminOnlySddl; [void]$made.Add($stage); [System.IO.Directory]::Move($stage, $dst); [void]$made.Add($dst)
+        $f = "$dst\eicar-$tag.com"; $t0 = [DateTime]::Now.AddSeconds(-5); $hit = $false
+        if (-not (Test-SelfTestDir $dst)) { throw "$dst is not the folder this script made; nothing was written to it" }
         try { [System.IO.File]::WriteAllBytes($f, $bytes) } catch { if (Test-VirusError $_.Exception) { $hit = $true } else { throw } }
         if (-not $hit) { $hit = Wait-MpDetection $f $t0 30 }
         if (-not $hit) { throw 'the positive control failed: Defender did not detect the EICAR test file in an admin-only folder within 30 s, so it may not scan here. No exclusion was added (report only)' }
         # 3. the one exclusion, read back: exactly one new entry, exactly this string
         $old = @(Get-MpExclusions)
+        $added = $true
         Add-MpPreference -ExclusionPath $entry -ErrorAction Stop
         $new = @(Get-MpExclusions | Where-Object { $old -notcontains $_ })
         if ($new.Count -ne 1 -or $new[0] -ne $entry) { $fail = "read back: Defender lists $($new.Count) new exclusion(s), not exactly $entry (a policy or Tamper Protection may manage exclusions)" }
-        # 4. inside lanq-work the test file must stay; in every sibling form it must still be caught
+        # 4. inside lanq-work the test file must stay 15 s. Defender may take a moment to apply a new exclusion, so a
+        #    caught file is tried again with a new name until $ExclusionSettleSec have passed since the exclusion was added.
         if (-not $fail) {
-          $d = "$p\lanq-selftest-$tag"; New-FixSecuredDir $d $AdminOnlySddl; [void]$made.Add($d)
-          $f = "$d\eicar.com"; $t0 = [DateTime]::Now.AddSeconds(-5); $hit = $true
-          try { [System.IO.File]::WriteAllBytes($f, $bytes); $hit = Wait-MpDetection $f $t0 15 } catch { }
-          if ($hit) { $fail = 'the EICAR test file in lanq-work was still detected (or could not be written): the exclusion did not take effect' }
+          $k++; $stage = Join-Path (Get-FixRecordDir) "stage-$tag-$k"; $dst = "$p\lanq-selftest-$tag"
+          New-FixSecuredDir $stage $AdminOnlySddl; [void]$made.Add($stage)
+          try { [System.IO.Directory]::Move($stage, $dst) } catch { throw "a self-test folder could not be put in place ($dst exists already: someone made it first); nothing was written to it" }
+          [void]$made.Add($dst)
+          $sw = [System.Diagnostics.Stopwatch]::StartNew(); $n = 0; $kept = $false
+          do {
+            $n++; $f = "$dst\eicar-$tag-$n.com"; $t0 = [DateTime]::Now.AddSeconds(-5); $hit = $true
+            if (-not (Test-SelfTestDir $dst)) { throw "$dst is not the folder this script made; nothing was written to it" }
+            try { [System.IO.File]::WriteAllBytes($f, $bytes); $hit = Wait-MpDetection $f $t0 15 } catch { if (-not (Test-VirusError $_.Exception)) { throw } }
+            if (-not $hit) { $kept = $true }
+          } while (-not $kept -and $sw.Elapsed.TotalSeconds -lt $ExclusionSettleSec)
+          if (-not $kept) { $fail = "the EICAR test file in lanq-work was still detected $n time(s) over $([int]$sw.Elapsed.TotalSeconds) s: the exclusion did not take effect" }
         }
+        # 5. every sibling form must still be caught: this run's tagged file name in Defender's threat history
         if (-not $fail) {
           foreach ($t in (Get-SiblingTests $root $tag)) {
-            $d = '\\?\' + $t.Dir
-            if ([System.IO.Directory]::Exists($d)) { $fail = "the folder '$($t.Dir)' exists already (someone made it), so the self-test cannot show that the exclusion does not reach it; look at it"; break }
-            New-FixSecuredDir $d $AdminOnlySddl; [void]$made.Add($d)
-            if ($t.Ads) { [System.IO.File]::WriteAllBytes("$d\host.txt", [byte[]](120)) }
-            $f = "$d\$($t.File)"; $t0 = [DateTime]::Now.AddSeconds(-5); $hit = $false
+            $k++; $stage = '\\?\' + (Join-Path (Get-FixRecordDir) "stage-$tag-$k"); $dst = '\\?\' + $t.Dir
+            New-FixSecuredDir $stage $AdminOnlySddl; [void]$made.Add($stage)
+            try { [System.IO.Directory]::Move($stage, $dst) } catch { $fail = "a self-test folder could not be put in place ('$($t.Dir)' exists already: someone made it, so the self-test cannot show that the exclusion does not reach it; look at it)"; break }
+            [void]$made.Add($dst)
+            if (-not (Test-SelfTestDir $dst)) { $fail = "'$($t.Dir)' is not the folder this script made; nothing was written to it"; break }
+            if ($t.Ads) { $h = "$dst\$($t.Host)"; [System.IO.File]::WriteAllBytes($h, [byte[]](120)) }
+            $f = "$dst\$($t.File)"; $t0 = [DateTime]::Now.AddSeconds(-5); $hit = $false
             try { [System.IO.File]::WriteAllBytes($f, $bytes) } catch { if (Test-VirusError $_.Exception) { $hit = $true } else { throw } }
-            if (-not $hit) { $hit = Wait-MpDetection $f $t0 30 -HistoryOnly:([bool]$t.Ads) }
+            if (-not $hit) { $hit = Wait-MpDetection $f $t0 30 -HistoryOnly }
             if (-not $hit) { $fail = "the EICAR test file in '$($t.Dir)' was not detected: the exclusion reaches beyond lanq-work"; break }
           }
         }
-      } finally {
-        foreach ($d in @($made)) { $q = $d; if (-not $q.StartsWith('\\?\')) { $q = '\\?\' + $q }; try { [System.IO.Directory]::Delete($q, $true) } catch { } }
+        if (-not $fail) { $ok = $true }
+      } catch { $err = "$($_.Exception.Message)" } finally {
+        # an error, a failed check or Ctrl+C: the exclusion goes again (and is read back); our folders are removed
+        if ($added -and -not $ok) {
+          foreach ($e in @(@($entry) + @($new | Where-Object { "$_".TrimEnd('\', '.', ' ') -eq $entry.TrimEnd('\') }))) { Remove-MpPreference -ExclusionPath $e -ErrorAction SilentlyContinue }
+          $left = @(Get-MpExclusions | Where-Object { "$_".TrimEnd('\', '.', ' ') -eq $entry.TrimEnd('\') })
+        }
+        for ($j = $made.Count - 1; $j -ge 0; $j--) {
+          $q = "$($made[$j])"; if (-not $q.StartsWith('\\?\')) { $q = '\\?\' + $q }
+          if (-not [System.IO.Directory]::Exists($q)) { continue }
+          if (Test-SelfTestDir $q) { try { [System.IO.Directory]::Delete($q, $true) } catch { } } else { Write-FixLine "  left alone: $($made[$j]) is not the folder this script made (look at it)" 'DarkYellow' }
+        }
       }
-      if ($fail) {
-        foreach ($e in @(@($entry) + @($new | Where-Object { "$_".TrimEnd('\', '.', ' ') -eq $entry.TrimEnd('\') }))) { Remove-MpPreference -ExclusionPath $e -ErrorAction SilentlyContinue }
-        throw "$fail; the exclusion was removed again"
+      if (-not $ok) {
+        $why = $fail; if ($err) { $why = $err; if ($fail) { $why = "$fail; $err" } }
+        if (-not $added) { throw $why }
+        if ($left.Count) { throw "$why; FAILED to remove the exclusion again: it is still there ($($left -join ', ')). Remove it now in an elevated PowerShell: Remove-MpPreference -ExclusionPath '$entry'" }
+        throw "$why; the exclusion was removed again"
       }
+      $script:FixAdded = $entry
     }
     'defender.exclude|undo' { $entry = Get-LanqWorkEntry $B.Drive; if (@(Get-MpExclusions) -contains $entry) { Remove-MpPreference -ExclusionPath $entry -ErrorAction Stop } }
     'devdrive.create|apply' {
@@ -1832,7 +1890,7 @@ function Show-FixRecords {
 }
 
 function Invoke-FixMain([string]$Mode = 'apply', [string]$UndoPath = '', [bool]$FromFile = $false, [string]$Set = 'base', [string]$Hours = '', [string]$BuildUser = '', [int]$SizeGB = 100) {
-  $script:FixSet = $Set; $script:FixHours = $Hours; $script:FixBuildUser = $BuildUser; $script:FixSizeGB = $SizeGB; $script:FixUser = $null; $script:FixMade = ''
+  $script:FixSet = $Set; $script:FixHours = $Hours; $script:FixBuildUser = $BuildUser; $script:FixSizeGB = $SizeGB; $script:FixUser = $null; $script:FixMade = ''; $script:FixAdded = ''
   $why = Get-FixRefusal $Mode $FromFile
   if ($why) { Write-FixErr "lanq-makeready-fix: $why"; return 3 }
   if ($Mode -eq 'list') { return (Show-FixRecords) }

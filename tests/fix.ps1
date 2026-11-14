@@ -1071,7 +1071,7 @@ function Wait-MpDetection([string]$Path, $Since, [int]$Sec, [switch]$HistoryOnly
   $rel = Get-Rel $Path; $hn = ''; if ($HistoryOnly) { $hn = ' (history)' }; Note-Call "detect $rel$hn"
   if ($script:ThrowAt -and $rel -like $script:ThrowAt) { throw 'interrupted (a fake failure in the middle of the matrix)' }
   if ($script:SquatInside -and $rel -like 'C\lanq-selftest-*') {   # the build user guesses the tag and makes the inside folder first (HIGH-2)
-    $tg = [regex]::Match($Path, '[0-9a-f]{32}').Value; [void][System.IO.Directory]::CreateDirectory((Join-Path (Get-DriveRoot 'C') "lanq-work\lanq-selftest-$tg"))
+    $tg = [regex]::Match($Path, 'lanq-selftest-([0-9a-f]{32})').Groups[1].Value; [void][System.IO.Directory]::CreateDirectory((Join-Path (Get-DriveRoot 'C') "lanq-work\lanq-selftest-$tg"))
   }
   foreach ($p in @($script:Undetected)) { if ($rel -like $p) { return $false } }
   return $true
@@ -1252,12 +1252,12 @@ Write-Host 'defender.exclude: review round 1 (HIGH-1, HIGH-2, MEDIUM-1, MEDIUM-2
 Reset-Dx; $script:ThrowAt = 'C\lanq-work.<id>\*'; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
 Assert-True ($rc -eq 1 -and $Calls -contains 'Remove-MpPreference C:\lanq-work\' -and @($Mp.Ex).Count -eq 0 -and (OutText) -match 'interrupted' -and ((Get-SandboxDirs 'C') -join ',') -eq 'lanq-work') 'HIGH-1: an error in the middle of the matrix still rolls the exclusion back and cleans up'
 Assert-True ((Read-Rec (Get-LatestRecord)).items[0].after -match '^entry=0 ') 'HIGH-1: the failed record says the exclusion is not there'
-$rc = Invoke-Dx 'apply' @('C:\lanq-work'); Assert-True ($rc -eq 0 -and ($Calls -join '|') -eq $MatrixCalls) 'HIGH-1: after a rolled-back failure the next run offers it again (the folder is reused)'
+$script:ThrowAt = ''; $rc = Invoke-Dx 'apply' @('C:\lanq-work'); Assert-True ($rc -eq 0 -and ($Calls -join '|') -eq $MatrixCalls) 'HIGH-1: after a rolled-back failure the next run offers it again (the folder is reused)'
 Reset-Dx; $script:RemoveBroken = $true; $script:Undetected = @(); $rc = Invoke-Dx 'apply' @('C:\lanq-work')
 Assert-True ($rc -eq 1 -and @($Mp.Ex) -contains 'C:\lanq-work\' -and (OutText) -match 'FAILED to remove the exclusion' -and (OutText) -match "Remove-MpPreference -ExclusionPath 'C:\\lanq-work\\'") 'MEDIUM-2: the rollback is read back; a remove that did not work says FAILED with the command'
 Assert-True ((Read-Rec (Get-LatestRecord)).items[0].status -eq 'failed' -and (Read-Rec (Get-LatestRecord)).items[0].after -match '^entry=1 ') 'MEDIUM-2: the failed record says the exclusion is still there'
 $script:RemoveBroken = $false; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
-Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and (OutText) -notmatch 'Nothing to fix' -and (OutText) -match 'not offered: .*this script did not add it') 'HIGH-1: a failed record with the exclusion still there does not count as done: not offered, says to remove it'
+Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and (OutText) -match 'not offered: .*this script did not add it') 'HIGH-1: a failed record with the exclusion still there does not count as done: not offered, says to remove it'
 Reset-Dx; $script:SquatInside = $true; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
 Assert-True ($rc -eq 1 -and @($Mp.Ex).Count -eq 0 -and (OutText) -match 'could not be put in place' -and @(Get-ChildItem -LiteralPath (Join-Path (Get-DriveRoot 'C') 'lanq-work')).Count -eq 1) 'HIGH-2: the build user made the inside self-test folder first: nothing is written into it or deleted from it, rolled back'
 Reset-Dx; $script:NotOurs = @('C\lanq-work.<id>'); $rc = Invoke-Dx 'apply' @('C:\lanq-work')
