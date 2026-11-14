@@ -4,8 +4,8 @@
 
 - **Security: the record folder's parent is checked.** On a PC whose `C:\ProgramData` (or drive root) lets non-admins
   rename or replace what is in it (not the Windows default), a non-admin could swap the record folder for a link and
-  redirect the elevated record save; this was possible in 0.5.0 too. Every elevated fix now refuses on such PCs
-  before it makes, reads or writes a record. The message says what is wrong and gives the `icacls` command that
+  redirect the elevated record save; this was possible in 0.5.0 too. Every elevated fix, `-Undo` and `-List` now
+  refuse on such PCs before they make, read or write a record (exit 2 for `-Undo` and `-List`). The message says what is wrong and gives the `icacls` command that
   restores the default. The Windows default `C:\ProgramData` passes.
 - **The Defender ladder** (Windows, `lanq-makeready-fix.ps1 -Tune`). Defender scanning of build folders now has two
   fixes, each with its own switch, each needing `-BuildUser <the dedicated local build account>`, each confirmed by

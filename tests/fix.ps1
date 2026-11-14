@@ -699,7 +699,7 @@ Assert-True ($rc -eq 1 -and $Calls.Count -eq 0 -and $script:Asked -eq 0 -and (Ou
 $script:DirWhy = ''
 Reset-Fake; $F.Standby = 1800; $rc = Invoke-Fake 'apply' '' @('y'); $rp = Get-LatestRecord
 $script:DirWhy = 'C:\ProgramData (the folder above the record folder) lets others rename or replace what is in it: Everyone may delete or rename. Nothing was changed.'
-$rc = Invoke-Fake 'undo' $rp @('y')
+$script:Asked = 0; $rc = Invoke-Fake 'undo' $rp @('y')
 Assert-True ($rc -eq 2 -and $Calls.Count -eq 0 -and $Reads.Count -eq 0 -and $script:Asked -eq 0 -and (OutText) -match 'rename or replace') 'L-1 (round 5): -Undo refuses when the record folder or the folder above it is not trusted, before it reads the record'
 $rc = Invoke-Fake 'list'
 Assert-True ($rc -eq 2 -and (OutText) -match 'rename or replace' -and (OutText) -notmatch 'power.sleep applied') 'L-1 (round 5): -List refuses too, before it reads any record'

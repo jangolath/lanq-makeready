@@ -37,9 +37,16 @@ function Test-PoolTrust([string]$Sddl, [bool]$IsFile) {
   }
   return ''
 }
-# '' for a local path (a drive letter and a backslash); a network or drive-relative path is refused (round 4, L-4).
-function Test-PoolPath([string]$Path) {
+# '' for a local path: a drive letter and a backslash (no network or drive-relative path, round 4 L-4), on a fixed
+# drive (no mapped network or removable drive) that is a volume of its own (a subst letter has no volume; round 5,
+# L-3). $DriveType and $HasVolume are read when not given (tests give them).
+function Test-PoolPath([string]$Path, $DriveType = $null, $HasVolume = $null) {
   if ($Path -match '^(\\\\|//)' -or $Path -notmatch '^[A-Za-z]:\\') { return 'it is not a local path (a network share or a drive-relative path)' }
+  $L = $Path.Substring(0, 1)
+  if ($null -eq $DriveType) { try { $DriveType = "$((New-Object System.IO.DriveInfo($L)).DriveType)" } catch { $DriveType = 'unknown' } }
+  if ("$DriveType" -ne 'Fixed') { return "it is not a fixed local drive ($L`: is $DriveType)" }
+  if ($null -eq $HasVolume) { $HasVolume = $false; try { $HasVolume = [bool](Get-Volume -DriveLetter $L -ErrorAction Stop) } catch { } }
+  if (-not $HasVolume) { return "$L`: is not a volume of its own (a subst drive letter?)" }
   return ''
 }
 if ($env:GITHUB_ACTIONS -eq 'true') { [Console]::Error.WriteLine('pool-defender.ps1: this is for a pool PC; CI runs tests/real-defender.ps1.'); exit 2 }

@@ -138,7 +138,7 @@ volume.
   if `C:\ProgramData` (or the drive root) lets others rename or replace what is in it: then the folder could be swapped
   for one of theirs. Every elevated run (fixes, undo, the new rungs) now checks `C:\ProgramData` (not a link; owned by
   Administrators, SYSTEM or TrustedInstaller; no one else may delete, rename, re-permission or take what is in it) and
-  the drive root before it makes, reads or writes a record, and stops with what is wrong and the `icacls` command
+  the drive root before it makes, reads or writes a record (the fixes, `-Undo` and `-List` alike), and stops with what is wrong and the `icacls` command
   that restores the Windows default. The Windows default `C:\ProgramData` passes. This also closes the same exposure
   of the 0.5.0 record save on PCs whose `C:\ProgramData` was opened up.
 

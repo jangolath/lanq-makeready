@@ -1653,7 +1653,11 @@ function Get-RecordParentProblem([string]$Dir) {
   if (-not $psd) { return "$par (the folder above the record folder) is a link or its permissions cannot be read, so the record folder could be swapped. Nothing was changed." }
   $r = Get-ParentRisk $psd
   if ($r.Why) {
-    $fix = "icacls `"$par`" /remove:g *$($r.Sid)"; if ($r.Owner) { $fix = "icacls `"$par`" /setowner *S-1-5-18" } elseif (-not $r.Sid) { $fix = "look at icacls `"$par`"" }
+    # Users (BU) have default rights there: restore those, never remove Users. Others (Everyone, Authenticated Users,
+    # an account) have none by default: remove that entry only. (review round 5, L-2)
+    $fix = "icacls `"$par`" /remove:g *$($r.Sid)"
+    if ($r.Owner) { $fix = "icacls `"$par`" /setowner *S-1-5-18" } elseif (-not $r.Sid) { $fix = "look at icacls `"$par`"" }
+    elseif ($r.Sid -eq 'S-1-5-32-545') { $fix = "icacls `"$par`" /grant:r *S-1-5-32-545:(OI)(CI)(RX) *S-1-5-32-545:(CI)(WD,AD,WEA,WA)" }
     return ("$par (the folder above the record folder) lets others rename or replace what is in it: $($r.Why). Then the record folder and the records could be swapped, so this script does nothing on this PC. Nothing was changed. " +
       "Restore the Windows default (Administrators, SYSTEM and TrustedInstaller own and fully control it; CREATOR OWNER full control on what each one creates; Users read, and may add files and folders) as an administrator, for example: $fix   (check the result with icacls `"$par`")")
   }
@@ -1884,6 +1888,8 @@ function Invoke-FixUndo([string]$Path) {
     Write-FixLine "lanq-makeready-fix ${ToolVersion}: -Undo needs an elevated PowerShell (Run as administrator): the records and every change need it. This script never elevates itself. Nothing was changed." 'DarkYellow'
     return 1
   }
+  $why = Get-FixRecordDirProblem   # the record folder, the folder above it and the drive root, before any record is read (round 5, L-1)
+  if ($why) { Write-FixErr "lanq-makeready-fix: $why"; return 2 }
   $dir = [System.IO.Path]::GetFullPath((Get-FixRecordDir)).TrimEnd('\')
   $full = [System.IO.Path]::GetFullPath($Path)
   if ((Split-Path -Parent $full) -ne $dir -or (Split-Path -Leaf $full) -notmatch '^fix-[0-9]{8}T[0-9]{6}Z(-[0-9]{1,4})?\.json$') {
@@ -1949,6 +1955,7 @@ function Show-FixRecords {
   $dir = Get-FixRecordDir
   Write-FixLine "Undo records are kept in $dir (never in %LOCALAPPDATA%)."
   if (-not (Test-FixElevated)) { Write-FixLine 'Reading them needs an elevated PowerShell (only Administrators and SYSTEM may); this script never elevates itself.' 'DarkYellow'; return 0 }
+  $why = Get-FixRecordDirProblem; if ($why) { Write-FixErr "lanq-makeready-fix: $why"; return 2 }   # round 5, L-1
   $files = @(Get-ChildItem -LiteralPath $dir -Filter 'fix-*.json' -File -ErrorAction SilentlyContinue | Sort-Object -Property CreationTimeUtc, Name)
   if ($files.Count -eq 0) { Write-FixLine "No undo records in $dir"; return 0 }
   foreach ($f in $files) {
