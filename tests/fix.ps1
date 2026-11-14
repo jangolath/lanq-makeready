@@ -435,7 +435,10 @@ function Get-FixRecordDir { return $RecDir }
 # the record store: the folder is created plain (no admin-owned ACL here), trust is what the test says
 function Initialize-FixRecordDir { if ($script:DirWhy) { return $script:DirWhy }; if (-not (Test-Path -LiteralPath $RecDir)) { [void](New-Item -ItemType Directory -Path $RecDir) }; return '' }
 function Get-FixRecordDirProblem { return $script:DirWhy }
-function New-FixSecuredDir([string]$Dir, [string]$Sddl) { [void][System.IO.Directory]::CreateDirectory($Dir) }
+function New-FixSecuredDir([string]$Dir, [string]$Sddl) {
+  [void][System.IO.Directory]::CreateDirectory($Dir)
+  if ($script:SquatWork -and $Dir -match 'stage-[0-9a-f]{32}-w$') { [void][System.IO.Directory]::CreateDirectory((Join-Path (Get-DriveRoot 'C') 'lanq-work')) }   # someone makes C:\lanq-work first (H-A)
+}
 function New-FixSecuredFile([string]$Path, [byte[]]$Bytes) { $st = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::CreateNew); try { $st.Write($Bytes, 0, $Bytes.Length) } finally { $st.Dispose() } }
 function Test-FixRecordTrusted([string]$Path) { return $script:Trust }
 function Get-LatestRecord { $f = @(Get-ChildItem -LiteralPath $RecDir -Filter 'fix-*.json' -ErrorAction SilentlyContinue | Sort-Object -Property Name); if ($f.Count) { return $f[-1].FullName }; return $null }
@@ -813,7 +816,7 @@ function Get-ScheduledTask { param($TaskPath, $TaskName, $ErrorAction) if ($scri
 function Disable-ScheduledTask { param($TaskPath, $TaskName, $ErrorAction) Note-Call "Disable-ScheduledTask $TaskPath$TaskName"; foreach ($t in @($Tasks | Where-Object { $_.TaskPath -eq $TaskPath -and $_.TaskName -eq $TaskName })) { $t.State = 'Disabled' } }
 function Enable-ScheduledTask { param($TaskPath, $TaskName, $ErrorAction) Note-Call "Enable-ScheduledTask $TaskPath$TaskName"; foreach ($t in @($Tasks | Where-Object { $_.TaskPath -eq $TaskPath -and $_.TaskName -eq $TaskName })) { $t.State = 'Ready' } }
 function Get-MpComputerStatus { param($ErrorAction) return [pscustomobject]@{ AMRunningMode = $Mp.Mode; IsTamperProtected = $Mp.Tamper; RealTimeProtectionEnabled = $Mp.Rtp } }
-function Get-MpPreference { param($ErrorAction) $ex = @($Mp.Ex); if (-not $Mp.Readable) { $ex = @('N/A: Must be an administrator to view exclusions') }; return [pscustomobject]@{ ExclusionPath = $ex; ScanScheduleDay = $Mp.Day; ScanScheduleTime = $Mp.Time; ScanScheduleQuickScanTime = $Mp.Quick; RealTimeScanDirection = $Mp.Rtsd } }
+function Get-MpPreference { param($ErrorAction) if ($script:MpReadBroken) { throw 'the Defender service is not answering' }; $ex = @($Mp.Ex); if (-not $Mp.Readable) { $ex = @('N/A: Must be an administrator to view exclusions') }; return [pscustomobject]@{ ExclusionPath = $ex; ScanScheduleDay = $Mp.Day; ScanScheduleTime = $Mp.Time; ScanScheduleQuickScanTime = $Mp.Quick; RealTimeScanDirection = $Mp.Rtsd } }
 function Set-MpPreference { param($ScanScheduleTime, $ScanScheduleQuickScanTime, $ErrorAction) Note-Call "Set-MpPreference $ScanScheduleTime $ScanScheduleQuickScanTime"; if ($ScanScheduleTime) { $Mp.Time = [TimeSpan]$ScanScheduleTime }; if ($ScanScheduleQuickScanTime) { $Mp.Quick = [TimeSpan]$ScanScheduleQuickScanTime } }
 function Add-MpPreference { param($ExclusionPath, $ErrorAction) Note-Call "Add-MpPreference $ExclusionPath"; [void]$Mp.Ex.Add($ExclusionPath) }
 function Remove-MpPreference { param($ExclusionPath, $ErrorAction) Note-Call "Remove-MpPreference $ExclusionPath"; if (-not $script:RemoveBroken) { $Mp.Ex.Remove($ExclusionPath) } }
@@ -1069,7 +1072,9 @@ function Get-EicarBytes { return [System.Text.Encoding]::ASCII.GetBytes('lanq-ma
 function Get-Rel([string]$P) { return (($P -replace '^\\\\\?\\', '').Replace($Sandbox + '\', '') -replace '[0-9a-f]{32}', '<id>') }
 function Wait-MpDetection([string]$Path, $Since, [int]$Sec, [switch]$HistoryOnly) {
   $rel = Get-Rel $Path; $hn = ''; if ($HistoryOnly) { $hn = ' (history)' }; Note-Call "detect $rel$hn"
+  if ($script:MpReadBrokenNext) { $script:MpReadBroken = $true; $script:MpReadBrokenNext = $false }   # the service stops answering after the add (L-2)
   if ($script:ThrowAt -and $rel -like $script:ThrowAt) { throw 'interrupted (a fake failure in the middle of the matrix)' }
+  if ($script:JunctionAfterPc -and $rel -like 'C\lanq-selftest-*') { $script:WdOver['C\lanq-work'] = @{ Exists = $true; Reparse = $true; Sddl = ''; Fresh = $false; Pin = $false; FileId = '-' } }   # lanq-work turned into a link mid-run
   if ($script:SquatInside -and $rel -like 'C\lanq-selftest-*') {   # the build user guesses the tag and makes the inside folder first (HIGH-2)
     $tg = [regex]::Match($Path, 'lanq-selftest-([0-9a-f]{32})').Groups[1].Value; [void][System.IO.Directory]::CreateDirectory((Join-Path (Get-DriveRoot 'C') "lanq-work\lanq-selftest-$tg"))
   }
@@ -1086,10 +1091,10 @@ function New-Vol([string]$L, [hashtable]$Over = @{}) {
 function Get-VolumeFacts([string]$L) { $v = $script:Vols[$L]; if ($v) { return $v.Clone() }; return @{ Known = $false; Letter = $L } }
 function Get-WorkDirFacts([string]$Path) {
   $o = $script:WdOver[(Get-Rel $Path)]; if ($o) { return $o.Clone() }
-  if (-not [System.IO.Directory]::Exists($Path)) { return @{ Exists = $false; Reparse = $false; Sddl = ''; Empty = $false; FileId = '-' } }
+  if (-not [System.IO.Directory]::Exists($Path)) { return @{ Exists = $false; Reparse = $false; Sddl = ''; Fresh = $false; Pin = $false; FileId = '-' } }
   $sd = $WorkDirSddl -f $script:WdSid; if ($script:SddlAfterCreate) { $sd = $script:SddlAfterCreate }
-  $empty = (@([System.IO.Directory]::GetFileSystemEntries($Path)).Count -eq 0); if ($script:NotEmptyAfterCreate) { $empty = $false }
-  return @{ Exists = $true; Reparse = $false; Sddl = $sd; Empty = $empty; FileId = $script:FileIds[(Get-Rel $Path)] }
+  $fresh = ((@([System.IO.Directory]::GetFileSystemEntries($Path) | ForEach-Object { Split-Path -Leaf $_ }) -join ',') -ceq '.lanq-pin'); if ($script:NotEmptyAfterCreate) { $fresh = $false }
+  return @{ Exists = $true; Reparse = $false; Sddl = $sd; Fresh = $fresh; Pin = (Test-SelfTestDir (Join-Path $Path '.lanq-pin')); FileId = $script:FileIds[(Get-Rel $Path)] }
 }
 function Get-DevVhdFacts { return $script:Vhd.Clone() }
 function Get-DiskImage { param($ImagePath, $ErrorAction) Note-Call 'Get-DiskImage'; return [pscustomobject]@{ Number = 7; Attached = $true } }
@@ -1124,7 +1129,7 @@ function Reset-Dx {
   $script:Vols = @{ C = (New-Vol 'C') }; $script:WdOver = @{}; $script:WdSid = $Bu; $script:SddlAfterCreate = ''; $script:NotEmptyAfterCreate = $false
   $script:FileIds = @{ 'C\lanq-work' = '0x000000000000000000010000000ed741'; 'L\lanq-work' = '0x0000000000000000000a000000000005' }
   $script:Undetected = @('C\lanq-work\lanq-selftest-*'); $script:Vhd = @{ Exists = $false; Attached = $false; Letter = '' }; $script:FormatDev = 'trusted'; $script:FormatAv = 'ok'; $script:DiskpartCode = 0
-  $script:FixMade = ''; $script:AddVariant = $null; $script:ThrowAt = ''; $script:SquatInside = $false; $script:NotOurs = @(); $script:RemoveBroken = $false
+  $script:FixMade = ''; $script:AddVariant = $null; $script:ThrowAt = ''; $script:SquatWork = $false; $script:JunctionAfterPc = $false; $script:MpReadBroken = $false; $script:SquatInside = $false; $script:NotOurs = @(); $script:RemoveBroken = $false
   $script:ExclusionSettleSec = 0   # one attempt for the inside test unless a test sets it
   foreach ($d in @(Get-ChildItem -LiteralPath $Sandbox -Force -ErrorAction SilentlyContinue)) { [System.IO.Directory]::Delete('\\?\' + $d.FullName, $true) }
 }
@@ -1136,7 +1141,7 @@ function Invoke-Dx([string]$Mode = 'apply', [object[]]$Ans = @(), [string]$Set =
   return , $rc
 }
 function Get-SandboxDirs([string]$L) { return @(Get-ChildItem -LiteralPath (Get-DriveRoot $L) -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name } | Sort-Object) }
-function Add-MpPreference { param($ExclusionPath, $ErrorAction) Note-Call "Add-MpPreference $ExclusionPath"; if ($null -ne $script:AddVariant) { foreach ($v in @($script:AddVariant)) { [void]$Mp.Ex.Add($v) } } else { [void]$Mp.Ex.Add($ExclusionPath) } }
+function Add-MpPreference { param($ExclusionPath, $ErrorAction) Note-Call "Add-MpPreference $ExclusionPath"; if ($script:OnAddHook) { $script:MpReadBrokenNext = $true }; if ($null -ne $script:AddVariant) { foreach ($v in @($script:AddVariant)) { [void]$Mp.Ex.Add($v) } } else { [void]$Mp.Ex.Add($ExclusionPath) } }
 $MatrixCalls = 'detect C\lanq-selftest-<id>\eicar-<id>.com|Add-MpPreference C:\lanq-work\|detect C\lanq-work\lanq-selftest-<id>\eicar-<id>-1.com|detect C\lanq-work-<id>\eicar-<id>.com (history)|detect C\lanq-work<id>\eicar-<id>.com (history)|detect C\lanq-work.<id>\eicar-<id>.com (history)|detect C\lanq-work.\eicar-<id>.com (history)|detect C\lanq-work \eicar-<id>.com (history)|detect C\lanq-work-<id>-ads\host-<id>.txt:eicar-<id> (history)'
 
 Reset-Dx; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
@@ -1148,7 +1153,7 @@ Assert-True (@($j.items).Count -eq 1 -and $j.items[0].status -eq 'applied' -and 
 Assert-Equal (Read-FixRecord $rp).Error '' 'C2: the record is valid for -Undo'
 Assert-True (@($Mp.Ex) -ccontains 'C:\lanq-work\' -and @($Mp.Ex).Count -eq 1) 'C2: exactly one exclusion: C:\lanq-work\'
 Assert-Equal ((Get-SandboxDirs 'C') -join ',') 'lanq-work' 'M5: every self-test folder is cleaned up; only lanq-work stays'
-Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path (Get-DriveRoot 'C') 'lanq-work') -Force).Count 0 'M5: nothing is left in lanq-work'
+Assert-Equal (@(Get-ChildItem -LiteralPath (Join-Path (Get-DriveRoot 'C') 'lanq-work') -Force | ForEach-Object { $_.Name }) -join ',') '.lanq-pin' 'M5/H-A: nothing is left in lanq-work but its permanent .lanq-pin'
 Assert-True ((OutText) -match 'build user: PC\\builder \(S-1-5-21-1111-2222-3333-1005\)' -and (OutText) -match 'NUGET_PACKAGES=C:\\lanq-work\\.nuget\\packages' -and (OutText) -match 'never for the whole machine' -and (OutText) -match 'EICAR' -and (OutText) -match 'dedicated') 'B6/H1/H3/M5: shows the build user and SID, NUGET_PACKAGES per job, the EICAR note and the dedicated account'
 Assert-True ((OutText) -match 'Type C:\\lanq-work to apply') 'the owner types the path to confirm'
 $rc = Invoke-Dx 'apply' @('C:\lanq-work')
@@ -1273,6 +1278,33 @@ $stp = Join-Path ([IO.Path]::GetTempPath()) ('lanq-st-' + [Guid]::NewGuid().ToSt
 Assert-True (-not (& $RealSelfTest $stp) -and -not (& $RealSelfTest (Join-Path $stp 'none'))) 'HIGH-2: the real Test-SelfTestDir refuses a folder this account owns, and a missing one'
 [System.IO.Directory]::Delete($stp, $true)
 
+Write-Host 'defender.exclude: review round 2 (H-A .lanq-pin, L-1, L-2, L-3)'
+Reset-Dx; $script:SquatWork = $true; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 1 -and $Calls.Count -eq 0 -and @($Mp.Ex).Count -eq 0 -and (OutText) -match 'could not be put in place') 'H-A: lanq-work is made with its .lanq-pin in the record folder and moved into place: a C:\lanq-work someone made first fails closed'
+Reset-Dx; $script:JunctionAfterPc = $true; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 1 -and @($Mp.Ex).Count -eq 0 -and (OutText) -match 'lanq-work changed' -and @($Calls | Where-Object { $_ -like 'detect C\lanq-work\*' }).Count -eq 0) 'H-A: lanq-work became a link (or another folder) before the inside test: nothing is moved, written or deleted there, rolled back'
+Reset-Dx; $rc = Invoke-Dx 'apply' @('C:\lanq-work'); $rp = Get-LatestRecord; $rc = Invoke-Dx 'undo' @('y') 'base' '' 100 $rp
+Assert-True ([System.IO.Directory]::Exists((Join-Path (Get-DriveRoot 'C') 'lanq-work\.lanq-pin'))) 'H-A: undo keeps lanq-work and its .lanq-pin'
+[System.IO.Directory]::Delete((Join-Path (Get-DriveRoot 'C') 'lanq-work\.lanq-pin')); $rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and (OutText) -match 'not offered: .*\.lanq-pin') 'H-A: a reused lanq-work without its .lanq-pin is not used (it could be emptied and made a link)'
+[void][System.IO.Directory]::CreateDirectory((Join-Path (Get-DriveRoot 'C') 'lanq-work\.lanq-pin')); $script:NotOurs = @('C\lanq-work\.lanq-pin'); $rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and (OutText) -match 'not offered: .*\.lanq-pin') 'H-A: a .lanq-pin that is not the admin-only one this script made: not used'
+$script:NotOurs = @(); $rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 0 -and ($Calls -join '|') -eq $MatrixCalls) 'H-A: with its .lanq-pin back the folder is used again'
+Assert-True (Test-MpResource @('file:_C:\a\eicar-1.com') 'C:\a\eicar-1.com') 'L-1: a threat-history resource that is exactly file:_<path> counts'
+foreach ($r in @('file:_C:\a\eicar-1.com->x.zip', 'file:_C:\x\C:\a\eicar-1.com', 'containerfile:_C:\a\eicar-1.com', 'file:_C:\a\eicar-1.com.zip', 'C:\a\eicar-1.com')) {
+  Assert-True (-not (Test-MpResource @($r) 'C:\a\eicar-1.com')) "L-1: a resource that only contains the path does not count: $r"
+}
+Reset-Dx; $script:MpReadBroken = $true; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 0 -and @($Calls | Where-Object { $_ -like 'Add-MpPreference*' }).Count -eq 0 -and (OutText) -match 'not offered: Defender could not be read') 'L-2: the exclusions cannot be read: not offered, nothing is added'
+Reset-Dx; $script:Undetected = @(); $script:OnAddHook = $true; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 1 -and (OutText) -match 'FAILED to remove the exclusion' -and (OutText) -match 'could not be read' -and (OutText) -match "Remove-MpPreference -ExclusionPath 'C:\\lanq-work\\'") 'L-2: the read-back after the rollback fails: loud FAILED with the command, never "removed again"'
+$script:OnAddHook = $false; $script:MpReadBroken = $false
+Reset-Dx; $rc = Invoke-Dx 'apply' @('C:\lanq-work'); $Mp.Ex.Clear()
+$script:RemoveBroken = $true; $script:Undetected = @(); $rc = Invoke-Dx 'apply' @('C:\lanq-work'); $script:RemoveBroken = $false; $script:Undetected = @('C\lanq-work\lanq-selftest-*')
+$rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and (OutText) -match 'not offered: .*this script did not add it') 'L-3: an older applied record does not vouch once a newer failed run left the exclusion behind (only the newest item counts)'
+
 Write-Host 'devdrive.create'
 $DevCalls = "diskpart.exe create vdisk file=`"$DevVhdFile`" maximum=102400 type=expandable|attach vdisk|exit|Get-DiskImage|Initialize-Disk 7 GPT|New-Partition 7|Format-Volume L DevDrive=True lanq-dev"
 Reset-Dx; $rc = Invoke-Dx 'apply' @($DevVhdFile) 'devdrive'
@@ -1380,6 +1412,7 @@ $poolAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path 
 $poolCmds = @($poolAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { "$($_.GetCommandName())" })
 Assert-True (@($perr).Count -eq 0 -and @($poolCmds | Where-Object { $_ -match '^(net(\.exe)?|New-LocalUser|Remove-LocalUser|Add-MpPreference|Remove-MpPreference|Set-MpPreference|Add-Type)$' }).Count -eq 0) 'MEDIUM-3: the pool harness creates no users, removes or adds no exclusion itself, changes no Defender setting, no Add-Type'
 $poolText = [System.IO.File]::ReadAllText((Join-Path $root 'tests/pool-defender.ps1'))
+Assert-True ($poolText -match 'exactly one new record' -and $poolText -match 'INTERRUPTED' -and $poolText -match 'finally' -and $poolText -match 'Test-SelfTestDir' -and $poolText -match 'Test-WorkDirSame' -and $poolText -match 'Test-TrustedSddl' -and $poolText -match 'Get-FixRecordDirProblem' -and $poolText -notmatch 'Sort-Object -Property LastWriteTimeUtc') 'M-A/M-B/L-6: the pool harness undoes only the one record its own apply wrote, is interrupt-safe, re-checks every folder, refuses a checkout others may change'
 Assert-True ($poolText -notmatch 'DisableRealtimeMonitoring' -and $poolText -match 'OPEN QUESTION 1' -and $poolText -match 'OPEN QUESTION 2' -and $poolText -match 'GITHUB_ACTIONS') 'MEDIUM-3: the pool harness never touches real-time protection, reports both open questions, and refuses in CI'
 $sch = [System.IO.File]::ReadAllText((Join-Path $root 'schema/fix-record.v1.json')) | ConvertFrom-Json
 Assert-Equal $sch.properties.schema.const 'lanq-makeready-fix/v1' 'schema/fix-record.v1.json parses, schema id'

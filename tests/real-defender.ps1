@@ -38,9 +38,32 @@ foreach ($u in $users.Keys) {
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
 public static class LanqCiLogon {
   [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
   public static extern bool LogonUser(string user, string domain, string password, int logonType, int provider, out IntPtr token);
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool DeviceIoControl(SafeFileHandle h, uint code, byte[] inBuf, int inSize, IntPtr outBuf, int outSize, out int returned, IntPtr overlapped);
+  // Turns the existing folder dir into a junction (mount point) to target, as any account with FILE_WRITE_DATA on it
+  // could (review round 2, H-A). 0 = it worked, else the Win32 error (145 = the folder is not empty).
+  public static int MakeJunction(string dir, string target) {
+    using (SafeFileHandle h = CreateFileW(dir, 0x2, 7, IntPtr.Zero, 3, 0x02000000 | 0x00200000, IntPtr.Zero)) {
+      if (h.IsInvalid) { return Marshal.GetLastWin32Error(); }
+      byte[] sub = Encoding.Unicode.GetBytes("\\??\\" + target); byte[] prn = Encoding.Unicode.GetBytes(target);
+      int dataLen = 8 + sub.Length + 2 + prn.Length + 2;
+      byte[] buf = new byte[8 + dataLen];
+      BitConverter.GetBytes(0xA0000003u).CopyTo(buf, 0); BitConverter.GetBytes((ushort)dataLen).CopyTo(buf, 4);
+      BitConverter.GetBytes((ushort)0).CopyTo(buf, 8); BitConverter.GetBytes((ushort)sub.Length).CopyTo(buf, 10);
+      BitConverter.GetBytes((ushort)(sub.Length + 2)).CopyTo(buf, 12); BitConverter.GetBytes((ushort)prn.Length).CopyTo(buf, 14);
+      sub.CopyTo(buf, 16); prn.CopyTo(buf, 16 + sub.Length + 2);
+      int got;
+      if (!DeviceIoControl(h, 0x000900A4, buf, buf.Length, IntPtr.Zero, 0, out got, IntPtr.Zero)) { return Marshal.GetLastWin32Error(); }
+      return 0;
+    }
+  }
 }
 '@
 function Get-Token([string]$User) {
@@ -144,12 +167,28 @@ Check ([System.IO.Directory]::Exists($work) -and -not [System.IO.Directory]::Exi
 Check (-not (Test-As 'lanqother' { [System.IO.File]::WriteAllText("$work\o.txt", 'x') })) "B8: another user cannot create a file in lanq-work ($ProbeErr)"
 Check (-not (Test-As 'lanqother' { [System.IO.Directory]::Move($work, $moved) })) "B8: another user cannot rename lanq-work ($ProbeErr)"
 Check (-not (Test-As 'lanqother' { [void][System.IO.Directory]::CreateDirectory("$work\sub2") })) "B8: another user cannot create a folder in lanq-work ($ProbeErr)"
+# H-A: the build user may turn an EMPTY folder with these permissions into a junction; lanq-work is never empty (its
+# admin-only .lanq-pin cannot be deleted by the build user), so on lanq-work the same attempt must fail.
+$jt = Join-Path ([Environment]::GetFolderPath('Windows')) 'Temp'
+$ctl = "$L`:\lanq-ci-jn-$([Guid]::NewGuid().ToString('N'))"; New-FixSecuredDir $ctl (Get-WorkDirSddl $sid)
+$script:JnCode = -1; [void](Test-As 'lanqbuild' { $script:JnCode = [LanqCiLogon]::MakeJunction($ctl, $jt) })
+$isJn = [bool]((Get-Item -LiteralPath $ctl -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+Check ($script:JnCode -eq 0 -and $isJn) "H-A control: the build user CAN make an empty folder with lanq-work's permissions a junction (code $($script:JnCode)); so the pin is needed"
+if ($isJn) { [System.IO.Directory]::Delete($ctl) } elseif ([System.IO.Directory]::Exists($ctl)) { [System.IO.Directory]::Delete($ctl, $true) }
+$script:JnCode = -1; [void](Test-As 'lanqbuild' { $script:JnCode = [LanqCiLogon]::MakeJunction($work, $jt) })
+Check ($script:JnCode -ne 0 -and -not ((Get-Item -LiteralPath $work -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) "H-A: the build user cannot make lanq-work a junction while its .lanq-pin is there (code $($script:JnCode), 145 = not empty)"
+Check (Test-SelfTestDir (Join-Path $work '.lanq-pin')) 'H-A: lanq-work\.lanq-pin is there, admin-owned and admin-only'
+Check (-not (Test-As 'lanqbuild' { [System.IO.Directory]::Delete((Join-Path $work '.lanq-pin'), $true) }) -and [System.IO.Directory]::Exists((Join-Path $work '.lanq-pin'))) "H-A: the build user cannot delete .lanq-pin ($ProbeErr)"
 
 # ---------- G3: the tune scan's drift check, run elevated ----------
 $psExe = (Get-Process -Id $PID).Path
+# The JSON goes to a file: powershell.exe -File ... -Json - exits 5 with no output (it takes the bare '-' itself);
+# that was the empty "defender.drift: : " in CI run 43604021080.
 function Get-Drift {
-  $o = & $psExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'lanq-makeready-tune.ps1') -Json - 2>$null
-  try { return @(("$($o -join "`n")" | ConvertFrom-Json).items | Where-Object { $_.id -eq 'defender.drift' })[0] } catch { return $null }
+  $jf = Join-Path ([IO.Path]::GetTempPath()) ("lanq-ci-tune-$([Guid]::NewGuid().ToString('N')).json")
+  $o = & $psExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'lanq-makeready-tune.ps1') -Json $jf 2>&1
+  Write-Host "  (tune scan: exit $LASTEXITCODE)"
+  try { return @((Get-Content -LiteralPath $jf -Raw | ConvertFrom-Json).items | Where-Object { $_.id -eq 'defender.drift' })[0] } catch { Write-Host "  tune output: $($o -join ' / ')"; return $null } finally { Remove-Item -LiteralPath $jf -ErrorAction SilentlyContinue }
 }
 $dr = Get-Drift; Write-Host "defender.drift: $($dr.status): $($dr.detail)"
 Check ($dr.status -eq 'OK') 'G3: defender.drift is OK right after the fix'

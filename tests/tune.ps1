@@ -120,7 +120,7 @@ $Bu = 'S-1-5-21-1111-2222-3333-1005'
 $rec = @{ User = $Bu; Vol = '{11111111-2222-3333-4444-555555555555}'; FileId = '0x1'; Sd = ('a' * 64) }
 function New-Drift([hashtable]$Over = @{}) {
   $d = @{ Entry = $true; Variant = $false; Record = $rec; Exists = $true; Reparse = $false; Sddl = ($WorkDirSddl -f $Bu); FileId = '0x1'; Vol = $rec.Vol; CaseSens = $false; ObCi = 1; Sample = @{ Count = 12; Bad = @(); Capped = $false }
-    RootSddl = 'O:SYG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)(A;OICIIO;SDGXGWGR;;;AU)(A;;0x4;;;AU)'; Bus = 'NVMe'; DevDrv = 'no' }
+    RootSddl = 'O:SYG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)(A;OICIIO;SDGXGWGR;;;AU)(A;;0x4;;;AU)'; Bus = 'NVMe'; DevDrv = 'no'; Pin = $true }
   foreach ($k in $Over.Keys) { $d[$k] = $Over[$k] }; return $d
 }
 Test-Case 'defender.drift' @{} 'OK' 'no lanq-work exclusion' '' 'no lanq-work exclusion'
@@ -133,7 +133,7 @@ foreach ($c in @(@(@{ Variant = $true }, 'not exactly'), @(@{ Entry = $false; Va
     @(@{ Sddl = "O:$($Bu)G:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200af;;;$Bu)(A;OICIIO;0x1301bf;;;$Bu)(A;OICIIO;0x1301bf;;;OW)" }, 'owner or permissions changed'),
     @(@{ FileId = '0x2' }, 'another file id or volume'), @(@{ Vol = '{99999999-2222-3333-4444-555555555555}' }, 'another file id or volume'), @(@{ CaseSens = $true }, 'case-sensitive'), @(@{ ObCi = 0 }, 'ObCaseInsensitive'),
     @(@{ Sample = @{ Count = 40; Bad = @('C:\lanq-work\x\evil'); Capped = $false } }, '1 of 40 sampled entries'),
-    @(@{ RootSddl = 'O:SYG:SYD:PAI(A;OICI;FA;;;BA)(A;;0x40;;;AU)' }, 'drive root'), @(@{ RootSddl = '' }, 'drive root'), @(@{ Bus = 'USB' }, 'USB'), @(@{ DevDrv = 'trusted' }, 'Dev Drive'))) {
+    @(@{ RootSddl = 'O:SYG:SYD:PAI(A;OICI;FA;;;BA)(A;;0x40;;;AU)' }, 'drive root'), @(@{ RootSddl = '' }, 'drive root'), @(@{ Bus = 'USB' }, 'USB'), @(@{ DevDrv = 'trusted' }, 'Dev Drive'), @(@{ Bus = $null }, 'bus could not be read'), @(@{ DevDrv = $null }, 'Dev Drive state could not be read'), @(@{ Pin = $false }, '.lanq-pin'))) {
   $i = Get-It (New-TFacts @{ Drift = (New-Drift $c[0]) }) 'defender.drift'
   Assert-True ($i.status -eq 'WARN' -and $i.security -and $i.detail -match $c[1] -and $i.advice -match '-Undo' -and $i.advice -match 'Remove-MpPreference') "G3/H4/M3: drift ($(($c[0].Keys) -join ',')): WARN (security) with the undo advice: $($c[1])"
 }
@@ -165,12 +165,12 @@ Assert-True ($text0 -notmatch 'ExpandEnvironmentVariables') 'L4: the tune scan e
 # the functions the tune scan copies from the fix script are the same there (record trust, permissions, Dev Drive)
 $fx0 = [System.IO.File]::ReadAllText((Join-Path $root 'lanq-makeready-fix.ps1'))
 $fxAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'lanq-makeready-fix.ps1'), [ref]$null, [ref]$null)
-foreach ($fn in 'ConvertFrom-Sddl', 'Get-AccountName', 'Test-TrustedSddl', 'Get-PathSddl', 'Test-FixRecordTrusted', 'Get-SdCanon', 'Get-DevDrvInfo', 'Test-DevDriveBuild', 'Test-RootSddl', 'Get-CaseSens') {
+foreach ($fn in 'ConvertFrom-Sddl', 'Get-AccountName', 'Test-TrustedSddl', 'Get-PathSddl', 'Test-FixRecordTrusted', 'Get-SdCanon', 'Get-DevDrvInfo', 'Test-DevDriveBuild', 'Test-RootSddl', 'Get-CaseSens', 'Get-RecordSortKey') {
   $a1 = @($past.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fn }, $true))
   $a2 = @($fxAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fn }, $true))
   Assert-True ($a1.Count -eq 1 -and $a2.Count -eq 1 -and $a1[0].Extent.Text -ceq $a2[0].Extent.Text) "$fn is the same in the tune and fix scripts"
 }
-foreach ($v in '$WorkDirSddl', '$WriteMask', '$BaSid', '$SySid', '$RootRiskMask') {
+foreach ($v in '$WorkDirSddl', '$WriteMask', '$BaSid', '$SySid', '$RootRiskMask', '$PinName') {
   $re = '(?m)^' + [regex]::Escape($v) + ' = .*$'; $m1 = [regex]::Match($text0, $re); $m2 = [regex]::Match($fx0, $re)
   if (-not $m1.Success) { $re = '(?m)' + [regex]::Escape($v) + ' = ''[^'']*'''; $m1 = [regex]::Match($text0, $re); $m2 = [regex]::Match($fx0, $re) }
   Assert-True ($m1.Success -and $m2.Success -and $m1.Value -ceq $m2.Value) "$v is the same in the tune and fix scripts"
