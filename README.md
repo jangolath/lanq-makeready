@@ -16,7 +16,7 @@ It starts and ends with one verdict line (`READY`, `READY WITH WARNINGS (n)` or 
 numbered next steps with the exact command or settings path for that OS, and prints a ready-to-paste `machines.yml`
 entry sized for the machine. It can also write a JSON report.
 
-Status: 0.5.0. Files: `lanq-makeready.ps1` (Windows PowerShell 5.1 and PowerShell 7), `lanq-makeready.sh`
+Status: 0.6.0 (unreleased). Files: `lanq-makeready.ps1` (Windows PowerShell 5.1 and PowerShell 7), `lanq-makeready.sh`
 (POSIX `sh`, Linux and macOS), `lanq-makeready-tune.ps1` / `lanq-makeready-tune.sh` (the tune scan),
 `lanq-makeready-fix.ps1` / `lanq-makeready-fix.sh` (fix mode), `schema/report.v1.json`, `schema/tune.v1.json`,
 `schema/fix-record.v1.json`, `tests/`.
@@ -24,6 +24,11 @@ Status: 0.5.0. Files: `lanq-makeready.ps1` (Windows PowerShell 5.1 and PowerShel
 Since 0.5.0 there is also a separate, read-only **tune scan** (`lanq-makeready-tune.ps1` / `.sh`): what slows a
 worker down or keeps it busy during the job window (power plan, PC-maker updaters, Defender scanning and schedule,
 caches, disk health, ...). It never changes readiness. See [Tune scan](#tune-scan).
+
+Since 0.6.0 the fix script also offers the **Defender ladder** (Windows): a VHDX-backed Dev Drive with
+`<letter>:\lanq-work` (`-Tune -CreateDevDrive`), or one fixed exclusion, `%SystemDrive%\lanq-work\`, for a folder the
+script makes itself and proves with a self-test (`-Tune -DefenderExclusions`). Both need `-BuildUser <account>`. See
+[docs/TUNE.md](docs/TUNE.md#the-defender-ladder-060).
 
 Since 0.4.0 there is also a separate, optional **fix script** (`lanq-makeready-fix.ps1` / `lanq-makeready-fix.sh`)
 for a short list of reversible fixes. The scanner never changes anything; the fix script changes only what you
@@ -284,9 +289,10 @@ automatic update reboots against `--hours`, package caches, SSD TRIM, SMART heal
 over 90% full. Host checks report `SKIP` inside a container; on macOS it says there are no tune checks.
 
 Items with a fix id can be changed at the PC with the fix script's `-Tune` gate (below, and
-[docs/TUNE.md](docs/TUNE.md)). Defender exclusions are not automated in 0.5.0: whether a folder can be trusted (who can write to it, where it really is, what runs from it) is hard to verify safely from a script, and a wrong exclusion silently turns off scanning. The scan says which build folders are scanned, and
-[docs/TUNE.md](docs/TUNE.md) has the manual steps (Dev Drive first; otherwise a locked-down top-level build folder
-and your NuGet cache, with `Add-MpPreference`). Cache clean-up, the Windows Update restart policy and the other
+[docs/TUNE.md](docs/TUNE.md)). Defender scanning of build folders has its own ladder (0.6.0): a Dev Drive first
+(`devdrive`, fix `devdrive.create`), otherwise the one fixed `lanq-work` exclusion (`defender.paths`, fix
+`defender.exclude`); run elevated, `defender.drift` checks that exclusion has not drifted. Nothing else is ever
+excluded by the script. Cache clean-up, the Windows Update restart policy and the other
 report-only items are never changed either.
 
 ## Fix mode
@@ -345,7 +351,7 @@ Then read it. This matters more than for the scanner, because this script change
    ```
 
    ```text
-   lanq-makeready-fix 0.5.0: changes only what you confirm, one fix at a time (default no)
+   lanq-makeready-fix 0.6.0: changes only what you confirm, one fix at a time (default no)
 
    power.sleep  (check power.sleep): the PC sleeps or hibernates on AC power
      now:     power scheme 381b4222-f694-41f0-9685-ff5bb260df2e: sleeps after 30 min, hibernates after 180 min (0 = never)
@@ -412,8 +418,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\lanq-makeready-fix.ps1 -Tu
 ```
 
 Windows tune fixes: `power.cpu`, `power.usbsuspend`, `startup.vendor`, `vendor.services`, `vendor.tasks`, `sysmain`,
-`do.mode`, `dotnet.env` and `defender.scantime` (needs `-Hours`). There is no Defender exclusion fix
-(`-DefenderExclusions` exits 2; see [docs/TUNE.md](docs/TUNE.md) for the manual steps). What each one changes and how it is undone is in [docs/TUNE.md](docs/TUNE.md). A record holds at most 64
+`do.mode`, `dotnet.env` and `defender.scantime` (needs `-Hours`). The Defender ladder (0.6.0) has its own switches,
+each alone and each with `-BuildUser <the dedicated local build account>`:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\lanq-makeready-fix.ps1 -Tune -CreateDevDrive -BuildUser lqbuild -WhatIf
+powershell -NoProfile -ExecutionPolicy Bypass -File .\lanq-makeready-fix.ps1 -Tune -DefenderExclusions -BuildUser lqbuild -WhatIf
+```
+
+`devdrive.create` makes a VHDX-backed Dev Drive with `<letter>:\lanq-work` (no exclusion; undo never removes it).
+`defender.exclude` makes `%SystemDrive%\lanq-work` (owner Administrators, fixed permissions) and adds the one
+exclusion `<drive>:\lanq-work\` after a self-test with the EICAR test file; any doubt means "not offered" (exit 0), a
+failed self-test or read-back rolls back (exit 1). You type the path to confirm; no path can be given. Set
+`NUGET_PACKAGES` per job only (machines.yml `env:`), never for the whole machine. What each one changes and how it is undone is in [docs/TUNE.md](docs/TUNE.md). A record holds at most 64
 changes; run the script again for the rest.
 
 On Linux, `sudo sh lanq-makeready-fix.sh --tune --dry-run` shows the tune fixes (it also works inside a container,
@@ -597,7 +614,7 @@ Never run those on a PC you care about.
 - AVX2 is only reported on PowerShell 7 (Windows PowerShell 5.1 would need a compiled helper, which writes temp files).
 - SSD/HDD detection inside VMs and containers is a heuristic and can be wrong.
 - The scanner deliberately reads neither Defender exclusions nor Windows Update contents. The tune scan, run elevated,
-  compares the exclusion list with work_root, the NuGet packages and temp inside its probe and prints only
+  compares the exclusion list with work_root, the NuGet packages, lanq-work and temp inside its probe and prints only
   scanned/excluded per folder, never the list.
 - The scanner has no `--fix` and never will; fixes live in the separate fix script ([Fix mode](#fix-mode)).
 - Wake-on-LAN readiness cannot see the BIOS/UEFI setting, and on Windows the adapter's power settings may need admin

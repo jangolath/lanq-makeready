@@ -1,5 +1,89 @@
 # Changelog
 
+## 0.6.0 (unreleased)
+
+- **Security: the record folder's parent is checked.** On a PC whose `C:\ProgramData` (or drive root) lets non-admins
+  rename or replace what is in it (not the Windows default), a non-admin could swap the record folder for a link and
+  redirect the elevated record save; this was possible in 0.5.0 too. Every elevated fix, `-Undo` and `-List` now
+  refuse on such PCs before they make, read or write a record (exit 2 for `-Undo` and `-List`). The message says what is wrong and gives the `icacls` command that
+  restores the default. The Windows default `C:\ProgramData` passes.
+- **The Defender ladder** (Windows, `lanq-makeready-fix.ps1 -Tune`). Defender scanning of build folders now has two
+  fixes, each with its own switch, each needing `-BuildUser <the dedicated local build account>`, each confirmed by
+  typing the path it makes (no `-Yes`, no path argument). Details: docs/TUNE.md, "The Defender ladder".
+  - **`devdrive.create`** (`-CreateDevDrive [-SizeGB 100]`, 50 to 65536): a VHDX-backed Dev Drive in
+    `%ProgramData%\lanq-makeready\devdrive` (Administrators and SYSTEM only), made with diskpart (fixed input),
+    `Initialize-Disk`, `New-Partition` and `Format-Volume -DevDrive`, checked with `fsutil devdrv query` (trusted,
+    antivirus allowed, WdFilter attached), with `<letter>:\lanq-work` on it. No exclusion. Windows 11 build
+    22621.2338 or later. Undo never removes a Dev Drive; it says how. Whether the VHDX comes back by itself after a
+    restart is checked on the pool before release (no startup task yet).
+  - **`defender.exclude`** (`-DefenderExclusions`): makes `%SystemDrive%\lanq-work` itself, with its owner
+    (Administrators) and fixed permissions in one call (the build user may add and change files inside, never rename,
+    delete or re-permission the folder; an inherited OWNER RIGHTS entry stops it from re-permissioning its own files),
+    reads it back, runs a positive control with the EICAR test file, adds the one exclusion `<drive>:\lanq-work\`,
+    reads it back (exactly one new entry, exactly that string), and checks that the test file stays inside lanq-work
+    and is still caught in `lanq-work-x`, `lanq-workx`, `lanq-work.x`, `lanq-work.`, `lanq-work` with a trailing space
+    and a stream. Any miss rolls the exclusion back (exit 1). Undo removes only the exclusion; the folder is kept.
+  - Review round 1:
+    - Any failure, error or interruption after `Add-MpPreference` rolls the exclusion back; the remove is read back,
+      and a leftover says FAILED with the command to run. A failed item never counts as done.
+    - The self-test folders are made admin-only in the record folder and moved into place, so a folder someone made
+      first fails the run; each is re-checked before every write and delete.
+    - The test files carry the run's id, and the siblings need a threat-history hit.
+    - The inside test is retried for up to 30 s while Defender applies the new exclusion (seen in CI).
+    - Fail-closed reads: scan direction and case sensitivity in any language. The tune scan orders and checks the
+      records it reads, and drift re-checks the drive root, the bus and Dev Drive.
+    - New `tests/pool-defender.ps1`: the pool-safe E1-E8 and G1 run for build-02.
+  - Review round 2:
+    - lanq-work keeps a permanent admin-only `.lanq-pin`, so the build user can never empty it and turn it into a
+      junction. It is staged with the folder and moved into place, checked on reuse, and lanq-work is re-checked
+      before every move, write and delete during the self-test. Undo keeps the pin; drift reports it missing.
+    - Threat-history hits need the exact `file:_<path>`.
+    - An unreadable exclusion list after the rollback says FAILED.
+    - Only the newest record item for a folder vouches for it.
+    - Drift treats an unknown bus or Dev Drive state as drift.
+    - `tests/pool-defender.ps1` undoes only the record its own apply wrote and is interrupt-safe. It refuses a checkout
+      others could change, and checks scanning through a junction (L2).
+  - Review round 3:
+    - Every self-test folder gets its own random name.
+    - A Dev Drive run that finds lanq-work made first removes its staging holder.
+    - `tests/pool-defender.ps1` checks its folder, the folders above it and both scripts before it loads anything
+      (inherit-only entries do not count). docs/TUNE.md gives the copy and `icacls` steps that pass.
+    - The L2 junction sits in an admin-only folder of the script's own and is removed even on interrupt.
+    - Clean-up compares lanq-work with the file id seen at the start.
+  - Review round 4:
+    - The record folder's parent and the drive root are checked (see Security above).
+    - lanq-work is staged admin-only with its pin before it gets its own permissions.
+    - `tests/pool-defender.ps1` stops unless the record folder it makes is trusted, and re-checks it before clean-up.
+      It removes the L2 link only while its folder and lanq-work are still its own, and refuses network paths.
+      docs/TUNE.md says to verify the release candidate before copying it.
+  - **Not offered** (report only, exit 0) on any doubt: Defender not active, real-time protection off or one-way,
+    exclusions hidden, managed by policy or MDM, Defender for Endpoint onboarded, an existing exclusion that covers
+    lanq-work (reported, never recorded or undone) or a variant of it, a drive that is not fixed, internal and NTFS,
+    a Dev Drive, a drive root others may rename in or re-permission, case sensitivity, or a lanq-work this script
+    cannot vouch for. An existing lanq-work counts only when a trusted fix record matches its volume GUID, file id and
+    permissions hash; there is no marker file.
+  - `-BuildUser` must be a local, enabled user account (exit 2 otherwise); the prompt shows its SID and warns when it
+    is an administrator. `NUGET_PACKAGES` goes per job only (machines.yml `env:`); the script never sets it.
+  - The EICAR test file is built at run time from a transformed constant; no script contains it. No P/Invoke or
+    Add-Type in the product scripts.
+- **Fix record**: new ids `defender.exclude` and `devdrive.create` and their state shapes, additive under
+  `lanq-makeready-fix/v1` (a 0.5 script rejects a record that holds them, exit 2).
+- **Tune scan**: `defender.paths` gets a lanq-work row and may carry fix id `defender.exclude` (a change for lanq,
+  which maps fix ids through its own table); the advice is now the ladder. New checks `defender.drift` (security,
+  needs admin: the lanq-work exclusion against its record, the folder's owner, permissions, file id and volume, and a
+  sample of its top two levels) and `devdrive` (fix id `devdrive.create`; WARN when antivirus is disallowed on a Dev
+  Drive). Exclusion entries with a variable are no longer expanded in the scanning account's context (Defender expands
+  them as SYSTEM). fsutil runs only from a fixed allow-list of reads. The scan stays under 800 lines.
+- **Linux**: `lanq-makeready-fix.sh` refuses `--defender-exclusions` and `--create-dev-drive` with exit 2 (Windows
+  only).
+- **Tests**: the review's matrix (A1-A10, B1-B8, C1-C4, D1-D7, E1-E9, G1-G4; the list is in docs/TUNE.md) written
+  first. Fakes in `tests/fix.ps1` and `tests/tune.ps1` (folders only in a temp sandbox, harmless test text, never
+  the real EICAR file), the guard extended with mutants, and a new CI pass, `tests/real-defender.ps1` ("Pass 4
+  (defender)"): a real apply on a disposable runner, two local non-admin users and LogonUser probes, drift and undo.
+  The EICAR checks there are best effort (the runner image turns real-time protection off; the pass prints a notice
+  and simulates only the scan results); E1-E8 and G1 run on a pool PC before release.
+- Version 0.6.0 in the scanners, tune scripts and fix scripts. The scanners are otherwise unchanged.
+
 ## 0.5.0 (2026-11-14)
 
 - **Tune scan**, in new, separate, read-only scripts: `lanq-makeready-tune.ps1` (Windows PowerShell 5.1 and

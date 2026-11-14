@@ -39,8 +39,13 @@ The same promises as the scanner: read-only, no network, no admin needed, writes
 `-Redact` on values, a time limit on every probe (and 90 seconds for the whole run). It never affects readiness and
 always exits 0 (2 for bad arguments). Two reads deserve a word:
 
-- **Defender exclusions** (elevated runs only) are compared with work_root, the NuGet packages and temp inside the
-  probe; only "scanned" or "excluded" per folder comes out. The list is never printed or put in the JSON.
+- **Defender exclusions** (elevated runs only) are compared with work_root, the NuGet packages, lanq-work and temp
+  inside the probe; only "scanned" or "excluded" per folder, and whether the lanq-work entry is there as the fix wrote
+  it, come out. The list is never printed or put in the JSON. Entries with a variable are never expanded in the
+  scanning account's context (0.6.0; Defender expands them as SYSTEM).
+- **lanq-work drift** (0.6.0, elevated runs only): when the lanq-work exclusion exists, it reads the fix records
+  (only trusted ones, as the fix script does), the folder's owner, permissions and file id, the volume, and the
+  permissions of at most 2000 entries in its top two levels (5 s). It prints only what drifted.
 - **Autologon**: the script tests only whether a `DefaultPassword` value exists under Winlogon (`GetValueNames()`).
   It never reads that value, and a test bans `Get-ItemProperty` from the script.
 
@@ -62,8 +67,8 @@ The fix script changes the PC, but only what its owner confirms there, one item 
   `core.longpaths`, the `administrators_authorized_keys` permissions. Linux: start sshd, mask the sleep targets.
   With `-Tune` (0.5.0+): the tune fixes in [docs/TUNE.md](docs/TUNE.md). PC-maker services, tasks and Run entries are
   taken only from a short curated list in the code (never "everything unused"), tasks under `\Microsoft\` are never
-  touched, and undo re-checks every name against that list. Defender exclusions are not automated (too hard to
-  verify a folder's trust safely); docs/TUNE.md gives the manual steps.
+  touched, and undo re-checks every name against that list. With `-Tune -CreateDevDrive` or `-Tune
+  -DefenderExclusions` (0.6.0+, each needs `-BuildUser`): the Defender ladder below.
   Nothing is installed, deleted, upgraded or downloaded, and there are no network calls.
 - **Never elevates itself.** Without admin or root, every fix is skipped with a note.
 - **Undo record.** Each change is recorded as `pending` before it is made and updated after it, so a crash leaves a
@@ -84,7 +89,76 @@ The fix script changes the PC, but only what its owner confirms there, one item 
   actually writes (the saved explicit entries, when the DACL was protected), and reads the file's DACL again afterwards:
   if Administrators or SYSTEM lost full control it fails loudly and prints the command that gives it back.
 
+### The Defender ladder in the fix script (0.6.0+)
+
+A Defender exclusion is a string that Defender matches at scan time, so the script excludes exactly one string it
+controls, for one folder it makes itself, and proves it. Reviewers check every change against this invariant:
+
+> Only SYSTEM, Administrators and the build user can cause any file to exist at an excluded path. The build user can
+> do so only inside lanq-work, and only for code it already runs, or for a principal it deliberately lets in. No
+> principal can redirect, rename or recreate any part of the excluded path.
+
+- **No path from anyone.** The one exclusion is `<drive>:\lanq-work\`, on the drive Windows is on; the Dev Drive rung
+  adds none. No argument, environment variable or record field can change it. A syntactic test of the script's
+  AST allows only that string, but it is a tripwire for review, not a proof. There is no `-Path` and no configuration.
+- **The script makes the folder.** `lanq-work` is created with its owner (Administrators) and its permissions in one
+  call, then read back: owner, exact permissions, empty, not a link, its file id. The build user can add and change
+  files inside but cannot rename, delete or re-permission the folder, and OWNER RIGHTS takes away its right to
+  re-permission its own files later (not to choose the permissions of a new one: see H3 below). An existing folder is used only when a trusted fix record matches its volume GUID,
+  file id and permissions hash (no marker file, which anyone could copy).
+- **The drive root is checked** (nobody but Administrators, SYSTEM and TrustedInstaller may delete or rename what is
+  in it, or change its permissions or owner), and so are the drive (fixed, internal, NTFS, not a Dev Drive) and case
+  sensitivity. Any doubt, any policy-managed Defender, or Defender for Endpoint: not offered (report only).
+- **Proven, not assumed.** Before the exclusion: a positive control (the EICAR test file in an admin-only folder
+  must be caught). After it: exactly one new entry, exactly that string; the test file must stay inside lanq-work and
+  must still be caught in every sibling form anyone could create (`lanq-work-x`, `lanq-workx`, `lanq-work.x`,
+  `lanq-work.`, `lanq-work` with a trailing space, a stream: this run's tagged file in Defender's threat history).
+  Any miss, error or interruption after the exclusion was added removes it again and reads the list back; if it is
+  still there the run says FAILED with the command to run (exit 1). A failed item never counts as done.
+- **Self-test folders cannot be swapped.** Each is made admin-only in the record folder and moved into place (a move
+  fails when the name exists), and checked again before every write and delete; a folder that is not ours is never
+  written to or deleted.
+- **lanq-work is never empty** (review round 2). It is made with a permanent admin-only child `.lanq-pin` in an
+  admin-only place and moved into place, so the build user can never turn it into a junction (that works only on an
+  empty folder) and cannot delete the pin. The pin is checked on every read-back and reuse, and lanq-work (not a
+  link, the same file id, the pin there) right before every move into it, write and delete there.
+- **Undo** removes only that exclusion string. The folder, its `.lanq-pin` and a Dev Drive are never deleted.
+- **No P/Invoke or Add-Type** in the product scripts (the non-admin checks are done in the CI test with LogonUser).
+
+New places the fix script writes, all only after you type the path to confirm: `%SystemDrive%\lanq-work` and its
+`.lanq-pin` (or `<Dev Drive>:\lanq-work` and its pin, staged in `<Dev Drive>:\.lanq-stage-<id>`); the Defender exclusion `<drive>:\lanq-work\`; self-test folders on the drive root
+(`lanq-selftest-<id>`, `lanq-work-<id>`, `lanq-work<id>`, `lanq-work.<id>`, `lanq-work.`, `lanq-work` with a trailing space,
+`lanq-work-<id>-ads`) and `lanq-work\lanq-selftest-<id>`, each created admin-only in the record folder (as
+`stage-<id>-<n>`), moved into place and removed again (a sibling name that
+already exists is never touched: the run stops); Defender's threat history (the EICAR detections); and for the Dev
+Drive, `%ProgramData%\lanq-makeready\devdrive\lanq-devdrive.vhdx` (folder Administrators and SYSTEM only) and the new
+volume.
+
+- **The folder above the record folder** (0.6.0, review round 4). The record folder's own permissions are not enough
+  if `C:\ProgramData` (or the drive root) lets others rename or replace what is in it: then the folder could be swapped
+  for one of theirs. Every elevated run (fixes, undo, the new rungs) now checks `C:\ProgramData` (not a link; owned by
+  Administrators, SYSTEM or TrustedInstaller; no one else may delete, rename, re-permission or take what is in it) and
+  the drive root before it makes, reads or writes a record (the fixes, `-Undo` and `-List` alike), and stops with what is wrong and the `icacls` command
+  that restores the Windows default. The Windows default `C:\ProgramData` passes. This also closes the same exposure
+  of the 0.5.0 record save on PCs whose `C:\ProgramData` was opened up.
+
 Residual risks, stated plainly:
+
+- **The build user's own output is not scanned.** That account already runs the build code, so the exclusion adds no
+  new exposure for it. Administrators must not run files from lanq-work.
+- **The build user can let others in** (accepted, review H3). OWNER RIGHTS stops it from changing permissions
+  later, but it can give a new file or folder any permissions when it creates it, move in a file from elsewhere on
+  the same drive that carries its own permissions, or make a hard link to a file it can write; then another account
+  could change that file, unscanned. Use a **dedicated** build account that runs
+  nothing else; the tune scan's `defender.drift` samples the top two levels for entries others may change. Only a
+  dedicated volume (a Dev Drive, rung 1, needs no exclusion at all) closes this fully.
+- **`NUGET_PACKAGES` per job only.** Setting it for the whole machine would make an administrator's `dotnet build`
+  run package build files (`.props`, `.targets`, analyzers) the build account can change. The script never sets it;
+  the docs say per job (machines.yml `env:`).
+- **Defender's matching is checked, not known.** The sibling matrix runs at every apply, and on a pool PC before each
+  release; a Defender update that changed matching would fail the next self-test, not the existing exclusion. Run the
+  tune scan elevated now and then (`defender.drift`).
+- **A Dev Drive VHDX** may need attaching again after a restart (see docs/TUNE.md).
 
 - **Undo of `ssh.aclkeys` re-opens what was open.** It gives the keys file back the permissions it had. Accounts that
   could change it before can change it again, and sshd ignores the file again. The prompt shows those permissions

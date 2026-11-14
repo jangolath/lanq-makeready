@@ -52,7 +52,7 @@ Each item:
 | Field | Meaning |
 |---|---|
 | `seq` | 1 to 999, unique: the order the changes were made. Undo goes from the highest down. |
-| `id` | the fix id. Windows: `ssh.start`, `ssh.auto`, `power.sleep`, `longpaths.on`, `git.longpaths`, `ssh.aclkeys`, and the tune fixes (0.5, `-Tune`) `power.cpu`, `power.usbsuspend`, `startup.vendor`, `vendor.services`, `vendor.tasks`, `sysmain`, `do.mode`, `dotnet.env`, `defender.scantime`. Linux: `ssh.start`, `power.sleep`, and with `--tune` also `sysctl.tune`, `journald.cap`, `services.unused` and `fstrim.timer`. Ids are additive: a script that does not know an id rejects the whole record ("unknown fix id", exit 2), so a 0.4 script refuses a 0.5 record with a tune id. |
+| `id` | the fix id. Windows: `ssh.start`, `ssh.auto`, `power.sleep`, `longpaths.on`, `git.longpaths`, `ssh.aclkeys`, and the tune fixes (0.5, `-Tune`) `power.cpu`, `power.usbsuspend`, `startup.vendor`, `vendor.services`, `vendor.tasks`, `sysmain`, `do.mode`, `dotnet.env`, `defender.scantime`, and the Defender ladder (0.6, `-Tune -DefenderExclusions` / `-CreateDevDrive`) `defender.exclude`, `devdrive.create`. Linux: `ssh.start`, `power.sleep`, and with `--tune` also `sysctl.tune`, `journald.cap`, `services.unused` and `fstrim.timer`. Ids are additive: a script that does not know an id rejects the whole record ("unknown fix id", exit 2), so a 0.4 script refuses a 0.5 record with a tune id, and a 0.5 script refuses a 0.6 record with a ladder id. |
 | `status` | `pending`, `applied`, `failed`, `undone` or `skipped` (below). |
 | `time` | UTC time of the last status change. |
 | `before` | the state before the change, in the fixed shape for the id (below). Undo puts this back. |
@@ -104,6 +104,8 @@ invalid.
 | windows : `do.mode` | `value=<n> type=dword` or `value=- type=none` | the `DODownloadMode` policy under `HKLM\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization`. The fix starts only from `none`, and undo removes the value (the key stays). |
 | windows : `dotnet.env` | `telemetry=(-\|<v>) nologo=(-\|<v>) aspnetcert=(-\|<v>)` | the machine environment values of `DOTNET_CLI_TELEMETRY_OPTOUT`, `DOTNET_NOLOGO`, `DOTNET_GENERATE_ASPNET_CERTIFICATE` (1-8 letters or digits; `-` = not set). Undo removes only the ones that were `-`. |
 | windows : `defender.scantime` | `day=[0-8] time=<0-1439> quick=<0-1439>` | Defender `ScanScheduleDay` and the scan and daily quick scan times in minutes after midnight (quick 0 = none). Undo sets both times back. |
+| windows : `defender.exclude` | `entry=[01] dir=(absent\|lanq\|other) path=<A-Z>:\lanq-work\ user=(-\|S-1-5-21-a-b-c-d) vol=(-\|{<volume GUID>}) fileid=(-\|0x<hex>) sd=(-\|<64 hex>)` | 0.6.0. Whether the exclusion `<drive>:\lanq-work\` is there, and lanq-work: absent, made by this script (`lanq`) or other; the build account; the volume GUID, file id and SHA-256 of the canonical permissions that tie a later run to the same folder (an existing lanq-work is used only when a trusted record matches all three). The path is always that fixed folder on the drive Windows is on. Undo removes only the exclusion string; the folder is never deleted. |
+| windows : `devdrive.create` | `vhd=(absent\|attached\|detached) letter=(-\|<D-Z>) size=<50-65536> user=(-\|S-1-5-21-a-b-c-d) dir=(absent\|lanq\|other)` | 0.6.0. The Dev Drive VHDX `%ProgramData%\lanq-makeready\devdrive\lanq-devdrive.vhdx`, its letter, its size in GB, the build account and `<letter>:\lanq-work`. Undo leaves a Dev Drive alone and says how to remove it. |
 | linux : `ssh.start` | `unit=(ssh\|sshd) enabled=(enabled\|disabled) active=(active\|inactive)` | `systemctl is-enabled` / `is-active` of the unit (`failed` counts as inactive) |
 | linux : `power.sleep` | `sleep=<v> suspend=<v> hibernate=<v> hybrid-sleep=<v>` | `systemctl is-enabled` of the four targets, for example `static`, `masked`, `masked-runtime`, `none` (not found) |
 | linux : `sysctl.tune` | `file=(absent\|lanq) instances=<n> watches=<n>` | The two `fs.inotify` limits, and `/etc/sysctl.d/99-zz-lanq-makeready.conf` (`lanq` = a regular file, not a link, whose first line is this script's marker). It is offered only when the file is absent. Apply writes the file, holding only the limits below 1024 / 524288 (it never lowers one), then runs `sysctl -w` for them. Undo removes the file and runs `sysctl -w` with the old values of the raised limits. |
@@ -158,7 +160,7 @@ Item 3 is still `pending`: the session stopped after the record was written. Und
 ```json
 {
   "schema": "lanq-makeready-fix/v1",
-  "tool": {"name": "lanq-makeready-fix", "version": "0.5.0"},
+  "tool": {"name": "lanq-makeready-fix", "version": "0.6.0"},
   "os": "windows",
   "host": "BUILD-01",
   "user": "builder",

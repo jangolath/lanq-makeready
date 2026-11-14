@@ -28,7 +28,8 @@ function New-TFacts([hashtable]$Over = @{}) {
     DotnetEnv = @{ DOTNET_CLI_TELEMETRY_OPTOUT = '1'; DOTNET_NOLOGO = '1'; DOTNET_GENERATE_ASPNET_CERTIFICATE = 'false' }; WslInstalled = $false; WslReclaim = $false
     Defender = @{ Mode = 'Normal'; Rtp = $true; Day = 8; Time = 120; Quick = 0; Idle = $true; Scanned = [ordered]@{ work_root = $true; 'NuGet packages' = $true; temp = $true } }
     AvOther = @(); Pagefile = @{ Auto = $true; Files = @(@{ Name = 'C:\pagefile.sys'; Max = 0 }); RamMB = 16384 }; RamMB = 16384; Drivers = @(@{ Name = 'NIC'; Date = [datetime]'2024-01-01' })
-    NugetV3 = @{ MB = 10; Capped = $false }; SoftDist = @{ MB = 10; Capped = $false }; AutoLogon = '0'; AutoLogonPlain = $false; OneDrive = @('C:\Users\builder\OneDrive'); MaintOff = $false; MaintMin = 600 }
+    NugetV3 = @{ MB = 10; Capped = $false }; SoftDist = @{ MB = 10; Capped = $false }; AutoLogon = '0'; AutoLogonPlain = $false; OneDrive = @('C:\Users\builder\OneDrive'); MaintOff = $false; MaintMin = 600
+    SysDrive = 'C'; LwExists = $false; Drift = @{ Entry = $false; Variant = $false }; Build = 26100; Ubr = 4000; DevDrives = @(@{ Letter = 'D:'; State = 'trusted'; Av = 'ok' }) }
   foreach ($k in $Over.Keys) { $f[$k] = $Over[$k] }
   return $f
 }
@@ -44,8 +45,8 @@ Write-Host 'all fine'
 $all = @(Get-TuneItems (New-TFacts))
 Assert-Equal (@($all | Where-Object { $_.status -ne 'OK' } | ForEach-Object { "$($_.id)=$($_.status)" }) -join ',') 'defender.paths=INFO,bios.power=INFO' 'baseline: everything OK except the Defender build-folder scan and the BIOS reminder'
 $ids = @($all | ForEach-Object { $_.id })
-Assert-Equal $ids.Count 24 '24 checks'
-Assert-Equal (@($ids | Sort-Object -Unique).Count) 24 'every check id once'
+Assert-Equal $ids.Count 26 '26 checks'
+Assert-Equal (@($ids | Sort-Object -Unique).Count) 26 'every check id once'
 Assert-True (@($ids | Where-Object { $_ -notmatch '^[a-z0-9]{1,16}(\.[a-z0-9]{1,16}){0,2}$' }).Count -eq 0) 'every id has the schema shape'
 
 Write-Host 'one case per status per check'
@@ -92,9 +93,16 @@ Test-Case 'dotnet.env' @{ DotnetEnv = @{ DOTNET_NOLOGO = '1' } } 'INFO' 'two mis
 Test-Case 'dotnet.env' @{ DotnetEnv = $null } 'SKIP' 'unreadable'
 Test-Case 'wsl.reclaim' @{ WslInstalled = $true } 'INFO' 'no autoMemoryReclaim (report only)' ''
 Test-Case 'wsl.reclaim' @{ WslInstalled = $true; WslReclaim = $true } 'OK' 'set'
-Test-Case 'defender.paths' @{} 'INFO' 'work_root and NuGet scanned (report only, no fix id)' '' 'work_root scanned, NuGet packages scanned, temp scanned'
+Test-Case 'defender.paths' @{} 'INFO' 'work_root and NuGet scanned: the lanq-work exclusion is offered' 'defender.exclude' 'work_root scanned, NuGet packages scanned, temp scanned'
 $dpa = (Get-It (New-TFacts) 'defender.paths').advice
-Assert-True ($dpa -match 'Not automated' -and $dpa -match 'Dev Drive' -and $dpa -match 'top-level build folder' -and $dpa -match 'never temp' -and $dpa -match 'icacls' -and $dpa -match 'Add-MpPreference -ExclusionPath' -and $dpa -match 'Remove-MpPreference' -and $dpa -match 'docs/TUNE.md' -and $dpa.Length -le 1024) 'defender.paths: the advice is the manual procedure (Dev Drive first, top-level folder, lock down, Add-MpPreference, undo) and points at docs/TUNE.md'
+Assert-True ($dpa -match 'Dev Drive' -and $dpa -match '-CreateDevDrive' -and $dpa -match '-DefenderExclusions -BuildUser' -and $dpa -match 'C:\\lanq-work' -and $dpa -match 'never temp' -and $dpa -match 'NUGET_PACKAGES' -and $dpa -match 'docs/TUNE.md' -and $dpa.Length -le 1024) 'defender.paths: the advice is the ladder (Dev Drive first, then the lanq-work exclusion), NUGET_PACKAGES per job, never temp, docs/TUNE.md'
+$lw = [ordered]@{ work_root = $true; 'NuGet packages' = $true; 'lanq-work' = $false; temp = $true }
+Test-Case 'defender.paths' @{ Defender = @{ Mode = 'Normal'; Rtp = $true; Scanned = $lw } } 'INFO' 'lanq-work excluded, work_root elsewhere: no fix id' '' 'lanq-work excluded'
+$lw = [ordered]@{ work_root = $false; 'NuGet packages' = $false; 'lanq-work' = $false; temp = $true }
+Test-Case 'defender.paths' @{ Defender = @{ Mode = 'Normal'; Rtp = $true; Scanned = $lw } } 'OK' 'lanq-work, work_root and NuGet excluded' '' 'lanq-work excluded'
+$lw = [ordered]@{ work_root = $false; 'NuGet packages' = $false; 'lanq-work' = $true; temp = $true }
+Assert-True ((Get-It (New-TFacts @{ Defender = @{ Mode = 'Normal'; Rtp = $true; Scanned = $lw } }) 'defender.paths').detail -notmatch 'lanq-work') 'defender.paths: no lanq-work row while the folder does not exist and is not excluded'
+Assert-True ((Get-It (New-TFacts @{ LwExists = $true; Defender = @{ Mode = 'Normal'; Rtp = $true; Scanned = $lw } }) 'defender.paths').detail -match 'lanq-work scanned') 'defender.paths: a lanq-work row once the folder exists'
 Test-Case 'defender.paths' @{ Defender = @{ Mode = 'Normal'; Rtp = $true; Scanned = [ordered]@{ work_root = $false; 'NuGet packages' = $false; temp = $true } } } 'OK' 'build folders excluded, temp scanned (temp is never offered)'
 Test-Case 'defender.paths' @{ Defender = @{ Mode = 'Normal'; Rtp = $true; Scanned = [ordered]@{ work_root = $false; 'NuGet packages' = $false; temp = $false } } } 'WARN' 'temp excluded (the advice says never)' '' 'temp should never be excluded'
 Test-Case 'defender.paths' @{ Defender = @{ Mode = 'Normal'; Rtp = $true; Scanned = $null } } 'SKIP' 'not elevated' '' 'needs admin'
@@ -107,6 +115,74 @@ Test-Case 'defender.schedule' @{ Defender = @{ Mode = 'Normal'; Rtp = $true; Day
 Test-Case 'defender.schedule' @{ Defender = @{ Mode = 'Normal'; Rtp = $true; Day = 0; Time = 720; Quick = 0 } } 'OK' 'outside the window'
 Test-Case 'defender.schedule' @{ Defender = $dfOn; Hours = $null } 'SKIP' 'no -Hours' '' 'no -Hours'
 Test-Case 'defender.schedule' @{ Defender = @{ Mode = 'SxS Passive Mode'; Day = 0; Time = 120 } } 'SKIP' 'not the active antivirus'
+# G3 / M8: defender.drift (needs admin; tune usually runs non-elevated over SSH, then SKIP)
+$Bu = 'S-1-5-21-1111-2222-3333-1005'
+$rec = @{ User = $Bu; Vol = '{11111111-2222-3333-4444-555555555555}'; FileId = '0x1'; Sd = ('a' * 64) }
+function New-Drift([hashtable]$Over = @{}) {
+  $d = @{ Entry = $true; Variant = $false; Record = $rec; Exists = $true; Reparse = $false; Sddl = ($WorkDirSddl -f $Bu); FileId = '0x1'; Vol = $rec.Vol; CaseSens = $false; ObCi = 1; Sample = @{ Count = 12; Bad = @(); Capped = $false }
+    RootSddl = 'O:SYG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)(A;OICIIO;SDGXGWGR;;;AU)(A;;0x4;;;AU)'; Bus = 'NVMe'; DevDrv = 'no'; Pin = $true }
+  foreach ($k in $Over.Keys) { $d[$k] = $Over[$k] }; return $d
+}
+Test-Case 'defender.drift' @{} 'OK' 'no lanq-work exclusion' '' 'no lanq-work exclusion'
+Test-Case 'defender.drift' @{ Drift = (New-Drift) } 'OK' 'excluded, and the folder is as the fix made it' '' '12 entries sampled'
+Test-Case 'defender.drift' @{ Elevated = $false; Drift = $null } 'SKIP' 'not elevated (M8)' '' 'needs admin'
+Test-Case 'defender.drift' @{ Drift = $null } 'SKIP' 'unreadable'
+Test-Case 'defender.drift' @{ Defender = @{ Mode = 'Passive Mode'; Rtp = $true }; Drift = (New-Drift) } 'SKIP' 'Defender not the active antivirus'
+foreach ($c in @(@(@{ Variant = $true }, 'not exactly'), @(@{ Entry = $false; Variant = $true }, 'not exactly'), @(@{ Record = $null }, 'no trusted fix record'), @(@{ Exists = $false }, 'gone'), @(@{ Reparse = $true }, 'link or junction'),
+    @(@{ Sddl = "O:BAG:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200af;;;$Bu)(A;OICIIO;0x1301bf;;;$Bu)(A;OICIIO;0x1301bf;;;OW)(A;OICI;FA;;;WD)" }, 'owner or permissions changed'),
+    @(@{ Sddl = "O:$($Bu)G:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200af;;;$Bu)(A;OICIIO;0x1301bf;;;$Bu)(A;OICIIO;0x1301bf;;;OW)" }, 'owner or permissions changed'),
+    @(@{ FileId = '0x2' }, 'another file id or volume'), @(@{ Vol = '{99999999-2222-3333-4444-555555555555}' }, 'another file id or volume'), @(@{ CaseSens = $true }, 'case-sensitive'), @(@{ ObCi = 0 }, 'ObCaseInsensitive'),
+    @(@{ Sample = @{ Count = 40; Bad = @('C:\lanq-work\x\evil'); Capped = $false } }, '1 of 40 sampled entries'),
+    @(@{ RootSddl = 'O:SYG:SYD:PAI(A;OICI;FA;;;BA)(A;;0x40;;;AU)' }, 'drive root'), @(@{ RootSddl = '' }, 'drive root'), @(@{ Bus = 'USB' }, 'USB'), @(@{ DevDrv = 'trusted' }, 'Dev Drive'), @(@{ Bus = $null }, 'bus could not be read'), @(@{ DevDrv = $null }, 'Dev Drive state could not be read'), @(@{ Pin = $false }, '.lanq-pin'))) {
+  $i = Get-It (New-TFacts @{ Drift = (New-Drift $c[0]) }) 'defender.drift'
+  Assert-True ($i.status -eq 'WARN' -and $i.security -and $i.detail -match $c[1] -and $i.advice -match '-Undo' -and $i.advice -match 'Remove-MpPreference') "G3/H4/M3: drift ($(($c[0].Keys) -join ',')): WARN (security) with the undo advice: $($c[1])"
+}
+Assert-Equal (Test-SampleSddl ($WorkDirSddl -f $Bu) $Bu) '' 'G3/H3: a sampled entry with the inherited permissions is fine'
+Assert-Equal (Test-SampleSddl "O:$($Bu)G:SYD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;0x1301bf;;;$Bu)(A;ID;0x1301bf;;;OW)" $Bu) '' 'G3: a file the build user owns, inheriting the folder entries, is fine'
+foreach ($b in @("O:$($Bu)G:SYD:AI(A;ID;FA;;;SY)(XA;;0x1;;;WD;(@User.x == `"y`"))", "O:S-1-5-21-9-9-9-1001G:SYD:AI(A;ID;FA;;;SY)", "O:$($Bu)G:SYD:AI(A;;FA;;;WD)(A;ID;FA;;;SY)", "O:$($Bu)G:SYD:AI(A;;0x2;;;S-1-5-21-9-9-9-1001)", 'O:BAG:SYD:NO_ACCESS_CONTROL', '')) {
+  Assert-True ((Test-SampleSddl $b $Bu) -ne '') "G3/H3: a sampled entry another account owns or may change is drift: $b"
+}
+# G3: Dev Drive
+Test-Case 'devdrive' @{} 'OK' 'a trusted Dev Drive' '' 'D:'
+Test-Case 'devdrive' @{ DevDrives = @() } 'INFO' 'no Dev Drive: offered' 'devdrive.create' 'no Dev Drive'
+Test-Case 'devdrive' @{ DevDrives = @(@{ Letter = 'D:'; State = 'trusted'; Av = 'disallowed' }) } 'WARN' 'antivirus disallowed' '' 'disallowAv'
+Test-Case 'devdrive' @{ DevDrives = @(@{ Letter = 'D:'; State = 'untrusted'; Av = 'ok' }) } 'INFO' 'untrusted' '' 'not trusted'
+Test-Case 'devdrive' @{ Build = 19045; Ubr = 5000 } 'SKIP' 'Windows 10' '' '22621.2338'
+Test-Case 'devdrive' @{ Elevated = $false; DevDrives = $null } 'SKIP' 'not elevated' '' 'needs admin'
+Test-Case 'devdrive' @{ DevDrives = $null } 'SKIP' 'unreadable'
+$ndv = (Get-It (New-TFacts @{ DevDrives = @() }) 'devdrive').advice
+Assert-True ($ndv -match '-CreateDevDrive -BuildUser' -and $ndv -match 'work_root' -and $ndv -match 'restart') 'devdrive: the advice names the fix, work_root and the restart check'
+$hc = @(Get-TuneItems (New-TFacts @{ Container = $true; DevDrives = @() }))
+Assert-True (@($hc | Where-Object { @('defender.drift', 'devdrive') -contains $_.id -and ($_.status -ne 'SKIP' -or $_.fixId) }).Count -eq 0) 'defender.drift and devdrive are host checks (SKIP in a container)'
+# L4: the probe never expands a variable in an exclusion (Defender expands it as SYSTEM, not as this user)
+$past = [System.Management.Automation.Language.Parser]::ParseFile($tunePath, [ref]$null, [ref]$null)
+$covA = @($past.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$cov' }, $true))
+Assert-Equal $covA.Count 1 'L4: one exclusion comparer ($cov) in the Defender probe'
+$cov = [scriptblock]::Create($covA[0].Right.Extent.Text.Trim())
+$cov = & $cov
+Assert-True ((& $cov 'C:\lq' 'C:\lq\') -and (& $cov 'c:\' 'C:\lq\') -and (& $cov '\\?\C:\lq\' 'C:\lq\') -and -not (& $cov '%TEMP%' "$env:TEMP\") -and -not (& $cov '%SystemDrive%\' 'C:\lq\') -and -not (& $cov 'C:\lq-old' 'C:\lq\')) 'L4: covers by prefix; entries with a variable are never expanded in this account''s context'
+Assert-True ($text0 -notmatch 'ExpandEnvironmentVariables') 'L4: the tune scan expands no environment variable'
+# the functions the tune scan copies from the fix script are the same there (record trust, permissions, Dev Drive)
+$fx0 = [System.IO.File]::ReadAllText((Join-Path $root 'lanq-makeready-fix.ps1'))
+$fxAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'lanq-makeready-fix.ps1'), [ref]$null, [ref]$null)
+foreach ($fn in 'ConvertFrom-Sddl', 'Get-AccountName', 'Test-TrustedSddl', 'Get-PathSddl', 'Test-FixRecordTrusted', 'Get-SdCanon', 'Get-DevDrvInfo', 'Test-DevDriveBuild', 'Test-RootSddl', 'Get-CaseSens', 'Get-RecordSortKey') {
+  $a1 = @($past.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fn }, $true))
+  $a2 = @($fxAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fn }, $true))
+  Assert-True ($a1.Count -eq 1 -and $a2.Count -eq 1 -and $a1[0].Extent.Text -ceq $a2[0].Extent.Text) "$fn is the same in the tune and fix scripts"
+}
+foreach ($v in '$WorkDirSddl', '$WriteMask', '$BaSid', '$SySid', '$RootRiskMask', '$PinName') {
+  $re = '(?m)^' + [regex]::Escape($v) + ' = .*$'; $m1 = [regex]::Match($text0, $re); $m2 = [regex]::Match($fx0, $re)
+  if (-not $m1.Success) { $re = '(?m)' + [regex]::Escape($v) + ' = ''[^'']*'''; $m1 = [regex]::Match($text0, $re); $m2 = [regex]::Match($fx0, $re) }
+  Assert-True ($m1.Success -and $m2.Success -and $m1.Value -ceq $m2.Value) "$v is the same in the tune and fix scripts"
+}
+# LOW: the newest record wins by time, then by number (fix-...Z-2.json after fix-...Z.json, -10 after -9); only well-formed records count
+$names = @('fix-20261114T100000Z-10.json', 'fix-20261114T100000Z.json', 'fix-20261114T100000Z-2.json', 'fix-20261113T235959Z-9.json')
+Assert-Equal (@($names | Sort-Object { Get-RecordSortKey $_ }) -join ',') 'fix-20261113T235959Z-9.json,fix-20261114T100000Z.json,fix-20261114T100000Z-2.json,fix-20261114T100000Z-10.json' 'LOW: records are ordered by time and number, not by name'
+$goodRec = "{`n  `"schema`": `"lanq-makeready-fix/v1`",`n  `"tool`": {`"name`": `"lanq-makeready-fix`", `"version`": `"0.6.0`"},`n  `"os`": `"windows`",`n  `"items`": []`n}`n"
+Assert-True ((Test-RecordText $goodRec) -and -not (Test-RecordText $goodRec.Replace('windows', 'linux')) -and -not (Test-RecordText $goodRec.Replace('fix/v1', 'fix/v2')) -and -not (Test-RecordText ($goodRec + [char]0xE9)) -and -not (Test-RecordText ($goodRec + (' ' * 300000)))) 'LOW: the tune scan reads a record only when it has the fix record schema, Windows, plain ASCII, at most 256 KB'
+Assert-True ((Get-CaseSens 'Case sensitive attribute on directory C:\ is disabled.') -eq $false -and $null -eq (Get-CaseSens 'Gross- und Kleinschreibung: deaktiviert')) 'LOW: case sensitivity read fails closed in another language'
+foreach ($ok in 'behavior query DisableDeleteNotify', 'devdrv query D:', 'file queryfileid C:\lanq-work', 'file queryCaseSensitiveInfo C:\') { Assert-True ((Test-FsutilArg $ok)) "fsutil read allowed: $ok" }
+foreach ($no in 'behavior set DisableDeleteNotify 0', 'devdrv trust D:', 'devdrv query D: & del x', 'file queryfileid C:\Windows', 'file setCaseSensitiveInfo C:\ enable', 'devdrv enable /disallowAv') { Assert-True (-not (Test-FsutilArg $no)) "fsutil refused: $no" }
 Test-Case 'av.other' @{ AvOther = @('Another AV') } 'INFO' 'another antivirus (report only)' '' 'Another AV'
 Test-Case 'av.other' @{ AvOther = $null } 'SKIP' 'Security Center unreadable'
 Test-Case 'av.other' @{ AvOther = $null; Defender = @{ Mode = 'Passive Mode'; Rtp = $false } } 'INFO' 'Defender passive (AMRunningMode), Security Center unreadable' '' 'Passive Mode'
@@ -150,12 +226,15 @@ Assert-Equal (@($bi | Where-Object { $_.fixId } | ForEach-Object { $_.fixId }) -
 Assert-True (@($bi | Where-Object { $_.fixId -and @('INFO', 'WARN') -notcontains $_.status }).Count -eq 0) 'a fix id only on INFO or WARN'
 Assert-True (@($bi | Where-Object { @('OK', 'SKIP') -contains $_.status -and $_.advice }).Count -eq 0) 'no advice on OK or SKIP'
 Assert-True (@($bi | Where-Object { @('OK', 'INFO', 'WARN', 'SKIP') -notcontains $_.status }).Count -eq 0) 'never FAIL'
-Assert-Equal (@($bi | Where-Object { $_.security } | ForEach-Object { $_.id }) -join ',') 'defender.paths,av.other,autologon.plain' 'security items'
+Assert-Equal (@($bi | Where-Object { $_.security } | ForEach-Object { $_.id }) -join ',') 'defender.paths,defender.drift,devdrive,av.other,autologon.plain' 'security items'
 $fixIds = @('power.cpu', 'power.usbsuspend', 'startup.vendor', 'vendor.services', 'vendor.tasks', 'sysmain', 'do.mode', 'dotnet.env', 'defender.scantime')
 $fixText = [System.IO.File]::ReadAllText((Join-Path $root 'lanq-makeready-fix.ps1'))
 Assert-True ($fixText -match [regex]::Escape("`$TuneFixIds = @('$($fixIds -join "', '")')")) 'every fix id the tune scan names is a fix in lanq-makeready-fix.ps1'
+Assert-True ($fixText -match [regex]::Escape("`$DefenderFixIds = @('defender.exclude', 'devdrive.create')")) 'defender.exclude and devdrive.create are fixes in lanq-makeready-fix.ps1'
+$fixIds += @('defender.exclude', 'devdrive.create')
 $src = [System.IO.File]::ReadAllText($tunePath)
-$named = @([regex]::Matches($src, "\`$true '([a-z.]+)'") | ForEach-Object { $_.Groups[1].Value }) + @([regex]::Matches($src, "'(defender\.exclude|startup\.vendor)' \`$true") | ForEach-Object { $_.Groups[1].Value })
+$named = @([regex]::Matches($src, "\`$true '([a-z.]+)'") | ForEach-Object { $_.Groups[1].Value }) + @([regex]::Matches($src, "'(defender\.exclude|devdrive\.create|startup\.vendor)'") | ForEach-Object { $_.Groups[1].Value })
+Assert-True (@($named | Where-Object { $_ -eq 'defender.exclude' }).Count -gt 0 -and @($named | Where-Object { $_ -eq 'devdrive.create' }).Count -gt 0) 'the tune scan names defender.exclude and devdrive.create'
 Assert-True (@($named | Where-Object { $fixIds -notcontains $_ }).Count -eq 0) 'the script names no fix id the fix script lacks'
 
 Write-Host 'review fixes: names from the PC, task SIDs, scan time, task errors, work_root'
@@ -258,23 +337,27 @@ function Get-TuneGuardViolations($Ast) {
   $funcNames = @($Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) | ForEach-Object { $_.Name })
   $fnOf = { param($Node) $p = $Node.Parent; while ($p) { if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $p.Name }; $p = $p.Parent }; return '' }
   $ok = @('ConvertTo-Json', 'ForEach-Object', 'Get-ChildItem', 'Get-CimInstance', 'Get-Content', 'Get-Item', 'Get-Location', 'Get-MpComputerStatus', 'Get-MpPreference', 'Get-NetAdapter', 'Get-Partition',
-    'Get-PhysicalDisk', 'Get-ScheduledTask', 'Get-Service', 'Get-Command', 'Get-StorageReliabilityCounter', 'Join-Path', 'New-Object', 'Sort-Object', 'Test-Path', 'Where-Object', 'Write-Host')
+    'Get-PhysicalDisk', 'Get-ScheduledTask', 'Get-Service', 'Get-Command', 'Get-StorageReliabilityCounter', 'Join-Path', 'New-Object', 'Sort-Object', 'Test-Path', 'Where-Object', 'Write-Host',
+    'Get-Acl', 'ConvertFrom-Json', 'Get-Volume', 'Split-Path', 'Get-Disk')
   foreach ($c in $Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
     $n = $c.GetCommandName(); $fn = & $fnOf $c
-    if (-not $n) { if (-not (($c.Extent.Text -match '^& \$(add|why)\b' -and $fn -eq 'Get-TuneItems') -or ($c.Extent.Text -match '^& \$min\b'))) { $bad += "dynamic command: $($c.Extent.Text)" }; continue }
+    if (-not $n) { if (-not (($c.Extent.Text -match '^& \$(add|why)\b' -and $fn -eq 'Get-TuneItems') -or ($c.Extent.Text -match '^& \$(min|cov)\b'))) { $bad += "dynamic command: $($c.Extent.Text)" }; continue }
     if ($ok -notcontains $n -and $funcNames -notcontains $n) { $bad += "command $n" }
     if ($n -eq 'Write-Host' -and $fn -ne 'Write-Out') { $bad += 'Write-Host outside Write-Out' }
-    if ($n -eq 'New-Object' -and @('System.Diagnostics.ProcessStartInfo', 'System.Collections.Generic.Stack[string]', 'System.IO.FileInfo', 'System.IO.DirectoryInfo', 'System.Collections.ArrayList', 'System.Text.UTF8Encoding', 'Security.Principal.WindowsPrincipal', 'System.IO.DriveInfo') -notcontains $c.CommandElements[1].Extent.Text.Trim("'`"")) { $bad += "New-Object $($c.CommandElements[1].Extent.Text)" }
+    if ($n -eq 'New-Object' -and @('System.Diagnostics.ProcessStartInfo', 'System.Collections.Generic.Stack[string]', 'System.IO.FileInfo', 'System.IO.DirectoryInfo', 'System.Collections.ArrayList', 'System.Text.UTF8Encoding', 'Security.Principal.WindowsPrincipal', 'System.IO.DriveInfo', 'System.Security.AccessControl.RawSecurityDescriptor') -notcontains $c.CommandElements[1].Extent.Text.Trim("'`"")) { $bad += "New-Object $($c.CommandElements[1].Extent.Text)" }
     if ($n -eq 'Invoke-Exe' -and $fn -ne 'Invoke-Exe') {
-      $arg = $c.CommandElements[2].Extent.Text
-      if ($c.CommandElements[1].Extent.Text -notmatch '^(\$pc|\(Join-Path \(\[Environment\]::GetFolderPath\(''System''\)\) ''fsutil\.exe''\))$' -or ($arg -notmatch "^'/q SCHEME_CURRENT [A-Za-z0-9_ -]+'$" -and $arg -ne "'behavior query DisableDeleteNotify'")) { $bad += "Invoke-Exe other than powercfg /q or fsutil behavior query: $($c.Extent.Text)" }
+      # powercfg /q with fixed text; fsutil only from Invoke-Fsutil, which runs only the reads Test-FsutilArg allows
+      $exe = $c.CommandElements[1].Extent.Text; $arg = $c.CommandElements[2].Extent.Text
+      $okPc = ($exe -eq '$pc' -and $arg -match "^'/q SCHEME_CURRENT [A-Za-z0-9_ -]+'$")
+      $okFs = ($fn -eq 'Invoke-Fsutil' -and $exe -eq "(Join-Path ([Environment]::GetFolderPath('System')) 'fsutil.exe')" -and $arg -eq '$ArgText')
+      if (-not ($okPc -or $okFs)) { $bad += "Invoke-Exe other than powercfg /q or the fsutil reads: $($c.Extent.Text)" }
     }
     if ($n -eq 'ForEach-Object' -and -not ($c.CommandElements.Count -gt 1 -and $c.CommandElements[1] -is [System.Management.Automation.Language.ScriptBlockExpressionAst])) { $bad += "ForEach-Object without a script block" }
   }
   $okMembers = @('Add', 'AddArgument', 'AddScript', 'AddYears', 'BeginInvoke', 'BeginStop', 'Close', 'Contains', 'Create', 'Dispose', 'EndInvoke', 'EnumerateDirectories', 'EnumerateFiles', 'Escape', 'Exit',
     'ExpandEnvironmentVariables', 'EndsWith', 'GetFullPath', 'GetAttributes', 'GetTempPath', 'Exists', 'GetEnvironmentVariable', 'Floor', 'Flush', 'GetCurrent', 'GetDrives', 'GetFolderPath', 'GetValue', 'GetValueNames', 'IsInRole', 'IsPathRooted', 'Kill', 'Matches', 'Min', 'Pop', 'Push', 'ReadToEndAsync',
     'Replace', 'Round', 'Split', 'Start', 'StartNew', 'StartsWith', 'Substring', 'ToInt64', 'ToLowerInvariant', 'ToString', 'ToUpper', 'Trim', 'TrimEnd', 'TryParseExact', 'Wait', 'WaitForExit', 'WaitOne',
-    'Write', 'WriteAllText', 'WriteLine', 'Clear')
+    'Write', 'WriteAllText', 'WriteLine', 'Clear', 'Translate', 'GetFileSystemEntries')
   $onlyIn = @{ Start = @('Invoke-Exe'); Kill = @('Invoke-Exe'); Create = @('Invoke-Probe'); AddScript = @('Invoke-Probe'); WriteAllText = @(''); Exit = @('') }
   foreach ($m in $Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
     $mn = $m.Member.Extent.Text; $fn = & $fnOf $m
@@ -325,6 +408,10 @@ $mutants = [ordered]@{
   'redirection'                       = "function Bad-Q { 'x' > C:\x.txt }"
   'Add-MpPreference'                  = "function Bad-R { Add-MpPreference -ExclusionPath C:\ }"
   'Remove-Item'                       = "function Bad-S { Remove-Item C:\x -Recurse }"
+  'fsutil outside Invoke-Fsutil'      = "function Bad-T { Invoke-Exe (Join-Path ([Environment]::GetFolderPath('System')) 'fsutil.exe') `$ArgText }"
+  'Invoke-Fsutil with a fixed write'  = "function Invoke-Fsutil { Invoke-Exe (Join-Path ([Environment]::GetFolderPath('System')) 'fsutil.exe') 'devdrv trust C:' }"
+  'Set-Acl'                           = "function Bad-U { Set-Acl -LiteralPath C:\lanq-work -AclObject `$a }"
+  'Add-Type'                          = "function Bad-V { Add-Type -TypeDefinition 'public class X {}' }"
 }
 $mdir = Join-Path ([IO.Path]::GetTempPath()) ('lanq-tunemut-' + [Guid]::NewGuid().ToString('N')); [void](New-Item -ItemType Directory -Path $mdir); $mp = Join-Path $mdir 'm.ps1'
 foreach ($k in $mutants.Keys) {
