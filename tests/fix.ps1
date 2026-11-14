@@ -1075,13 +1075,18 @@ function Wait-MpDetection([string]$Path, $Since, [int]$Sec, [switch]$HistoryOnly
   if ($script:MpReadBrokenNext) { $script:MpReadBroken = $true; $script:MpReadBrokenNext = $false }   # the service stops answering after the add (L-2)
   if ($script:ThrowAt -and $rel -like $script:ThrowAt) { throw 'interrupted (a fake failure in the middle of the matrix)' }
   if ($script:JunctionAfterPc -and $rel -like 'C\lanq-selftest-*') { $script:WdOver['C\lanq-work'] = @{ Exists = $true; Reparse = $true; Sddl = ''; Fresh = $false; Pin = $false; FileId = '-' } }   # lanq-work turned into a link mid-run
-  if ($script:SquatInside -and $rel -like 'C\lanq-selftest-*') {   # the build user guesses the tag and makes the inside folder first (HIGH-2)
-    $tg = [regex]::Match($Path, 'lanq-selftest-([0-9a-f]{32})').Groups[1].Value; [void][System.IO.Directory]::CreateDirectory((Join-Path (Get-DriveRoot 'C') "lanq-work\lanq-selftest-$tg"))
-  }
   foreach ($p in @($script:Undetected)) { if ($rel -like $p) { return $false } }
   return $true
 }
 # the self-test folders: owner Administrators, admin-only, no link (a test cannot set that owner, so it is faked; NotOurs = tampered)
+# every folder name the fix makes; SquatInside: the build user makes lanq-work\lanq-selftest-<name> first, for every
+# name it could see (HIGH-2), which now cannot help it guess the next one (L-d)
+function New-TestTag {
+  $g = [Guid]::NewGuid().ToString('N'); $w = Join-Path (Get-DriveRoot 'C') 'lanq-work'
+  if ($script:SquatInside -and $script:TagLog.Count -and [System.IO.Directory]::Exists($w)) { [void][System.IO.Directory]::CreateDirectory("$w\lanq-selftest-$($script:TagLog[$script:TagLog.Count - 1])") }   # names it saw
+  if ($script:SquatCurrent -and [System.IO.Directory]::Exists($w)) { [void][System.IO.Directory]::CreateDirectory("$w\lanq-selftest-$g") }   # if it could guess
+  [void]$script:TagLog.Add($g); return $g
+}
 function Test-SelfTestDir([string]$Path) { $rel = Get-Rel $Path; foreach ($p in @($script:NotOurs)) { if ($rel -like $p) { return $false } }; return [System.IO.Directory]::Exists($Path) }
 function Get-BuildUser([string]$Name) { $u = $script:Users[$Name]; if ($u) { return $u.Clone() }; return @{ Given = $Name; Name = $Name; Found = $false; Sid = ''; Local = $false; Type = 0; Disabled = $false; Admin = $false } }
 function New-Vol([string]$L, [hashtable]$Over = @{}) {
@@ -1105,6 +1110,7 @@ function Format-Volume {
   Note-Call "Format-Volume $DriveLetter DevDrive=$([bool]$DevDrive) $NewFileSystemLabel"
   $script:Vols["$DriveLetter"] = New-Vol "$DriveLetter" @{ Fs = 'ReFS'; Guid = '{99999999-2222-3333-4444-555555555555}'; DevDrv = $script:FormatDev; DevAv = $script:FormatAv; DevFilter = $true }
   [void][System.IO.Directory]::CreateDirectory((Get-DriveRoot "$DriveLetter"))
+  if ($script:SquatDevWork) { [void][System.IO.Directory]::CreateDirectory((Join-Path (Get-DriveRoot "$DriveLetter") 'lanq-work')) }   # someone was quicker on the new volume (L-b)
 }
 function Invoke-Native([string]$Exe, [string[]]$ArgList, [int]$Sec = 60, [string]$StdinText = '') {
   $leaf = Split-Path -Leaf $Exe; $a = @($ArgList)
@@ -1116,7 +1122,7 @@ function Invoke-Native([string]$Exe, [string[]]$ArgList, [int]$Sec = 60, [string
   Note-Call "$leaf $($a -join ' ')"
   return @{ Code = 0; Out = '' }
 }
-$unsafe = @(foreach ($n in 'New-FixSecuredDir', 'Test-SelfTestDir', 'Add-MpPreference', 'Remove-MpPreference', 'Wait-MpDetection', 'Get-EicarBytes', 'Get-DriveRoot', 'Get-SystemDriveLetter', 'Invoke-Native', 'Initialize-Disk', 'New-Partition', 'Format-Volume', 'Get-DiskImage',
+$unsafe = @(foreach ($n in 'New-FixSecuredDir', 'Test-SelfTestDir', 'New-TestTag', 'Add-MpPreference', 'Remove-MpPreference', 'Wait-MpDetection', 'Get-EicarBytes', 'Get-DriveRoot', 'Get-SystemDriveLetter', 'Invoke-Native', 'Initialize-Disk', 'New-Partition', 'Format-Volume', 'Get-DiskImage',
     'Get-BuildUser', 'Get-VolumeFacts', 'Get-WorkDirFacts', 'Get-DevVhdFacts', 'Get-MpPreference', 'Get-MpComputerStatus', 'Test-FixRecordTrusted', 'Initialize-FixRecordDir', 'New-FixSecuredFile', 'Get-FixRecordDir') {
     if (@(Get-Command $n)[0].CommandType -ne 'Function' -or @(Get-Command $n)[0].ScriptBlock.File -eq $fixPath) { $n } })
 if ($unsafe.Count -gt 0 -or -not (Get-DriveRoot 'C').StartsWith([IO.Path]::GetTempPath()) -or -not $DevVhdFile.StartsWith($Sandbox) -or "$(Get-EicarBytes)" -match 'EICAR') { Write-Host "ABORT: not faked: $($unsafe -join ', ')" -ForegroundColor Red; exit 1 }
@@ -1129,7 +1135,7 @@ function Reset-Dx {
   $script:Vols = @{ C = (New-Vol 'C') }; $script:WdOver = @{}; $script:WdSid = $Bu; $script:SddlAfterCreate = ''; $script:NotEmptyAfterCreate = $false
   $script:FileIds = @{ 'C\lanq-work' = '0x000000000000000000010000000ed741'; 'L\lanq-work' = '0x0000000000000000000a000000000005' }
   $script:Undetected = @('C\lanq-work\lanq-selftest-*'); $script:Vhd = @{ Exists = $false; Attached = $false; Letter = '' }; $script:FormatDev = 'trusted'; $script:FormatAv = 'ok'; $script:DiskpartCode = 0
-  $script:FixMade = ''; $script:AddVariant = $null; $script:ThrowAt = ''; $script:SquatWork = $false; $script:JunctionAfterPc = $false; $script:MpReadBroken = $false; $script:SquatInside = $false; $script:NotOurs = @(); $script:RemoveBroken = $false
+  $script:FixMade = ''; $script:AddVariant = $null; $script:ThrowAt = ''; $script:SquatWork = $false; $script:SquatDevWork = $false; $script:SquatCurrent = $false; $script:TagLog = New-Object System.Collections.ArrayList; $script:JunctionAfterPc = $false; $script:MpReadBroken = $false; $script:SquatInside = $false; $script:NotOurs = @(); $script:RemoveBroken = $false
   $script:ExclusionSettleSec = 0   # one attempt for the inside test unless a test sets it
   foreach ($d in @(Get-ChildItem -LiteralPath $Sandbox -Force -ErrorAction SilentlyContinue)) { [System.IO.Directory]::Delete('\\?\' + $d.FullName, $true) }
   [void][System.IO.Directory]::CreateDirectory((Get-DriveRoot 'C'))   # the drive root always exists
@@ -1264,8 +1270,6 @@ Assert-True ($rc -eq 1 -and @($Mp.Ex) -contains 'C:\lanq-work\' -and (OutText) -
 Assert-True ((Read-Rec (Get-LatestRecord)).items[0].status -eq 'failed' -and (Read-Rec (Get-LatestRecord)).items[0].after -match '^entry=1 ') 'MEDIUM-2: the failed record says the exclusion is still there'
 $script:RemoveBroken = $false; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
 Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and (OutText) -match 'not offered: .*this script did not add it') 'HIGH-1: a failed record with the exclusion still there does not count as done: not offered, says to remove it'
-Reset-Dx; $script:SquatInside = $true; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
-Assert-True ($rc -eq 1 -and @($Mp.Ex).Count -eq 0 -and (OutText) -match 'could not be put in place' -and @(Get-ChildItem -LiteralPath (Join-Path (Get-DriveRoot 'C') 'lanq-work') -Force).Count -eq 2) 'HIGH-2: the build user made the inside self-test folder first: nothing is written into it or deleted from it, rolled back'
 Reset-Dx; $script:NotOurs = @('C\lanq-work.<id>'); $rc = Invoke-Dx 'apply' @('C:\lanq-work')
 Assert-True ($rc -eq 1 -and @($Mp.Ex).Count -eq 0 -and (OutText) -match 'is not the folder this script made' -and (OutText) -match 'left alone' -and @(Get-SandboxDirs 'C' | Where-Object { $_ -match '^lanq-work\.[0-9a-f]{32}$' }).Count -eq 1) 'HIGH-2: a self-test folder that is not ours before the write: nothing written, never deleted, rolled back'
 Reset-Dx; $script:ExclusionSettleSec = 30; $script:Undetected = @('C\lanq-work\lanq-selftest-*-2.com'); $rc = Invoke-Dx 'apply' @('C:\lanq-work')
@@ -1305,6 +1309,17 @@ Reset-Dx; $rc = Invoke-Dx 'apply' @('C:\lanq-work'); $Mp.Ex.Clear()
 $script:RemoveBroken = $true; $script:Undetected = @(); $rc = Invoke-Dx 'apply' @('C:\lanq-work'); $script:RemoveBroken = $false; $script:Undetected = @('C\lanq-work\lanq-selftest-*')
 $rc = Invoke-Dx 'apply' @('C:\lanq-work')
 Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and (OutText) -match 'not offered: .*this script did not add it') 'L-3: an older applied record does not vouch once a newer failed run left the exclusion behind (only the newest item counts)'
+
+Write-Host 'review round 3 (L-d, L-b)'
+Reset-Dx; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 0 -and @($script:TagLog | Sort-Object -Unique).Count -eq 7) 'L-d: the run tag and every self-test folder name are separate random names (a watcher cannot guess the next folder from one it sees)'
+Reset-Dx; $script:SquatInside = $true; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 0 -and ($Calls -join '|') -eq $MatrixCalls) 'L-d: folders made from names the build user saw do not get in the way of the next ones'
+Reset-Dx; $script:SquatDevWork = $true; $rc = Invoke-Dx 'apply' @($DevVhdFile) 'devdrive'
+Assert-True ($rc -eq 1 -and (OutText) -match 'could not be put in place' -and @(Get-SandboxDirs 'L' | Where-Object { $_ -like '.lanq-stage-*' }).Count -eq 0) 'L-b: L:\lanq-work made by someone else first: the Dev Drive run fails and removes its staging holder'
+
+Reset-Dx; $script:SquatCurrent = $true; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
+Assert-True ($rc -eq 1 -and @($Mp.Ex).Count -eq 0 -and (OutText) -match 'could not be put in place' -and @(Get-ChildItem -LiteralPath (Join-Path (Get-DriveRoot 'C') 'lanq-work') -Force).Count -ge 2) 'HIGH-2: a self-test folder name made first (here: guessed) makes the move fail: nothing is written into it or deleted from it, rolled back'
 
 Write-Host 'devdrive.create'
 $DevCalls = "diskpart.exe create vdisk file=`"$DevVhdFile`" maximum=102400 type=expandable|attach vdisk|exit|Get-DiskImage|Initialize-Disk 7 GPT|New-Partition 7|Format-Volume L DevDrive=True lanq-dev"
@@ -1413,7 +1428,38 @@ $poolAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path 
 $poolCmds = @($poolAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { "$($_.GetCommandName())" })
 Assert-True (@($perr).Count -eq 0 -and @($poolCmds | Where-Object { $_ -match '^(net(\.exe)?|New-LocalUser|Remove-LocalUser|Add-MpPreference|Remove-MpPreference|Set-MpPreference|Add-Type)$' }).Count -eq 0) 'MEDIUM-3: the pool harness creates no users, removes or adds no exclusion itself, changes no Defender setting, no Add-Type'
 $poolText = [System.IO.File]::ReadAllText((Join-Path $root 'tests/pool-defender.ps1'))
-Assert-True ($poolText -match 'exactly one new record' -and $poolText -match 'INTERRUPTED' -and $poolText -match 'finally' -and $poolText -match 'Test-SelfTestDir' -and $poolText -match 'Test-WorkDirSame' -and $poolText -match 'Test-TrustedSddl' -and $poolText -match 'Get-FixRecordDirProblem' -and $poolText -notmatch 'Sort-Object -Property LastWriteTimeUtc') 'M-A/M-B/L-6: the pool harness undoes only the one record its own apply wrote, is interrupt-safe, re-checks every folder, refuses a checkout others may change'
+# M-2: the trust check runs before the fix script is dot-sourced (an elevated run must not load code others may change)
+$dotAt = $poolText.IndexOf('. $fixPath'); $trustAt = $poolText.IndexOf('Test-PoolTrust (')
+Assert-True ($dotAt -gt 0 -and $trustAt -gt 0 -and $trustAt -lt $dotAt) 'M-2: the pool harness checks its folder, its parents and both files before it dot-sources the fix script'
+# M-1/L-c: the L2 junction lives in an admin-only folder of ours (staged and moved), and is tracked for clean-up
+Assert-True ($poolText -match 'New-PoolDir \(.*pool-jp-' -and $poolText -match '\$script:Links' -and $poolText -notmatch 'mklink.*\$work\\pool-jn') 'M-1/L-c: the L2 junction is made inside an admin-only folder of ours and removed even on interrupt'
+Assert-True ($poolText -notmatch 'Test-WorkDirSame \$work \(Get-WorkDirFacts \$work\)\.FileId') 'L-e: the pool clean-up compares lanq-work with the file id it saw at the start, not the current one'
+# M-3: the documented procedure (a copy under C:\ProgramData, icacls /inheritance:r with Administrators and SYSTEM) passes
+$ptAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'tests/pool-defender.ps1'), [ref]$null, [ref]$null)
+$ptFn = @($ptAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-PoolTrust' }, $true))
+Assert-Equal $ptFn.Count 1 'M-3: Test-PoolTrust is defined in the pool harness'
+if ($ptFn.Count -eq 1) {
+  . ([scriptblock]::Create($ptFn[0].Extent.Text))
+  $docTune = [System.IO.File]::ReadAllText((Join-Path $root 'docs/TUNE.md'))
+  Assert-True ($docTune -match [regex]::Escape("icacls C:\ProgramData\lanq-rc /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F")) 'M-3: docs/TUNE.md gives the icacls step for the copy'
+  $okPairs = @(
+    @('O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)', $false, 'the copy after the documented icacls'),
+    @('O:BAG:SYD:PAI(A;OICIID;FA;;;BA)(A;OICIID;FA;;;SY)', $false, 'its tests folder (inherited)'),
+    @('O:BAG:SYD:AI(A;ID;FA;;;BA)(A;ID;FA;;;SY)', $true, 'a file in it'),
+    @('O:SYG:SYD:PAI(A;OICIIO;GA;;;CO)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;CI;0x116;;;BU)', $false, 'the default C:\ProgramData'),
+    @($RootDefault, $false, 'the default C:\'))
+  foreach ($c in $okPairs) { Assert-Equal (Test-PoolTrust $c[0] $c[1]) '' "M-3: passes: $($c[2])" }
+  $badPairs = @(
+    @('O:S-1-5-21-1-2-3-1001G:SYD:PAI(A;OICI;FA;;;S-1-5-21-1-2-3-1001)(A;OICI;FA;;;BA)', $false, 'a user''s own checkout (owned by the user)'),
+    @('O:SYG:SYD:PAI(A;OICI;FA;;;WD)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)', $false, 'a C:\ProgramData that gives Everyone full control'),
+    @('O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)', $false, 'a folder Users may modify (rename or replace files)'),
+    @('O:BAG:SYD:AI(A;ID;FA;;;BA)(A;ID;0x1301bf;;;BU)', $true, 'a file Users may change'),
+    @('O:BAG:SYD:AI(A;ID;FA;;;BA)(A;ID;0x2;;;AU)', $true, 'a file others may write'),
+    @('O:BAG:SYD:PAI(A;OICI;FA;;;BA)(XA;;0x1;;;WD;(@User.x == "y"))', $false, 'a conditional entry'),
+    @('', $true, 'unreadable'))
+  foreach ($c in $badPairs) { Assert-True ((Test-PoolTrust $c[0] $c[1]) -ne '') "M-3: refused: $($c[2])" }
+}
+Assert-True ($poolText -match 'exactly one new record' -and $poolText -match 'INTERRUPTED' -and $poolText -match 'finally' -and $poolText -match 'Test-SelfTestDir' -and $poolText -match 'Test-WorkDirSame' -and $poolText -match 'Test-PoolTrust' -and $poolText -match 'Get-FixRecordDirProblem' -and $poolText -notmatch 'Sort-Object -Property LastWriteTimeUtc') 'M-A/M-B/L-6: the pool harness undoes only the one record its own apply wrote, is interrupt-safe, re-checks every folder, refuses a checkout others may change'
 Assert-True ($poolText -notmatch 'DisableRealtimeMonitoring' -and $poolText -match 'OPEN QUESTION 1' -and $poolText -match 'OPEN QUESTION 2' -and $poolText -match 'GITHUB_ACTIONS') 'MEDIUM-3: the pool harness never touches real-time protection, reports both open questions, and refuses in CI'
 $sch = [System.IO.File]::ReadAllText((Join-Path $root 'schema/fix-record.v1.json')) | ConvertFrom-Json
 Assert-Equal $sch.properties.schema.const 'lanq-makeready-fix/v1' 'schema/fix-record.v1.json parses, schema id'

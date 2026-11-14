@@ -175,8 +175,11 @@ $script:JnCode = -1; [void](Test-As 'lanqbuild' { $script:JnCode = [LanqCiLogon]
 $isJn = [bool]((Get-Item -LiteralPath $ctl -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)
 Check ($script:JnCode -eq 0 -and $isJn) "H-A control: the build user CAN make an empty folder with lanq-work's permissions a junction (code $($script:JnCode)); so the pin is needed"
 if ($isJn) { [System.IO.Directory]::Delete($ctl) } elseif ([System.IO.Directory]::Exists($ctl)) { [System.IO.Directory]::Delete($ctl, $true) }
+# L-a: only the pin may keep lanq-work non-empty here, so the build user's own files go first (as an admin)
+foreach ($c in @(Get-ChildItem -LiteralPath $work -Force | Where-Object { $_.Name -ne '.lanq-pin' })) { Remove-Item -LiteralPath $c.FullName -Recurse -Force }
+Check ((@(Get-ChildItem -LiteralPath $work -Force | ForEach-Object { $_.Name }) -join ',') -eq '.lanq-pin') 'H-A: lanq-work holds only its .lanq-pin before the junction attempt'
 $script:JnCode = -1; [void](Test-As 'lanqbuild' { $script:JnCode = [LanqCiLogon]::MakeJunction($work, $jt) })
-Check ($script:JnCode -ne 0 -and -not ((Get-Item -LiteralPath $work -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) "H-A: the build user cannot make lanq-work a junction while its .lanq-pin is there (code $($script:JnCode), 145 = not empty)"
+Check ($script:JnCode -eq 145 -and -not ((Get-Item -LiteralPath $work -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) "H-A: the build user cannot make lanq-work a junction while its .lanq-pin is there (code $($script:JnCode); must be 145, the folder is not empty)"
 Check (Test-SelfTestDir (Join-Path $work '.lanq-pin')) 'H-A: lanq-work\.lanq-pin is there, admin-owned and admin-only'
 Check (-not (Test-As 'lanqbuild' { [System.IO.Directory]::Delete((Join-Path $work '.lanq-pin'), $true) }) -and [System.IO.Directory]::Exists((Join-Path $work '.lanq-pin'))) "H-A: the build user cannot delete .lanq-pin ($ProbeErr)"
 
