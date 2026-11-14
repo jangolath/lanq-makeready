@@ -52,7 +52,7 @@ Each item:
 | Field | Meaning |
 |---|---|
 | `seq` | 1 to 999, unique: the order the changes were made. Undo goes from the highest down. |
-| `id` | the fix id. Windows: `ssh.start`, `ssh.auto`, `power.sleep`, `longpaths.on`, `git.longpaths`, `ssh.aclkeys`, and the tune fixes (0.5, `-Tune`) `power.cpu`, `power.usbsuspend`, `startup.vendor`, `vendor.services`, `vendor.tasks`, `sysmain`, `do.mode`, `dotnet.env`, `defender.scantime`, `defender.exclude`. Linux: `ssh.start`, `power.sleep`, and with `--tune` also `sysctl.tune`, `journald.cap`, `services.unused` and `fstrim.timer`. Ids are additive: a script that does not know an id rejects the whole record ("unknown fix id", exit 2), so a 0.4 script refuses a 0.5 record with a tune id. |
+| `id` | the fix id. Windows: `ssh.start`, `ssh.auto`, `power.sleep`, `longpaths.on`, `git.longpaths`, `ssh.aclkeys`, and the tune fixes (0.5, `-Tune`) `power.cpu`, `power.usbsuspend`, `startup.vendor`, `vendor.services`, `vendor.tasks`, `sysmain`, `do.mode`, `dotnet.env`, `defender.scantime`. Linux: `ssh.start`, `power.sleep`, and with `--tune` also `sysctl.tune`, `journald.cap`, `services.unused` and `fstrim.timer`. Ids are additive: a script that does not know an id rejects the whole record ("unknown fix id", exit 2), so a 0.4 script refuses a 0.5 record with a tune id. |
 | `status` | `pending`, `applied`, `failed`, `undone` or `skipped` (below). |
 | `time` | UTC time of the last status change. |
 | `before` | the state before the change, in the fixed shape for the id (below). Undo puts this back. |
@@ -104,7 +104,6 @@ invalid.
 | windows : `do.mode` | `value=<n> type=dword` or `value=- type=none` | the `DODownloadMode` policy under `HKLM\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization`. The fix starts only from `none`, and undo removes the value (the key stays). |
 | windows : `dotnet.env` | `telemetry=(-\|<v>) nologo=(-\|<v>) aspnetcert=(-\|<v>)` | the machine environment values of `DOTNET_CLI_TELEMETRY_OPTOUT`, `DOTNET_NOLOGO`, `DOTNET_GENERATE_ASPNET_CERTIFICATE` (1-8 letters or digits; `-` = not set). Undo removes only the ones that were `-`. |
 | windows : `defender.scantime` | `day=[0-8] time=<0-1439> quick=<0-1439>` | Defender `ScanScheduleDay` and the scan and daily quick scan times in minutes after midnight (quick 0 = none). Undo sets both times back. |
-| windows : `defender.exclude` | `excluded=(0\|1) path=<drive path>` | whether exactly this folder is in Defender's exclusion list. The path is a drive path of letters, digits, space and `_ . ( ) -`, never `..` and never a drive root. The fix starts only from `excluded=0` (folders already covered are not offered); undo runs `Remove-MpPreference -ExclusionPath` for that folder only. |
 | linux : `ssh.start` | `unit=(ssh\|sshd) enabled=(enabled\|disabled) active=(active\|inactive)` | `systemctl is-enabled` / `is-active` of the unit (`failed` counts as inactive) |
 | linux : `power.sleep` | `sleep=<v> suspend=<v> hibernate=<v> hybrid-sleep=<v>` | `systemctl is-enabled` of the four targets, for example `static`, `masked`, `masked-runtime`, `none` (not found) |
 | linux : `sysctl.tune` | `file=(absent\|lanq) instances=<n> watches=<n>` | The two `fs.inotify` limits, and `/etc/sysctl.d/99-zz-lanq-makeready.conf` (`lanq` = a regular file, not a link, whose first line is this script's marker). It is offered only when the file is absent. Apply writes the file, holding only the limits below 1024 / 524288 (it never lowers one), then runs `sysctl -w` for them. Undo removes the file and runs `sysctl -w` with the old values of the raised limits. |
@@ -130,8 +129,7 @@ How the states are compared:
 The undo command comes from a fixed table in the script, keyed by the fix id, with the values taken from the
 parsed `before` state (a start type, a number of seconds, a registry value, a git value, a list of fixed target
 names, a checked DACL). The service, registry key, file and unit names are fixed in the script and are never read from
-the record. The tune fixes are the exception that is needed: a vendor service, task or Run entry name, and an excluded
-folder, come from the record, so they must have the exact shape above, and the names must match the curated list
+the record. The tune fixes are the exception that is needed: a vendor service, task or Run entry name comes from the record, so they must have the exact shape above, and the names must match the curated list
 (current or retired) before anything is done. On Linux, undo reads the `services.unused` service name from `before` and accepts it only if it is on the script's append-only list (names are never removed, so old records stay undoable) and has the shape `[a-z][a-z0-9-]{0,31}`; it runs only the units of that name from the script's fixed table. For services.unused, undo counts as verified when each unit's enabled state is back and every unit that was active is active again (a path or socket unit may start its service too). The `command` field is never run. The `host` and `user` fields are for people only.
 
 ## Example (Windows)

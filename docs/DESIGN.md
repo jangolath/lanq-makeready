@@ -424,10 +424,10 @@ that already runs as admin or root on the PC.
 
 ### Tune fixes
 
-- In the existing fix script, behind `-Tune` (and `-Tune -DefenderExclusions` for exclusions only), with the same
+- In the existing fix script, behind `-Tune`, with the same
   refusals, confirmation, record and undo. Fix ids are additive under `lanq-makeready-fix/v1`; a 0.4 script rejects a
   record with a tune id ("unknown fix id", exit 2).
-- One fix id may touch several things (services, tasks, Run entries, folders). `Get-FixTargets` lists them,
+- One fix id may touch several things (services, tasks, Run entries). `Get-FixTargets` lists them,
   `Get-FixState` reads one, and the target is part of the recorded state, so undo knows what to read again. Each target
   is asked separately; a record holds at most 64 items, after which nothing more is offered in that session.
 - Names in a record (service, task, Run entry) must match a fixed shape, and undo re-checks them against the curated
@@ -438,22 +438,9 @@ that already runs as admin or root on the PC.
 - Services: Start and DelayedAutostart come from the registry (PowerShell 5.1 cannot read Delayed Start) and are put
   back with `sc.exe config start=` (`delayed-auto` when needed). The delayed flag is compared only for automatic
   services.
-- Defender: exclusions only for work_root plus the NuGet package cache, never temp or processes. Each folder passes
-  `Get-BuildDirProblem`, an allow-list: (A) a top-level build folder whose first segment is not a Windows, program,
-  user, vendor or `$` folder and which is not in, at or above any ProfileList profile, Windows, Program Files,
-  ProgramData or TEMP, or (B) exactly this account's `.nuget\packages`; never `~`, device names, `.`/`..`, a drive
-  root or a junction on the existing path (the tune scan uses the same function, checked equal by a test, but only
-  to say whether a folder could be excluded). The fix also requires the folder to exist, to be on a local fixed volume of
-  its own (QueryDosDevice, through a small Add-Type helper that only opens a handle with no access rights, reads its
-  final path with GetFinalPathNameByHandle and a DOS device name; the AST guard allows Add-Type only for that
-  constant source), to really be where its name says, to be owned by Administrators, SYSTEM or the current user, and
-  to let nobody else write to it or delete folders in its parent (by SID). The tune scan checks the drive without
-  native calls (DriveType and the partition letters). Everything is checked again after the answer and right before
-  the change. The
-  NuGet cache is offered only when the process user SID equals the console user's (`Win32_ComputerSystem.UserName`),
-  since `%USERPROFILE%` is otherwise another account's. A folder already
-  covered is skipped and never recorded; nothing is offered unless AMRunningMode is Normal; undo removes exactly the
-  folders the record says this script added. The scan-time fix replaces the plan's "CPU load factor" idea.
+- Defender exclusions are not automated: whether a folder can be trusted (who can write to it, where it really is, what runs from it) is hard to verify safely from a script, and a wrong exclusion silently turns off scanning. An earlier draft of 0.5.0 had an exclusion fix with an allow-list, ACL, drive and final-path checks; review
+  kept finding ways around it, so it was removed before release. `-DefenderExclusions` exits 2, and the tune scan
+  gives the manual procedure. The scan-time fix (`defender.scantime`) stays; it is not an exclusion.
 - The commands that come from Windows modules (ScheduledTasks, Defender, Storage, NetAdapter) are CDXML functions, not
   cmdlets; the shadow check requires each to come from its module, so a function or alias of the same name refuses the
   run (only in tune mode, since looking them up loads the modules).

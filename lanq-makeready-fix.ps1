@@ -15,8 +15,7 @@
     back, newest first, again confirming each.
   Fixes (v1): ssh.start, ssh.auto, power.sleep, longpaths.on, git.longpaths, ssh.aclkeys.
   Tune fixes (-Tune): power.cpu, power.usbsuspend, startup.vendor, vendor.services, vendor.tasks, sysmain, do.mode,
-  dotnet.env, defender.scantime (needs -Hours). Defender exclusions (-Tune -DefenderExclusions): defender.exclude for
-  work_root (-WorkRoot) and the NuGet packages folder only.
+  dotnet.env, defender.scantime (needs -Hours). Defender exclusions are not automated (see docs/TUNE.md).
   Exit code: 0 = done or nothing to do, 1 = a change failed or did not verify, 2 = bad arguments or a rejected record,
   3 = refused (over SSH, from stdin, no interactive console).
 .PARAMETER WhatIf
@@ -25,20 +24,18 @@
   List the undo records in %ProgramData%\lanq-makeready (needs an elevated PowerShell to read them).
 .PARAMETER Tune
   Offer the tune fixes instead of the readiness fixes. -Hours HH:mm-HH:mm gives the job window (defender.scantime).
-.PARAMETER DefenderExclusions
-  With -Tune: offer only Defender exclusions for work_root (-WorkRoot C:/lq) and the NuGet packages folder.
 .NOTES
   -Undo <record file>: undo the changes in that record, newest first, confirming each.
 #>
 # lanq-makeready-fix-marker (identifies this file; the script refuses to run when it was not started from a file)
 [CmdletBinding(PositionalBinding = $false)]
-param([switch]$WhatIf, [switch]$List, [switch]$Help, [switch]$Tune, [switch]$DefenderExclusions, [Parameter(ValueFromRemainingArguments = $true)][string[]]$Extra)
+param([switch]$WhatIf, [switch]$List, [switch]$Help, [switch]$Tune, [Parameter(ValueFromRemainingArguments = $true)][string[]]$Extra)
 
 $FixInvocation = $MyInvocation
 $ToolVersion = '0.5.0'
 $RecordSchema = 'lanq-makeready-fix/v1'
 $BaseFixIds = @('ssh.start', 'ssh.auto', 'power.sleep', 'longpaths.on', 'git.longpaths', 'ssh.aclkeys')
-$TuneFixIds = @('power.cpu', 'power.usbsuspend', 'startup.vendor', 'vendor.services', 'vendor.tasks', 'sysmain', 'do.mode', 'dotnet.env', 'defender.scantime', 'defender.exclude')
+$TuneFixIds = @('power.cpu', 'power.usbsuspend', 'startup.vendor', 'vendor.services', 'vendor.tasks', 'sysmain', 'do.mode', 'dotnet.env', 'defender.scantime')
 $FixIds = $BaseFixIds + $TuneFixIds   # every id a record may hold (an older script rejects a record with a newer id)
 # check id in the scanner's report, and what is wrong
 $FixInfo = @{
@@ -57,7 +54,6 @@ $FixInfo = @{
   'do.mode'           = @('do.mode', 'Delivery Optimization shares update files with other PCs')
   'dotnet.env'        = @('dotnet.env', '.NET telemetry, first-run banner and dev-certificate variables are not set for the machine')
   'defender.scantime' = @('defender.schedule', 'the Defender scheduled scan falls inside the job window')
-  'defender.exclude'  = @('defender.paths', 'Defender real-time scanning covers a build folder')
 }
 # Curated OEM updater / assistant / telemetry names (services, scheduled tasks, Run entries). Generic across makers,
 # changed only by reviewed pull requests. The same list is in lanq-makeready-tune.ps1 (a test keeps them identical).
@@ -83,21 +79,20 @@ $FixFunctionNames = @('Write-FixLine', 'Write-FixErr', 'Get-FixSessionId', 'Get-
   'Test-FixRecordDirTrusted', 'Initialize-FixRecordDir', 'Test-FixRecordTrusted', 'New-FixRecord', 'ConvertTo-JsonText', 'ConvertTo-FixJson', 'Save-FixRecord',
   'Test-Props', 'Test-Str', 'ConvertTo-TimeText', 'New-RecordError', 'Read-FixRecord', 'Show-Fix', 'Invoke-FixApply', 'Invoke-FixUndo', 'Show-FixRecords', 'Invoke-FixMain',
   'Get-UndoArg', 'Test-Vendor', 'Test-VendorUndo', 'Test-InWindow', 'Get-HoursMin', 'Format-Min', 'Get-RegVal', 'Get-RegNames', 'Test-RegKey', 'Get-UserSid', 'Get-ActiveScheme',
-  'Get-PowerAc', 'Test-UsbNic', 'Test-FixAllSsd', 'Get-SvcState', 'Get-TaskState', 'Get-StartupState', 'Get-DefenderInfo', 'ConvertTo-Minutes', 'Get-ExcludeState',
-  'Get-DotnetState', 'Get-DoState', 'Get-FixTargets', 'Get-StateTarget', 'Get-UndoRefusal', 'Get-TargetLabel', 'Get-ScanTarget', 'Get-SvcNorm', 'Get-FixApplyNote', 'Get-TuneArgError', 'Get-NugetDir', 'Get-ConsoleUserSid', 'Get-ProtectedDirs', 'Get-BuildDirProblem', 'Get-ReparseProblem', 'Get-CleanName', 'Get-ProfileRoots', 'Get-CurrentProfile', 'Test-AtOrUnder', 'Get-PathOwnerSid', 'Get-ExcludeProblem', 'Get-PathDirs', 'Get-DriveTypeName', 'Get-DriveProblem', 'Initialize-FixNative', 'Get-DosDevice', 'Get-FinalPath', 'Get-DirSddl', 'Get-AclProblem')
+  'Get-PowerAc', 'Test-UsbNic', 'Test-FixAllSsd', 'Get-SvcState', 'Get-TaskState', 'Get-StartupState', 'Get-DefenderInfo', 'ConvertTo-Minutes',
+  'Get-DotnetState', 'Get-DoState', 'Get-FixTargets', 'Get-StateTarget', 'Get-UndoRefusal', 'Get-TargetLabel', 'Get-ScanTarget', 'Get-SvcNorm', 'Get-FixApplyNote', 'Get-TuneArgError', 'Get-CleanName')
 # Every cmdlet this file runs. A function or alias with one of these names would run instead of the cmdlet, so the
 # script refuses to start when any of them does not resolve to the cmdlet itself (Get-FixCommandShadow).
 $FixCmdletNames = @('Get-Service', 'Set-Service', 'Start-Service', 'Stop-Service', 'Get-Item', 'Set-ItemProperty', 'Remove-ItemProperty', 'Get-Acl', 'Set-Acl',
   'Get-Content', 'Get-ChildItem', 'Test-Path', 'Join-Path', 'Split-Path', 'Get-Command', 'Get-CimInstance', 'Select-Object', 'Where-Object', 'ForEach-Object', 'Sort-Object',
-  'ConvertFrom-Json', 'Write-Host', 'New-Object', 'Get-Location', 'Get-Alias', 'New-Item', 'Add-Type')
+  'ConvertFrom-Json', 'Write-Host', 'New-Object', 'Get-Location', 'Get-Alias', 'New-Item')
 # Commands from Windows modules (CDXML functions, not cmdlets) the tune fixes run, and the module each must come from:
 # a function or alias of the same name from anywhere else would run instead, so the script refuses then too.
 $FixModuleCmds = @{ 'Get-NetAdapter' = @('NetAdapter'); 'Get-PhysicalDisk' = @('Storage'); 'Get-ScheduledTask' = @('ScheduledTasks'); 'Disable-ScheduledTask' = @('ScheduledTasks')
   'Enable-ScheduledTask' = @('ScheduledTasks'); 'Get-MpComputerStatus' = @('ConfigDefender', 'Defender'); 'Get-MpPreference' = @('ConfigDefender', 'Defender')
-  'Set-MpPreference' = @('ConfigDefender', 'Defender'); 'Add-MpPreference' = @('ConfigDefender', 'Defender'); 'Remove-MpPreference' = @('ConfigDefender', 'Defender') }
-$FixSet = 'base'      # base (readiness fixes), tune, or defender (-Tune -DefenderExclusions)
+  'Set-MpPreference' = @('ConfigDefender', 'Defender') }
+$FixSet = 'base'      # base (readiness fixes) or tune
 $FixHours = ''        # -Hours HH:mm-HH:mm (tune: defender.scantime)
-$FixWorkRoot = ''     # -WorkRoot C:/lq (defender.exclude)
 $FixWalkCache = $null   # the parent-process walk is done once per process
 # The things the fixes touch. Fixed names, never taken from a record file.
 $SshdName = 'sshd'
@@ -113,24 +108,6 @@ $RecordFileSddl = 'O:BAD:PAI(A;;FA;;;BA)(A;;FA;;;SY)'
 # The DACL icacls leaves on the keys file (used to predict a pending record's after state).
 $TightDacl = 'D:PAI(A;;FA;;;BA)(A;;FA;;;SY)'
 $FixOut = New-Object System.Collections.ArrayList
-# Reads only: where a folder really is (GetFinalPathNameByHandle on a handle opened with no access rights) and what a
-# drive letter stands for (QueryDosDevice). Compiled once, only when -Tune -DefenderExclusions checks a folder.
-$NativeSrc = @'
-using System; using System.Runtime.InteropServices; using System.Text;
-public static class LanqFixNative {
-  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sec, uint disposition, uint flags, IntPtr template);
-  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern uint GetFinalPathNameByHandleW(IntPtr handle, StringBuilder path, uint size, uint flags);
-  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern uint QueryDosDeviceW(string device, StringBuilder target, uint size);
-  [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr handle);
-  public static string FinalPath(string path) {
-    IntPtr h = CreateFileW(path, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
-    if (h == new IntPtr(-1)) { return ""; }
-    try { StringBuilder b = new StringBuilder(32768); uint n = GetFinalPathNameByHandleW(h, b, 32768, 0); return (n > 0 && n < 32768) ? b.ToString() : ""; }
-    finally { CloseHandle(h); }
-  }
-  public static string DosDevice(string device) { StringBuilder b = new StringBuilder(4096); return QueryDosDeviceW(device, b, 4096) > 0 ? b.ToString() : ""; }
-}
-'@
 # Tune: fixed names, never taken from a record file (names and paths in a record are checked against these shapes).
 $ScExe = Join-Path $SysDir 'sc.exe'
 $SvcKey = 'HKLM:\SYSTEM\CurrentControlSet\Services'
@@ -151,17 +128,6 @@ $NameRe = '[A-Za-z0-9._()&+{}-][A-Za-z0-9 ._()&+{}-]{0,95}'
 $SvcRe = '[A-Za-z0-9_.-]{1,64}'
 $TaskPathRe = '\\(?:[A-Za-z0-9 ._()&+-]{1,64}\\){0,4}'
 $SidRe = 'S-1-5(?:-[0-9]{1,10}){1,14}'
-$WinPathRe = '[A-Za-z]:(?:\\[A-Za-z0-9 _.()-]{1,64}){1,16}'
-$DefenderScreen = @(
-  '',
-  'Defender exclusions: read this first.',
-  '  - A Dev Drive is the better choice: on Windows 11 a Dev Drive in performance mode keeps real-time protection on and',
-  '    scans asynchronously. Settings > System > Storage > Disks & volumes > Create Dev Drive; put work_root and',
-  '    NUGET_PACKAGES there. Prefer it to an exclusion when you can.',
-  '  - An exclusion is a trade-off: nothing in that folder is ever scanned in real time, so a malicious package or build',
-  '    output there is not caught. Only folder paths are offered (never processes), only work_root plus the NuGet package',
-  '    cache (never temp, never a drive or system folder; the cache only for the account at the console), and a folder already covered by an exclusion is skipped.',
-  '  - Each one is recorded; -Undo removes exactly the paths this script added.')
 
 # ---------- output ----------
 
@@ -513,162 +479,11 @@ function Get-StartupState([string]$Target) {
 }
 
 function ConvertTo-Minutes($V) { if ($V -is [TimeSpan]) { return [int]$V.TotalMinutes }; if ($V -is [DateTime]) { return [int]$V.TimeOfDay.TotalMinutes }; return $null }
-# Defender's running mode, schedule and exclusion list (read here only to compare; never printed). $null when unreadable.
+# Defender's running mode and scan schedule; $null when unreadable.
 function Get-DefenderInfo {
   try { $st = Get-MpComputerStatus -ErrorAction Stop; $pr = Get-MpPreference -ErrorAction Stop } catch { return $null }
-  $ex = @($pr.ExclusionPath | Where-Object { $_ }); $readable = -not ($ex.Count -eq 1 -and "$($ex[0])" -match '^N/A')
-  if (-not $readable) { $ex = @() }
-  return @{ Mode = "$($st.AMRunningMode)"; Tamper = [bool]$st.IsTamperProtected; Readable = $readable; Ex = $ex; Day = [int]$pr.ScanScheduleDay
+  return @{ Mode = "$($st.AMRunningMode)"; Day = [int]$pr.ScanScheduleDay
     Time = (ConvertTo-Minutes $pr.ScanScheduleTime); Quick = (ConvertTo-Minutes $pr.ScanScheduleQuickScanTime) }
-}
-function Get-ExcludeState([string]$Path) {
-  $d = Get-DefenderInfo
-  $s = @{ Path = $Path; Known = ($null -ne $d); Mode = ''; Readable = $false; Exact = $false; Covered = $false; Tamper = $false; IsNuget = $false }
-  $s.IsNuget = ($Path -ieq (Get-NugetDir) -and $Path -ine "$FixWorkRoot".Replace('/', '\'))
-  if (-not $d) { return $s }
-  $s.Mode = $d.Mode; $s.Readable = $d.Readable; $s.Tamper = $d.Tamper
-  $t = $Path.TrimEnd('\') + '\'
-  foreach ($e in $d.Ex) {
-    $x = [Environment]::ExpandEnvironmentVariables("$e").TrimEnd('\')   # as Defender does (and the tune scan)
-    if ($x -ieq $Path.TrimEnd('\')) { $s.Exact = $true }
-    if ($t.StartsWith($x + '\', [System.StringComparison]::OrdinalIgnoreCase)) { $s.Covered = $true }
-  }
-  return $s
-}
-function Get-NugetDir { $ng = "$env:USERPROFILE\.nuget\packages"; if ($env:NUGET_PACKAGES) { $ng = "$env:NUGET_PACKAGES" }; return $ng.Replace('/', '\').TrimEnd('\') }
-# The account logged on at the console (Win32_ComputerSystem.UserName) as a SID; '' when nobody is or it cannot be read.
-function Get-ConsoleUserSid {
-  try {
-    $n = "$((Get-CimInstance -ClassName Win32_ComputerSystem -OperationTimeoutSec 15 -ErrorAction Stop).UserName)"
-    if (-not $n) { return '' }
-    return "$((New-Object System.Security.Principal.NTAccount($n)).Translate([System.Security.Principal.SecurityIdentifier]).Value)"
-  } catch { return '' }
-}
-# System folders a build folder must never be in, at or above: Windows, every Program Files, ProgramData, TEMP/TMP.
-function Get-ProtectedDirs {
-  $l = @($env:SystemRoot, [Environment]::GetFolderPath('Windows'), [Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86'), $env:ProgramW6432,
-    [Environment]::GetEnvironmentVariable('ProgramFiles(x86)'), [Environment]::GetEnvironmentVariable('ProgramFiles(Arm)'), [Environment]::GetFolderPath('CommonApplicationData'),
-    $env:ProgramData, $env:TEMP, $env:TMP, [System.IO.Path]::GetTempPath())
-  return @($l | Where-Object { $_ } | ForEach-Object { "$_".Replace('/', '\').TrimEnd('\') })
-}
-# Every user profile folder Windows knows (ProfileList: ProfilesDirectory, Default, Public and each ProfileImagePath,
-# on any drive), plus this account's. $null when the list cannot be read (then only this account's NuGet cache can pass).
-function Get-ProfileRoots {
-  $k = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'; $l = @()
-  try {
-    $pl = Get-Item -LiteralPath $k -ErrorAction Stop
-    foreach ($n in 'ProfilesDirectory', 'Default', 'Public') { $l += "$($pl.GetValue($n))" }
-    foreach ($pk in @(Get-ChildItem -LiteralPath $k -ErrorAction Stop)) { $l += "$($pk.GetValue('ProfileImagePath'))" }
-  } catch { return $null }
-  $l += @($env:PUBLIC, (Get-CurrentProfile), $env:USERPROFILE)
-  return , @($l | Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables("$_").Replace('/', '\').TrimEnd('\') })
-}
-function Get-CurrentProfile { return "$([Environment]::GetFolderPath('UserProfile'))".TrimEnd('\') }
-# The folders on the machine and user PATH (registry Environment values, expanded); drive roots are left out.
-function Get-PathDirs {
-  $l = @()
-  foreach ($k in 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment', 'HKCU:\Environment') {
-    try { $l += @("$((Get-Item -LiteralPath $k -ErrorAction Stop).GetValue('Path', '', 'DoNotExpandEnvironmentNames'))".Split(';')) } catch { }
-  }
-  return , @($l | ForEach-Object { [Environment]::ExpandEnvironmentVariables("$_").Trim().Trim('"').Replace('/', '\').TrimEnd('\') } | Where-Object { $_ -match '^[A-Za-z]:\\[^%]' })
-}
-function Get-DriveTypeName([string]$Letter) { try { return "$((New-Object System.IO.DriveInfo($Letter)).DriveType)" } catch { return '' } }
-function Test-AtOrUnder([string]$P, [string]$Q) { return [bool]($Q -and ($P -ieq $Q -or $P.StartsWith($Q + '\', [System.StringComparison]::OrdinalIgnoreCase))) }
-# '' when no existing part of $Path, from the drive down, is a junction or symbolic link (it could point anywhere).
-function Get-ReparseProblem([string]$Path) {
-  $parts = @($Path.Split('\')); $cur = $parts[0]
-  for ($i = 1; $i -lt $parts.Count; $i++) {
-    $cur = $cur + '\' + $parts[$i]
-    if (-not [System.IO.Directory]::Exists($cur) -and -not [System.IO.File]::Exists($cur)) { break }
-    try { if ([System.IO.File]::GetAttributes($cur) -band [System.IO.FileAttributes]::ReparsePoint) { return "$cur is a junction or link" } } catch { return "$cur cannot be read" }
-  }
-  return ''
-}
-# '' only for (A) a build folder: <drive>:\<top>\... on a local disk volume (Get-DriveProblem), where <top> is not a
-# Windows, program, user, tool, vendor or hidden ($) folder, and the path is not in, at or above a system folder, any
-# user profile or any folder on PATH; or (B) exactly this account's NuGet cache, <profile>\.nuget\packages (not for a
-# profile inside a system folder, such as SYSTEM's). Always refused: a drive root, '.' or '..', ~ (8.3 short names),
-# reserved device names, a part ending in a dot or space, a path Windows would read differently (GetFullPath), and a
-# junction or link on the existing part of the path.
-function Get-BuildDirProblem([string]$Path) {
-  $p = "$Path".Replace('/', '\').TrimEnd('\'); $use = 'use a top-level build folder such as C:\lq or D:\build'
-  if ($p -notmatch '^[A-Za-z]:(\\[^\\]+)+$') { return "it is not a folder on a drive (a whole drive is never used); $use" }
-  if ($p.Contains('~')) { return "it contains ~ (an 8.3 short name can stand for another folder); $use" }
-  $parts = @($p.Split('\'))
-  for ($i = 1; $i -lt $parts.Count; $i++) {
-    $g = $parts[$i]
-    if ($g -eq '.' -or $g -eq '..') { return "it has a '.' or '..' part" }
-    if ($g -ne $g.Trim() -or $g.EndsWith('.')) { return 'a part of it starts or ends with a space or ends with a dot (Windows drops those)' }
-    if ($g -match '^(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$') { return "it has a reserved device name ($g)" }
-  }
-  $full = ''; try { $full = [System.IO.Path]::GetFullPath($p).TrimEnd('\') } catch { return 'it is not a valid path' }
-  if ($full -ine $p) { return "it is not in canonical form (Windows reads it as $full)" }
-  $dp = Get-DriveProblem $parts[0]; if ($dp) { return $dp }
-  $sys = @(Get-ProtectedDirs); $prof = Get-CurrentProfile
-  if ($prof -and $p -ieq "$prof\.nuget\packages") {
-    foreach ($q in $sys) { if (Test-AtOrUnder $prof $q) { return "the profile $prof is inside the system folder $q (SYSTEM or a service account); $use" } }
-    return (Get-ReparseProblem $p)
-  }
-  if ($parts[1] -match '^(?i)(Windows.*|Program Files.*|ProgramData|Users|Documents and Settings|PerfLogs|inetpub|ESD|Recovery|Boot|EFI|System Volume Information|Config\.Msi|\$.*|OneDrive.*|Intel|AMD|NVIDIA|Dell|HP|SWSetup|Drivers|MSOCache|XboxGames|Temp|tmp|tools|hostedtoolcache|Python.*|msys.*|cygwin.*|nvm.*|php.*)$') {
-    return "$($parts[0])\$($parts[1]) is a Windows, program, user, tool, vendor or hidden folder; $use"
-  }
-  $roots = Get-ProfileRoots
-  if ($null -eq $roots) { return "the profile list could not be read, so it cannot be told apart from a user profile; $use" }
-  foreach ($q in @($sys) + @($roots)) { if ((Test-AtOrUnder $p $q) -or (Test-AtOrUnder $q $p)) { return "it is in, at or above $q; $use" } }
-  foreach ($q in @(Get-PathDirs)) { if ((Test-AtOrUnder $p $q) -or (Test-AtOrUnder $q $p)) { return "it is in, at or above $q, a folder on PATH (programs run from there); $use" } }
-  return (Get-ReparseProblem $p)
-}
-# Fix only: the drive must be a local fixed disk with a volume of its own (QueryDosDevice: \Device\HarddiskVolumeN;
-# a subst drive answers \??\C:\..., a mapped drive is not Fixed).
-function Get-DriveProblem([string]$Letter) {
-  $t = Get-DriveTypeName $Letter
-  if ($t -ne 'Fixed') { return "the drive $Letter is not a local fixed disk ($t); use a top-level build folder such as C:\lq or D:\build on a local disk" }
-  $dd = Get-DosDevice $Letter
-  if ($dd -notlike '\Device\HarddiskVolume*') { return "the drive $Letter is not a disk volume of its own ($($dd): a subst or mapped drive); use the real folder" }
-  return ''
-}
-function Initialize-FixNative { if (-not ('LanqFixNative' -as [type])) { Add-Type -TypeDefinition $NativeSrc -ErrorAction Stop } }
-function Get-DosDevice([string]$Letter) { try { Initialize-FixNative; return "$([LanqFixNative]::DosDevice($Letter))" } catch { return '' } }
-function Get-FinalPath([string]$Path) { try { Initialize-FixNative; return "$([LanqFixNative]::FinalPath($Path))" } catch { return '' } }
-function Get-DirSddl([string]$Path) { try { return "$((Get-Acl -LiteralPath $Path -ErrorAction Stop).Sddl)" } catch { return '' } }
-# '' when only Administrators, SYSTEM, this account, CREATOR OWNER and TrustedInstaller may change the folder (or what is
-# in it), and nobody else may delete or rename folders in its parent. SIDs, so localized Windows reads the same.
-function Get-AclProblem([string]$Path) {
-  $me = Get-UserSid; $ok = @($BaSid, $SySid, $me, 'S-1-3-0', $TiSid)
-  $mask = 0x2 -bor 0x4 -bor 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
-  $hint = "icacls `"$Path`" /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F *${me}:(OI)(CI)F"
-  $sd = ConvertFrom-Sddl (Get-DirSddl $Path)
-  if (-not $sd -or $null -eq $sd.DiscretionaryAcl) { return "its permissions cannot be read, or it has no DACL. To let only Administrators, SYSTEM and you change it: $hint" }
-  foreach ($a in $sd.DiscretionaryAcl) {
-    if ("$($a.AceQualifier)" -eq 'AccessAllowed' -and $ok -notcontains "$($a.SecurityIdentifier)" -and ($a.AccessMask -band $mask) -ne 0) {
-      return "$(Get-AccountName "$($a.SecurityIdentifier)") may change what is in it. To let only Administrators, SYSTEM and you change it (nothing is changed for you): $hint"
-    }
-  }
-  $parent = $Path.Replace('/', '\').TrimEnd('\') -replace '\\[^\\]+$', ''; if ($parent -match '^[A-Za-z]:$') { $parent += '\' }
-  $pd = ConvertFrom-Sddl (Get-DirSddl $parent)
-  if (-not $pd -or $null -eq $pd.DiscretionaryAcl) { return "the permissions of $parent cannot be read" }
-  foreach ($a in $pd.DiscretionaryAcl) {
-    if ("$($a.AceQualifier)" -eq 'AccessAllowed' -and $ok -notcontains "$($a.SecurityIdentifier)" -and "$($a.AceFlags)" -notmatch 'InheritOnly' -and ($a.AccessMask -band (0x40 -bor 0x10000000)) -ne 0) {
-      return "$(Get-AccountName "$($a.SecurityIdentifier)") may delete or rename folders in $parent; use a folder whose parent only Administrators, SYSTEM and you control"
-    }
-  }
-  return ''
-}
-function Get-PathOwnerSid([string]$Path) { try { return "$((Get-Acl -LiteralPath $Path -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]))" } catch { return '' } }
-# '' when a folder may become a Defender exclusion: a build folder (Get-BuildDirProblem) that exists, really is where
-# its name says (no subst, mapped or linked drive in between), is owned by Administrators, SYSTEM or this account, and
-# only they may change (Get-AclProblem). Checked when it is shown, after the answer, and right before the change.
-function Get-ExcludeProblem([string]$Path) {
-  $why = Get-BuildDirProblem $Path; if ($why) { return $why }
-  if (-not [System.IO.Directory]::Exists($Path)) { return 'it does not exist: create the folder first, then run this again' }
-  $fp = Get-FinalPath $Path
-  if (-not $fp) { return 'where it really is cannot be read' }
-  if ($fp -match '^\\\\\?\\UNC\\') { return "it is really on the network ($fp)" }
-  $fp = ($fp -replace '^\\\\\?\\', '').TrimEnd('\')
-  if ($fp -ine $Path.Replace('/', '\').TrimEnd('\')) { return "it is really $fp (through a subst, mapped or linked drive or folder); use the real folder, if it qualifies" }
-  $o = Get-PathOwnerSid $Path
-  if (@($BaSid, $SySid, (Get-UserSid)) -notcontains $o) { return "it is owned by $(Get-AccountName $o), not Administrators, SYSTEM or you, so someone else decides what is in it" }
-  return (Get-AclProblem $Path)
 }
 function Get-DotnetState {
   $s = @{ Readable = (Test-RegKey $EnvKey); Vals = [ordered]@{}; Odd = '' }
@@ -709,11 +524,6 @@ function Get-FixTargets([string]$Id) {
       $l = @(); foreach ($k in @('HKCU|Run', 'HKLM|Run', 'HKLM|Run32')) { foreach ($n in (Get-RegNames $RunSources[$k][0])) { $l += "$k|$n" } }
       return @{ List = @($l | Where-Object { $st = Get-StartupState $_; (Test-Vendor $st.Name) -or (Test-Vendor $st.Exe) }); Note = '' }
     }
-    'defender.exclude' {
-      $l = @(); if ($FixWorkRoot) { $l += $FixWorkRoot.Replace('/', '\') }
-      $l += Get-NugetDir
-      return @{ List = $l; Note = '' }
-    }
   }
   return @{ List = @(''); Note = '' }
 }
@@ -723,7 +533,6 @@ function Get-StateTarget([string]$Id, $B) {
     'startup.vendor' { return "$($B.Hive)|$($B.Key)|$($B.Name)" }
     { @('vendor.services', 'sysmain') -contains $_ } { return $B.Name }
     'vendor.tasks' { return "$($B.Path)|$($B.Name)" }
-    'defender.exclude' { return $B.Path }
   }
   return ''
 }
@@ -732,7 +541,6 @@ function Get-TargetLabel([string]$Id, $S) {
     'startup.vendor' { return " $($S.Hive) $($S.Key): $(Get-CleanName $S.Name)" }
     { @('vendor.services', 'sysmain') -contains $_ } { return " $($S.Name)" }
     'vendor.tasks' { return " $($S.Path)$($S.Name)" }
-    'defender.exclude' { return " $($S.Path)" }
   }
   return ''
 }
@@ -815,7 +623,6 @@ function Get-FixState([string]$Id, [string]$Target = '') {
       if (-not $d) { return @{ Known = $false } }
       return @{ Known = $true; Mode = $d.Mode; Day = $d.Day; Time = $d.Time; Quick = $d.Quick }
     }
-    'defender.exclude' { return (Get-ExcludeState $Target) }
   }
   return @{}
 }
@@ -885,10 +692,6 @@ function ConvertFrom-StateText([string]$Id, [string]$Text) {
       if ($Text -cmatch '^day=([0-8]) time=([0-9]{1,4}) quick=([0-9]{1,4})$') { $dy = [int]$Matches[1]; $tm = [int]$Matches[2]; $qk = [int]$Matches[3]; if ($tm -lt 1440 -and $qk -lt 1440) { return @{ Known = $true; Mode = 'Normal'; Day = $dy; Time = $tm; Quick = $qk } } }
       return $null
     }
-    'defender.exclude' {
-      if ($Text -cmatch "^excluded=([01]) path=($WinPathRe)$" -and $Matches[2] -notmatch '\.\.') { return @{ Known = $true; Readable = $true; Mode = 'Normal'; Exact = ($Matches[1] -eq '1'); Path = $Matches[2] } }
-      return $null
-    }
   }
   return $null
 }
@@ -910,7 +713,6 @@ function Get-StateText([string]$Id, $S) {
     'do.mode' { if ($S.Kind -eq 'none') { $t = 'value=- type=none' } elseif ($S.Kind -eq 'DWord') { $t = "value=$($S.Value) type=dword" } }
     'dotnet.env' { if ($S.Readable -and -not $S.Odd) { $t = "telemetry=$($S.Vals.telemetry) nologo=$($S.Vals.nologo) aspnetcert=$($S.Vals.aspnetcert)" } }
     'defender.scantime' { if ($S.Known -and $null -ne $S.Time) { $q = 0; if ($S.Quick) { $q = $S.Quick }; $t = "day=$($S.Day) time=$($S.Time) quick=$q" } }
-    'defender.exclude' { if ($S.Known -and $S.Readable) { $t = "excluded=$([int][bool]$S.Exact) path=$($S.Path)" } }
   }
   if ($null -eq $t -or $null -eq (ConvertFrom-StateText $Id $t)) { return $null }
   return $t
@@ -978,17 +780,6 @@ function Get-FixNote([string]$Id, $S) {
       if (-not $FixHours) { return 'give the job window with -Hours HH:mm-HH:mm to check the scan time against it' }
       if (Test-InWindow (Get-ScanTarget $FixHours) $FixHours) { return "the job window $FixHours leaves no hour after it outside the window; move the scan yourself" }
     }
-    'defender.exclude' {
-      if (-not $S.Known) { return 'Defender could not be read (Get-MpPreference)' }
-      if ($S.Mode -and $S.Mode -ne 'Normal') { return "Defender is not the active antivirus (AMRunningMode: $($S.Mode)); its exclusions do not matter" }
-      if (-not $S.Readable) { return 'the exclusion list can only be read elevated' }
-      $why = Get-ExcludeProblem $S.Path; if ($why) { return "$($S.Path) is refused: $why" }
-      if ($S.Path -cnotmatch "^$WinPathRe$") { return "$($S.Path): this script adds only plain drive paths (letters, digits, space, _ . ( ) -)" }
-      if ($S.IsNuget) {
-        $cu = Get-ConsoleUserSid
-        if (-not $cu -or $cu -cne (Get-UserSid)) { return "the NuGet packages folder ($($S.Path)) comes from this account's profile, and this PowerShell does not run as the account logged on at the console, so it may be the wrong profile. Run the script elevated as the build user at the console, or exclude that user's NuGet folder yourself" }
-      }
-    }
   }
   return ''
 }
@@ -1012,7 +803,6 @@ function Test-FixNeeded([string]$Id, $S) {
     'do.mode' { return ($S.Kind -eq 'none' -and @(1, 2, 3) -contains [int]$S.Effective) }
     'dotnet.env' { return (@($S.Vals.Values | Where-Object { $_ -eq '-' }).Count -gt 0) }
     'defender.scantime' { return ($S.Day -ne 8 -and ((Test-InWindow $S.Time $FixHours) -or ($S.Quick -gt 0 -and (Test-InWindow $S.Quick $FixHours)))) }
-    'defender.exclude' { return (-not $S.Covered) }
   }
   return $false
 }
@@ -1033,7 +823,6 @@ function Test-FixDone([string]$Id, $S) {
     'do.mode' { return ($S.Kind -eq 'DWord' -and $S.Value -eq 0) }
     'dotnet.env' { return ($S.Readable -and @($S.Vals.Values | Where-Object { $_ -eq '-' -or $null -eq $_ }).Count -eq 0) }
     'defender.scantime' { return ($S.Known -and -not (Test-InWindow $S.Time $FixHours) -and -not ($S.Quick -gt 0 -and (Test-InWindow $S.Quick $FixHours))) }
-    'defender.exclude' { return ($S.Exact -eq $true) }
   }
   return $false
 }
@@ -1058,7 +847,6 @@ function Get-ExpectedAfter([string]$Id, $S) {
       $n = Get-ScanTarget $FixHours; $q = $S.Quick; if ($q -gt 0 -and (Test-InWindow $q $FixHours)) { $q = $n }
       $tm = $S.Time; if (Test-InWindow $tm $FixHours) { $tm = $n }; return "day=$($S.Day) time=$tm quick=$q"
     }
-    'defender.exclude' { return "excluded=1 path=$($S.Path)" }
   }
   return 'unknown'
 }
@@ -1089,7 +877,6 @@ function Get-StateSummary([string]$Id, $S) {
     'do.mode' { $p = 'not set'; if ($null -ne $S.Value) { $p = "$($S.Value)" }; return "policy DODownloadMode: $p; download mode in effect: $($S.Effective) (1 = LAN peers, 2 = group, 3 = internet peers)" }
     'dotnet.env' { return (@($DotnetVars.Keys | ForEach-Object { "$($DotnetVars[$_][0])=$($S.Vals[$_])" }) -join ', ') + ' (- = not set) for the machine' }
     'defender.scantime' { return "scheduled scan day $($S.Day) (0 = every day, 8 = never) at $(Format-Min $S.Time); daily quick scan at $(Format-Min ([int]$S.Quick)) (00:00:00 = none); job window $FixHours" }
-    'defender.exclude' { $e = 'scanned in real time'; if ($S.Exact) { $e = 'excluded' }; return "$($S.Path) is $e" }
   }
   return ''
 }
@@ -1101,7 +888,6 @@ function Get-FixApplyNote([string]$Id, $S) {
     'vendor.tasks' { return 'note: updaters often enable their tasks again when they update themselves; run the tune scan again later' }
     'do.mode' { return 'note: Settings now shows "managed by your organization" for Delivery Optimization' }
     'dotnet.env' { return 'note: new processes see it; restart sshd (Restart-Service sshd) so new SSH sessions do, and sign out and in for this desktop' }
-    'defender.exclude' { if ($S.Tamper) { return 'note: Tamper Protection is on; if an organization manages Defender, its policy may remove the exclusion' } }
   }
   return ''
 }
@@ -1151,8 +937,6 @@ function Get-FixCommand([string]$Id, [string]$Mode, $B, $Cur) {
       $cmd = @("Set-MpPreference$o")
     }
     'defender.scantime|undo' { $cmd = @("Set-MpPreference -ScanScheduleTime $(Format-Min $B.Time) -ScanScheduleQuickScanTime $(Format-Min $B.Quick)") }
-    'defender.exclude|apply' { $cmd = @("Add-MpPreference -ExclusionPath '$($B.Path)'") }
-    'defender.exclude|undo' { if (-not $B.Exact) { $cmd = @("Remove-MpPreference -ExclusionPath '$($B.Path)'") } }
   }
   return $cmd
 }
@@ -1235,8 +1019,6 @@ function Invoke-FixChange([string]$Id, [string]$Mode, $B, $Cur) {
       if ($B.Quick -gt 0 -and (Test-InWindow $B.Quick $FixHours)) { Set-MpPreference -ScanScheduleQuickScanTime $n -ErrorAction Stop }
     }
     'defender.scantime|undo' { Set-MpPreference -ScanScheduleTime (Format-Min $B.Time) -ScanScheduleQuickScanTime (Format-Min $B.Quick) -ErrorAction Stop }
-    'defender.exclude|apply' { Add-MpPreference -ExclusionPath $B.Path -ErrorAction Stop }
-    'defender.exclude|undo' { if (-not $B.Exact) { Remove-MpPreference -ExclusionPath $B.Path -ErrorAction Stop } }
     default { throw "no fix $Id ($Mode)" }
   }
 }
@@ -1434,8 +1216,7 @@ function Invoke-FixApply([bool]$Dry) {
   else { Write-FixLine "lanq-makeready-fix ${ToolVersion}: changes only what you confirm, one fix at a time (default no)" }
   $rec = $null; $failed = 0; $shown = 0
   $ids = $BaseFixIds
-  if ($FixSet -eq 'tune') { $ids = @($TuneFixIds | Where-Object { $_ -ne 'defender.exclude' }); Write-FixLine 'Tune fixes (lanq-makeready-tune.ps1 reports these; none of them changes whether the PC is worker-ready).' }
-  elseif ($FixSet -eq 'defender') { $ids = @($TuneFixIds | Where-Object { $_ -eq 'defender.exclude' }); foreach ($l in $DefenderScreen) { Write-FixLine $l 'Yellow' } }
+  if ($FixSet -eq 'tune') { $ids = $TuneFixIds; Write-FixLine 'Tune fixes (lanq-makeready-tune.ps1 reports these; none of them changes whether the PC is worker-ready).' }
   if ($elev -and -not $Dry) { $why = Get-FixRecordDirProblem; if ($why) { Write-FixErr "lanq-makeready-fix: $why"; return 1 } }
   foreach ($id in $ids) {
    $tg = Get-FixTargets $id
@@ -1452,7 +1233,7 @@ function Invoke-FixApply([bool]$Dry) {
     if ($rec -and $rec.Items.Count -ge 64) { Write-FixLine '  not offered: this session''s undo record is full (64 changes); run the script again for the rest' 'DarkYellow'; continue }
     if (-not (Confirm-Fix)) { Write-FixLine '  not applied'; continue }
     $s2 = Get-FixState $id $target   # the precondition, re-read just before the change
-    $n2 = Get-FixNote $id $s2; if ($n2) { Write-FixLine "  not applied: $n2" 'DarkYellow'; continue }   # e.g. the folder became a junction
+    $n2 = Get-FixNote $id $s2; if ($n2) { Write-FixLine "  not applied: $n2" 'DarkYellow'; continue }
     if (-not (Test-FixNeeded $id $s2)) { Write-FixLine '  no longer needed (the state changed); nothing done'; continue }
     $before = Get-StateText $id $s2
     if ($before -cne (Get-StateText $id $s)) { Write-FixLine '  the state changed since it was shown; nothing done (run the script again)' 'DarkYellow'; continue }
@@ -1460,10 +1241,6 @@ function Invoke-FixApply([bool]$Dry) {
     $item = [ordered]@{ seq = ($rec.Items.Count + 1); id = $id; status = 'pending'; time = (Get-UtcStamp); before = $before; command = ((Get-FixCommand $id 'apply' $s2 $s2) -join ' ; '); after = (Get-ExpectedAfter $id $s2) }
     [void]$rec.Items.Add($item)
     if (-not (Save-FixRecord $rec)) { Write-FixErr '  nothing changed: the undo record could not be written'; $rec.Items.RemoveAt($rec.Items.Count - 1); return 1 }
-    if ($id -eq 'defender.exclude') {   # the folder again, right before the change (it could have become a junction meanwhile)
-      $why = Get-ExcludeProblem $s2.Path
-      if ($why) { $item.status = 'skipped'; $item.time = Get-UtcStamp; [void](Save-FixRecord $rec); Write-FixLine "  not applied: $($s2.Path) is refused now: $why" 'DarkYellow'; continue }
-    }
     $err = ''
     try { Invoke-FixChange $id 'apply' $s2 $s2 } catch { $err = "$($_.Exception.Message)" }
     $s3 = Get-FixState $id $target
@@ -1568,8 +1345,8 @@ function Show-FixRecords {
   return 0
 }
 
-function Invoke-FixMain([string]$Mode = 'apply', [string]$UndoPath = '', [bool]$FromFile = $false, [string]$Set = 'base', [string]$Hours = '', [string]$WorkRoot = '') {
-  $script:FixSet = $Set; $script:FixHours = $Hours; $script:FixWorkRoot = $WorkRoot
+function Invoke-FixMain([string]$Mode = 'apply', [string]$UndoPath = '', [bool]$FromFile = $false, [string]$Set = 'base', [string]$Hours = '') {
+  $script:FixSet = $Set; $script:FixHours = $Hours
   $why = Get-FixRefusal $Mode $FromFile
   if ($why) { Write-FixErr "lanq-makeready-fix: $why"; return 3 }
   if ($Mode -eq 'list') { return (Show-FixRecords) }
@@ -1577,40 +1354,36 @@ function Invoke-FixMain([string]$Mode = 'apply', [string]$UndoPath = '', [bool]$
   return (Invoke-FixApply ($Mode -eq 'dry'))
 }
 
-# -Undo <file>, -Hours <window> and -WorkRoot <folder> are read from the remaining arguments, so a missing value is a
-# usage error (exit 2), not a binder error. Returns @{ Path; Hours; WorkRoot; Rest; Error }.
+# -Undo <file> and -Hours <window> are read from the remaining arguments, so a missing value is a usage error
+# (exit 2), not a binder error. Returns @{ Path; Hours; Rest; Error }.
 function Get-UndoArg([string[]]$Rest) {
-  $out = @(); $seen = @{ undo = $null; hours = $null; workroot = $null }; $err = ''; $a = @($Rest | Where-Object { $null -ne $_ -and "$_" -ne '' })   # PowerShell 7 can hand over one empty element
-  $what = @{ undo = 'a record file'; hours = 'a window like 22:00-07:00'; workroot = 'a folder like C:/lq' }
+  $out = @(); $seen = @{ undo = $null; hours = $null }; $err = ''; $a = @($Rest | Where-Object { $null -ne $_ -and "$_" -ne '' })   # PowerShell 7 can hand over one empty element
+  $what = @{ undo = 'a record file'; hours = 'a window like 22:00-07:00' }
   for ($i = 0; $i -lt $a.Count; $i++) {
-    if ($a[$i] -match '^-(?i:(undo|hours|workroot))$') {
-      $k = $Matches[1].ToLowerInvariant(); $nm = @{ undo = '-Undo'; hours = '-Hours'; workroot = '-WorkRoot' }[$k]
+    if ($a[$i] -match '^-(?i:(undo|hours))$') {
+      $k = $Matches[1].ToLowerInvariant(); $nm = @{ undo = '-Undo'; hours = '-Hours' }[$k]
       if ($null -ne $seen[$k]) { $err = "$nm given twice" }
       elseif ($i + 1 -ge $a.Count -or "$($a[$i + 1])" -eq '' -or "$($a[$i + 1])".StartsWith('-')) { $err = "$nm needs $($what[$k])" }
       else { $seen[$k] = $a[$i + 1]; $i++ }
     } else { $out += $a[$i] }
   }
-  return @{ Path = $seen.undo; Hours = $seen.hours; WorkRoot = $seen.workroot; Rest = $out; Error = $err }
+  return @{ Path = $seen.undo; Hours = $seen.hours; Rest = $out; Error = $err }
 }
 
-# '' when the tune arguments are usable, else the usage error. -WorkRoot follows LanQueue's work_root rule (a drive
-# path with forward slashes, letters, digits, _ . / -, no '..'), and is never a whole drive.
-function Get-TuneArgError($Ua, [bool]$TuneOn, [bool]$Def, [string]$Mode) {
-  if (-not $TuneOn -and ($Def -or $null -ne $Ua.Hours -or $null -ne $Ua.WorkRoot)) { return '-DefenderExclusions, -Hours and -WorkRoot go with -Tune' }
+# '' when the tune arguments are usable, else the usage error.
+function Get-TuneArgError($Ua, [bool]$TuneOn, [string]$Mode) {
+  if (-not $TuneOn -and $null -ne $Ua.Hours) { return '-Hours goes with -Tune' }
   if ($TuneOn -and @('undo', 'list') -contains $Mode) { return '-Tune goes with -WhatIf or alone; -Undo and -List handle every record' }
   if ($null -ne $Ua.Hours -and ($Ua.Hours -notmatch '^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$' -or $Ua.Hours.Split('-')[0] -eq $Ua.Hours.Split('-')[1])) { return '-Hours must look like 00:00-07:00 (HH:mm-HH:mm, start different from end)' }
-  if ($null -ne $Ua.WorkRoot -and ("$($Ua.WorkRoot)".Replace('\', '/') -cnotmatch '^[A-Za-z]:/[A-Za-z0-9_.-][A-Za-z0-9_./-]*$' -or "$($Ua.WorkRoot)" -match '\.\.')) { return '-WorkRoot must be a folder like C:/lq (letters, digits, _ . / -; no spaces, no .., not a whole drive), as in LanQueue machines.yml' }
-  # valid is enough here (LanQueue's rule, no '.' part, not a whole drive); whether it may be excluded is decided per
-  # item (Get-ExcludeProblem), so a work_root inside a profile skips only that exclusion, with a note
-  if ($null -ne $Ua.WorkRoot -and "$($Ua.WorkRoot)".Replace('\', '/') -match '(^|/)\.(/|$)') { return '-WorkRoot must not have a . part (like C:/lq/.)' }
   return ''
 }
 
 # ---------- main ----------
 
 if ($env:LANQ_MAKEREADY_FIX_LIB -eq '1' -and $MyInvocation.InvocationName -eq '.') { return }
-$Usage = 'usage: lanq-makeready-fix.ps1 [-WhatIf | -Undo <record file> | -List] [-Tune [-Hours HH:mm-HH:mm] [-DefenderExclusions -WorkRoot C:/lq]]   (no -Yes or -Force: every change is confirmed one by one)'
+$Usage = 'usage: lanq-makeready-fix.ps1 [-WhatIf | -Undo <record file> | -List] [-Tune [-Hours HH:mm-HH:mm]]   (no -Yes or -Force: every change is confirmed one by one)'
 $ua = Get-UndoArg $Extra
+if (@($ua.Rest) -match '^-(?i:DefenderExclusions)$') { [Console]::Error.WriteLine('lanq-makeready-fix: Defender exclusions are not automated; see the tune scan''s advice and docs/TUNE.md (nothing was changed)'); exit 2 }
 if ($ua.Error) { [Console]::Error.WriteLine("lanq-makeready-fix: $($ua.Error)"); [Console]::Error.WriteLine($Usage); exit 2 }
 if (@($ua.Rest).Count -gt 0) { [Console]::Error.WriteLine("lanq-makeready-fix: unknown argument(s): $(@($ua.Rest) -join ' ')"); [Console]::Error.WriteLine($Usage); exit 2 }
 if ($Help) { Write-Host $Usage; exit 0 }
@@ -1619,13 +1392,12 @@ if ($WhatIf) { $mode = 'dry'; $n++ }
 if ($null -ne $ua.Path) { $mode = 'undo'; $n++ }
 if ($List) { $mode = 'list'; $n++ }
 if ($n -gt 1) { [Console]::Error.WriteLine('lanq-makeready-fix: use only one of -WhatIf, -Undo and -List'); exit 2 }
-$te = Get-TuneArgError $ua ([bool]$Tune) ([bool]$DefenderExclusions) $mode
+$te = Get-TuneArgError $ua ([bool]$Tune) $mode
 if ($te) { [Console]::Error.WriteLine("lanq-makeready-fix: $te"); [Console]::Error.WriteLine($Usage); exit 2 }
-$set = 'base'; if ($Tune) { $set = 'tune'; if ($DefenderExclusions) { $set = 'defender' } }
+$set = 'base'; if ($Tune) { $set = 'tune' }
 $FixSet = $set
-$wr = ''; if ($ua.WorkRoot) { $wr = "$($ua.WorkRoot)".Replace('\', '/') }
 $fromFile = Test-FixFromFile $FixInvocation
 $why = Get-FixRefusal $mode $fromFile
 if ($why) { [Console]::Error.WriteLine("lanq-makeready-fix: $why"); exit 3 }
 if ($env:LANQ_MAKEREADY_FIX_LIB -eq '1') { [Console]::Error.WriteLine('lanq-makeready-fix: LANQ_MAKEREADY_FIX_LIB=1 is only for tests that dot-source this file; unset it.'); exit 2 }
-exit (Invoke-FixMain -Mode $mode -UndoPath "$($ua.Path)" -FromFile $fromFile -Set $set -Hours "$($ua.Hours)" -WorkRoot $wr)
+exit (Invoke-FixMain -Mode $mode -UndoPath "$($ua.Path)" -FromFile $fromFile -Set $set -Hours "$($ua.Hours)")

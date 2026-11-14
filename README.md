@@ -284,8 +284,10 @@ automatic update reboots against `--hours`, package caches, SSD TRIM, SMART heal
 over 90% full. Host checks report `SKIP` inside a container; on macOS it says there are no tune checks.
 
 Items with a fix id can be changed at the PC with the fix script's `-Tune` gate (below, and
-[docs/TUNE.md](docs/TUNE.md)). Defender exclusions sit behind their own `-DefenderExclusions` switch and suggest a Dev
-Drive first. Cache clean-up, the Windows Update restart policy and the other report-only items are never changed.
+[docs/TUNE.md](docs/TUNE.md)). Defender exclusions are not automated in 0.5.0: whether a folder can be trusted (who can write to it, where it really is, what runs from it) is hard to verify safely from a script, and a wrong exclusion silently turns off scanning. The scan says which build folders are scanned, and
+[docs/TUNE.md](docs/TUNE.md) has the manual steps (Dev Drive first; otherwise a locked-down top-level build folder
+and your NuGet cache, with `Add-MpPreference`). Cache clean-up, the Windows Update restart policy and the other
+report-only items are never changed either.
 
 ## Fix mode
 
@@ -407,18 +409,11 @@ rules: elevated, at the PC, one confirmation per item, an undo record before eac
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\lanq-makeready-fix.ps1 -Tune -Hours 22:00-07:00 -WhatIf
-powershell -NoProfile -ExecutionPolicy Bypass -File .\lanq-makeready-fix.ps1 -Tune -DefenderExclusions -WorkRoot C:/lq -WhatIf
 ```
 
 Windows tune fixes: `power.cpu`, `power.usbsuspend`, `startup.vendor`, `vendor.services`, `vendor.tasks`, `sysmain`,
-`do.mode`, `dotnet.env` and `defender.scantime` (needs `-Hours`). `-Tune -DefenderExclusions` offers only
-`defender.exclude`, for work_root (`-WorkRoot`) plus the NuGet package cache, never temp, after a screen that suggests
-a Dev Drive first; folders already excluded are skipped, nothing is offered when Defender is not the active
-antivirus, and only an existing local folder, not a system/profile/tool area or on PATH, that only Administrators,
-SYSTEM and you can change is offered: a top-level build folder such as `C:\lq` or `D:\build`, or your own
-`.nuget\packages` (a folder inside a profile is not; no subst or mapped drives; the script shows the `icacls` command
-to tighten a folder but never changes permissions). The NuGet cache is offered only when the elevated account is the
-one logged on at the console. What each one changes and how it is undone is in [docs/TUNE.md](docs/TUNE.md). A record holds at most 64
+`do.mode`, `dotnet.env` and `defender.scantime` (needs `-Hours`). There is no Defender exclusion fix
+(`-DefenderExclusions` exits 2; see [docs/TUNE.md](docs/TUNE.md) for the manual steps). What each one changes and how it is undone is in [docs/TUNE.md](docs/TUNE.md). A record holds at most 64
 changes; run the script again for the rest.
 
 On Linux, `sudo sh lanq-makeready-fix.sh --tune --dry-run` shows the tune fixes (it also works inside a container,

@@ -10,7 +10,7 @@
 - Time: a 90-second deadline for the whole scan and a budget per probe; a probe over its budget reports SKIP
   "time budget". Driver dates come from `Get-NetAdapter` and the Class registry (15 s), never `Win32_PnPSignedDriver`.
 - Windows checks: `power.plan`, `power.usbsuspend`, `startup.vendor`, `vendor.services`, `vendor.tasks`, `sysmain`,
-  `search.index`, `do.mode`, `wu.reboot`, `visual.fx`, `dotnet.env`, `wsl.reclaim`, `defender.paths` (admin; the
+  `search.index`, `do.mode`, `wu.reboot`, `visual.fx`, `dotnet.env`, `wsl.reclaim`, `defender.paths` (admin; report only; the
   exclusion list is compared inside the probe and never printed), `defender.schedule` (the scheduled scan against
   `-Hours`, in place of a CPU-load check), `av.other` (Security Center and AMRunningMode), `pagefile`, `disk.health`,
   `disk.full` (over 90%), `drivers.age`, `cache.sizes` (NuGet HTTP cache and Windows Update downloads only),
@@ -26,20 +26,10 @@
   - Scheduled tasks under `\Microsoft\` are never touched; access denied is skipped.
   - Undo re-checks service, task and Run entry names against the curated list plus an append-only retired list, and
     every name and path in a record has a fixed shape. A record holds at most 64 changes.
-- **Defender exclusions** behind their own switch, `-Tune -DefenderExclusions`: after a screen that suggests a Dev
-  Drive first, only work_root (`-WorkRoot`) plus the NuGet package cache are offered, never temp or processes;
-  only an allow-listed folder is offered: a top-level build folder such as `C:\lq` or `D:\build` (not a Windows,
-  program, user, vendor or `$` folder, and not in, at or above any ProfileList profile, Windows, Program Files,
-  ProgramData or TEMP), or exactly your own `<profile>\.nuget\packages`; never `~`, reserved device names, `.`/`..`,
-  a drive root or a junction on the path; the folder must exist, be owned by Administrators, SYSTEM or you, and
-  only they (plus CREATOR OWNER and TrustedInstaller) may change it or delete folders in its parent (the note shows an
-  `icacls` command; permissions are never changed); it must be on a local fixed volume of its own (no subst or mapped
-  drive, checked with QueryDosDevice) and really be where its name says (GetFinalPathNameByHandle); tool folders
-  (Python*, msys*, cygwin*, nvm*, php*, tools, hostedtoolcache, Temp, ...) and anything at, under or above a PATH
-  entry are refused, and an unreadable ProfileList fails closed; everything is checked again right before the change; a work_root inside a profile still scans, but is not offered for exclusion; the NuGet cache is offered only
-  when the elevated account is the one logged on at the console;
-  folders already covered by an exclusion are skipped and never recorded; nothing is offered unless AMRunningMode is
-  Normal. Undo removes exactly the folders the record says were added.
+- **Defender exclusions are report-only.** Defender exclusions are not automated in 0.5.0: whether a folder can be trusted (who can write to it, where it really is, what runs from it) is hard to verify safely from a script, and a wrong exclusion silently turns off scanning. `defender.paths` says, per
+  folder, whether real-time scanning covers it and gives the manual procedure (Dev Drive first; otherwise lock a
+  top-level build folder down with icacls and use `Add-MpPreference`); docs/TUNE.md has the steps. The fix script
+  has no exclusion fix: `-DefenderExclusions` exits 2 with a pointer to that page.
 - Names read from the PC (Run entries, services, tasks, drivers) are printed without control or bidi characters and
   cut at 80 characters; detail and advice at 1024. Under `-Redact` account SIDs in task names are redacted too.
 - `defender.scantime` is not offered when an hour after the window is still inside it (windows of 23 hours or more).

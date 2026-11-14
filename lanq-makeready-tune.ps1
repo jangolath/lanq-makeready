@@ -44,92 +44,8 @@ function Test-Hours([string]$H) {
   $p = $H.Split('-'); return ($p[0] -ne $p[1])
 }
 # LanQueue's Windows work_root rule (ConfigLoader): drive path, forward slashes, [A-Za-z0-9_./-], no '..'.
-# A valid work_root for scanning (LanQueue's rule, no '.' part, not a whole drive). Whether it may also become a
-# Defender exclusion is a separate, stricter question (Get-BuildDirProblem).
+# A valid work_root (LanQueue's rule: a drive path with forward slashes, no '.' or '..' part, not a whole drive).
 function Test-WorkRoot([string]$W) { return ($W -cmatch '^[A-Za-z]:/[A-Za-z0-9_.-][A-Za-z0-9_./-]*$' -and $W -notmatch '\.\.' -and $W -notmatch '(^|/)\.(/|$)') }
-# System folders a build folder must never be in, at or above: Windows, every Program Files, ProgramData, TEMP/TMP.
-function Get-ProtectedDirs {
-  $l = @($env:SystemRoot, [Environment]::GetFolderPath('Windows'), [Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86'), $env:ProgramW6432,
-    [Environment]::GetEnvironmentVariable('ProgramFiles(x86)'), [Environment]::GetEnvironmentVariable('ProgramFiles(Arm)'), [Environment]::GetFolderPath('CommonApplicationData'),
-    $env:ProgramData, $env:TEMP, $env:TMP, [System.IO.Path]::GetTempPath())
-  return @($l | Where-Object { $_ } | ForEach-Object { "$_".Replace('/', '\').TrimEnd('\') })
-}
-# Every user profile folder Windows knows (ProfileList: ProfilesDirectory, Default, Public and each ProfileImagePath,
-# on any drive), plus this account's. $null when the list cannot be read (then only this account's NuGet cache can pass).
-function Get-ProfileRoots {
-  $k = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'; $l = @()
-  try {
-    $pl = Get-Item -LiteralPath $k -ErrorAction Stop
-    foreach ($n in 'ProfilesDirectory', 'Default', 'Public') { $l += "$($pl.GetValue($n))" }
-    foreach ($pk in @(Get-ChildItem -LiteralPath $k -ErrorAction Stop)) { $l += "$($pk.GetValue('ProfileImagePath'))" }
-  } catch { return $null }
-  $l += @($env:PUBLIC, (Get-CurrentProfile), $env:USERPROFILE)
-  return , @($l | Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables("$_").Replace('/', '\').TrimEnd('\') })
-}
-function Get-CurrentProfile { return "$([Environment]::GetFolderPath('UserProfile'))".TrimEnd('\') }
-# The folders on the machine and user PATH (registry Environment values, expanded); drive roots are left out.
-function Get-PathDirs {
-  $l = @()
-  foreach ($k in 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment', 'HKCU:\Environment') {
-    try { $l += @("$((Get-Item -LiteralPath $k -ErrorAction Stop).GetValue('Path', '', 'DoNotExpandEnvironmentNames'))".Split(';')) } catch { }
-  }
-  return , @($l | ForEach-Object { [Environment]::ExpandEnvironmentVariables("$_").Trim().Trim('"').Replace('/', '\').TrimEnd('\') } | Where-Object { $_ -match '^[A-Za-z]:\\[^%]' })
-}
-function Get-DriveTypeName([string]$Letter) { try { return "$((New-Object System.IO.DriveInfo($Letter)).DriveType)" } catch { return '' } }
-function Test-AtOrUnder([string]$P, [string]$Q) { return [bool]($Q -and ($P -ieq $Q -or $P.StartsWith($Q + '\', [System.StringComparison]::OrdinalIgnoreCase))) }
-# '' when no existing part of $Path, from the drive down, is a junction or symbolic link (it could point anywhere).
-function Get-ReparseProblem([string]$Path) {
-  $parts = @($Path.Split('\')); $cur = $parts[0]
-  for ($i = 1; $i -lt $parts.Count; $i++) {
-    $cur = $cur + '\' + $parts[$i]
-    if (-not [System.IO.Directory]::Exists($cur) -and -not [System.IO.File]::Exists($cur)) { break }
-    try { if ([System.IO.File]::GetAttributes($cur) -band [System.IO.FileAttributes]::ReparsePoint) { return "$cur is a junction or link" } } catch { return "$cur cannot be read" }
-  }
-  return ''
-}
-# '' only for (A) a build folder: <drive>:\<top>\... on a local disk volume (Get-DriveProblem), where <top> is not a
-# Windows, program, user, tool, vendor or hidden ($) folder, and the path is not in, at or above a system folder, any
-# user profile or any folder on PATH; or (B) exactly this account's NuGet cache, <profile>\.nuget\packages (not for a
-# profile inside a system folder, such as SYSTEM's). Always refused: a drive root, '.' or '..', ~ (8.3 short names),
-# reserved device names, a part ending in a dot or space, a path Windows would read differently (GetFullPath), and a
-# junction or link on the existing part of the path.
-function Get-BuildDirProblem([string]$Path) {
-  $p = "$Path".Replace('/', '\').TrimEnd('\'); $use = 'use a top-level build folder such as C:\lq or D:\build'
-  if ($p -notmatch '^[A-Za-z]:(\\[^\\]+)+$') { return "it is not a folder on a drive (a whole drive is never used); $use" }
-  if ($p.Contains('~')) { return "it contains ~ (an 8.3 short name can stand for another folder); $use" }
-  $parts = @($p.Split('\'))
-  for ($i = 1; $i -lt $parts.Count; $i++) {
-    $g = $parts[$i]
-    if ($g -eq '.' -or $g -eq '..') { return "it has a '.' or '..' part" }
-    if ($g -ne $g.Trim() -or $g.EndsWith('.')) { return 'a part of it starts or ends with a space or ends with a dot (Windows drops those)' }
-    if ($g -match '^(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$') { return "it has a reserved device name ($g)" }
-  }
-  $full = ''; try { $full = [System.IO.Path]::GetFullPath($p).TrimEnd('\') } catch { return 'it is not a valid path' }
-  if ($full -ine $p) { return "it is not in canonical form (Windows reads it as $full)" }
-  $dp = Get-DriveProblem $parts[0]; if ($dp) { return $dp }
-  $sys = @(Get-ProtectedDirs); $prof = Get-CurrentProfile
-  if ($prof -and $p -ieq "$prof\.nuget\packages") {
-    foreach ($q in $sys) { if (Test-AtOrUnder $prof $q) { return "the profile $prof is inside the system folder $q (SYSTEM or a service account); $use" } }
-    return (Get-ReparseProblem $p)
-  }
-  if ($parts[1] -match '^(?i)(Windows.*|Program Files.*|ProgramData|Users|Documents and Settings|PerfLogs|inetpub|ESD|Recovery|Boot|EFI|System Volume Information|Config\.Msi|\$.*|OneDrive.*|Intel|AMD|NVIDIA|Dell|HP|SWSetup|Drivers|MSOCache|XboxGames|Temp|tmp|tools|hostedtoolcache|Python.*|msys.*|cygwin.*|nvm.*|php.*)$') {
-    return "$($parts[0])\$($parts[1]) is a Windows, program, user, tool, vendor or hidden folder; $use"
-  }
-  $roots = Get-ProfileRoots
-  if ($null -eq $roots) { return "the profile list could not be read, so it cannot be told apart from a user profile; $use" }
-  foreach ($q in @($sys) + @($roots)) { if ((Test-AtOrUnder $p $q) -or (Test-AtOrUnder $q $p)) { return "it is in, at or above $q; $use" } }
-  foreach ($q in @(Get-PathDirs)) { if ((Test-AtOrUnder $p $q) -or (Test-AtOrUnder $q $p)) { return "it is in, at or above $q, a folder on PATH (programs run from there); $use" } }
-  return (Get-ReparseProblem $p)
-}
-# Tune scan (read-only, no native calls): the drive must be a local fixed disk that has a partition of its own (a subst
-# drive has none; the fix script asks Windows directly, QueryDosDevice).
-function Get-DriveProblem([string]$Letter) {
-  $t = Get-DriveTypeName $Letter
-  if ($t -ne 'Fixed') { return "the drive $Letter is not a local fixed disk ($t); use a top-level build folder such as C:\lq or D:\build on a local disk" }
-  if ($null -eq $script:RealLetters) { try { $script:RealLetters = @(Get-Partition -ErrorAction Stop | Where-Object { $_.DriveLetter } | ForEach-Object { "$($_.DriveLetter):".ToUpper() }) } catch { $script:RealLetters = @() } }
-  if (@($script:RealLetters) -notcontains $Letter.ToUpper()) { return "the drive $Letter is not a partition of a local disk (a subst or mapped drive?); use the real folder" }
-  return ''
-}
 # A name from the PC (Run entry, service, task, driver, product) made safe to print: control and bidi characters
 # removed (any user process can write a Run entry), at most 80 characters.
 function Get-CleanName([string]$S) {
@@ -288,14 +204,10 @@ function Get-TuneItems($F) {
   elseif (-not $d.Rtp) { & $add (New-TuneItem 'defender.paths' $t 'OK' 'real-time protection is off' '' $true '' $true) }
   elseif ($null -eq $d.Scanned) { & $add (New-TuneItem 'defender.paths' $t 'SKIP' 'needs admin (exclusions are readable only elevated; the list is never printed)' '' $true '' $true) }
   else {
-    $rows = @(); $scan = 0; $no = @(); $elig = @{ work_root = $F.WorkRootExcl; 'NuGet packages' = $F.NugetExcl }
-    foreach ($k in @('work_root', 'NuGet packages', 'temp')) {
-      if (-not $d.Scanned.Contains($k)) { continue }
-      $s = 'scanned'; if (-not $d.Scanned[$k]) { $s = 'excluded' } elseif ($k -ne 'temp') { if ($elig[$k]) { $no += "$k cannot be excluded: $($elig[$k])" } else { $scan++ } }; $rows += "$k $s" }
-    if ($no.Count) { $rows += $no }
-    $adv = 'A Dev Drive (Windows 11, performance mode) is the better choice: Defender scans it asynchronously. An exclusion is a trade-off: nothing in that folder is ever scanned. The fix offers work_root and the NuGet packages only (lanq-makeready-fix.ps1 -Tune -DefenderExclusions), never temp.'
-    if ($scan -gt 0) { & $add (New-TuneItem 'defender.paths' $t 'INFO' "real-time scanning: $($rows -join ', ')" $adv $true 'defender.exclude' $true) }
-    elseif ($no.Count) { & $add (New-TuneItem 'defender.paths' $t 'INFO' "real-time scanning: $($rows -join ', ')" $adv $true '' $true) }
+    $rows = @(); $scan = 0
+    foreach ($k in @('work_root', 'NuGet packages', 'temp')) { if ($d.Scanned.Contains($k)) { $s = 'scanned'; if (-not $d.Scanned[$k]) { $s = 'excluded' } elseif ($k -ne 'temp') { $scan++ }; $rows += "$k $s" } }
+    $adv = 'Not automated (report only). Prefer a Dev Drive (performance mode) for build folders. To exclude by hand: only a top-level build folder (like C:\lq) and your own %USERPROFILE%\.nuget\packages, never temp, a profile, system or program folder, or a folder on PATH. First let only Administrators, SYSTEM and you change it (icacls /inheritance:r /grant:r, /setowner), then in an elevated PowerShell: Add-MpPreference -ExclusionPath <folder> (undo: Remove-MpPreference). Steps: docs/TUNE.md.'
+    if ($scan -gt 0) { & $add (New-TuneItem 'defender.paths' $t 'INFO' "real-time scanning: $($rows -join ', ')" $adv $true '' $true) }
     else { & $add (New-TuneItem 'defender.paths' $t 'OK' "real-time scanning: $($rows -join ', ')" '' $true '' $true) }
   }
 
@@ -544,8 +456,6 @@ function Get-TuneFacts([string]$H, [string]$W) {
       $out += $h }
     @{ Disks = $out; Parts = @(Get-Partition -ErrorAction SilentlyContinue | Where-Object { $_.DriveLetter } | ForEach-Object { "$($_.DriveLetter)=$($_.DiskNumber)".ToUpper() }) } } $F.Elevated
   if ($null -ne $dk) { $F.Disks = @(@($dk)[0].Disks); $F.Parts = @(@($dk)[0].Parts) }
-  if ($null -ne $dk) { $script:RealLetters = @($F.Parts | ForEach-Object { ("$_" -replace '=.*$', '') + ':' }) }   # the drive letters that are real partitions
-  $F.NugetExcl = Get-BuildDirProblem $F.NugetDir; $F.WorkRootExcl = ''; if ($W) { $F.WorkRootExcl = Get-BuildDirProblem $W }   # may each become an exclusion?
   try { $F.Volumes = @([System.IO.DriveInfo]::GetDrives() | Where-Object { "$($_.DriveType)" -eq 'Fixed' -and $_.IsReady } | ForEach-Object { @{ Letter = "$($_.Name)".Substring(0, 2); SizeGB = [math]::Round($_.TotalSize / 1GB, 1); FreeGB = [math]::Round($_.AvailableFreeSpace / 1GB, 1) } }) } catch { }
   if ($F.Elevated) { $r = Invoke-Exe (Join-Path ([Environment]::GetFolderPath('System')) 'fsutil.exe') 'behavior query DisableDeleteNotify'; if ($r -and "$($r.Out)" -match 'NTFS DisableDeleteNotify\s*=\s*1') { $F.TrimOff = $true } }
   # Windows Search crawl rules

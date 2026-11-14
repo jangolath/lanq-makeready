@@ -76,7 +76,7 @@ problems and the `administrators_authorized_keys` ACL (fix `ssh.aclkeys`). The t
 | `visual.fx` | INFO: Remote Desktop is on | none | "Adjust for best performance" is per user |
 | `dotnet.env` | INFO: `DOTNET_CLI_TELEMETRY_OPTOUT`, `DOTNET_NOLOGO` or `DOTNET_GENERATE_ASPNET_CERTIFICATE` is not set for the machine | `dotnet.env` | LanQueue's machines.yml `env:` does the same per job without touching the PC; after a machine-level change restart sshd |
 | `wsl.reclaim` | INFO: WSL is installed and `%USERPROFILE%\.wslconfig` has no `autoMemoryReclaim` | none | a per-user file; `wsl --shutdown` after editing |
-| `defender.paths` | INFO (admin): real-time scanning covers work_root or the NuGet packages folder. SKIP when not elevated, or when Defender is not the active antivirus (AMRunningMode not Normal) | `defender.exclude` | says scanned/excluded per folder (and for temp); the exclusion list is compared inside the probe and never printed |
+| `defender.paths` | INFO (admin): real-time scanning covers work_root or the NuGet packages folder. SKIP when not elevated, or when Defender is not the active antivirus (AMRunningMode not Normal) | none (report only) | says scanned/excluded per folder (and for temp); the exclusion list is compared inside the probe and never printed. The advice is the manual procedure below |
 | `defender.schedule` | INFO: the scheduled scan (or the daily quick scan) falls inside `-Hours` | `defender.scantime` (not for a window of 23 hours or more, where an hour after it is still inside) | replaces the plan's "Defender CPU load" check: the scan's timing is what matters on a build box |
 | `av.other` | INFO: another antivirus is active (Security Center; not on Windows Server) | none | its real-time scanning slows builds too; use its own exclusions or a Dev Drive |
 | `pagefile` | INFO: the page file is on a spinning disk while an SSD exists, or a fixed size is below the RAM | none | the scanner checks that one exists (swap) |
@@ -91,40 +91,33 @@ problems and the `administrators_authorized_keys` ACL (fix `ssh.aclkeys`). The t
 
 Inside a Windows container the host-level checks report SKIP.
 
-**Build folders (Defender exclusions).** A folder is offered for an exclusion only when it is **an existing local
-folder, not a system/profile/tool area or on PATH, that only Administrators, SYSTEM and you can change**. In detail:
+### Defender exclusions: by hand only
 
-- It is (A) a top-level build folder such as `C:\lq` or `D:\build`, or (B) exactly this account's NuGet cache,
-  `<profile>\.nuget\packages` (a `NUGET_PACKAGES` override must itself qualify as (A)). A folder inside a profile, such
-  as `<profile>\lq`, is not offered: use a top-level build folder such as `C:\lq` or `D:\build`.
-- For (A) the top-level folder is not a Windows, program, user, tool, vendor or hidden one (`Windows*`,
-  `Program Files*`, `ProgramData`, `Users`, `Documents and Settings`, `PerfLogs`, `inetpub`, `ESD`, `Recovery`, `Boot`,
-  `EFI`, `System Volume Information`, `Config.Msi`, any `$...` folder, `OneDrive*`, `Intel`, `AMD`, `NVIDIA`, `Dell`,
-  `HP`, `SWSetup`, `Drivers`, `MSOCache`, `XboxGames`, `Temp`, `tmp`, `tools`, `hostedtoolcache`, `Python*`, `msys*`,
-  `cygwin*`, `nvm*`, `php*`), and the folder is not in, at or above any user profile Windows knows (the ProfileList,
-  so profiles on other drives too; if that list cannot be read, only (B) is possible), `%SystemRoot%`, any Program
-  Files folder, ProgramData, TEMP/TMP, or any folder on the machine or user PATH.
-- It is on a local fixed disk with a volume of its own: not a network, removable, `subst` or mapped drive (the fix asks
-  Windows with `QueryDosDevice`, the scan checks the partitions), and the fix opens it and asks Windows where it really
-  is (`GetFinalPathNameByHandle`); that must be the same folder.
-- Always refused: a drive root, `.` or `..`, `~` (8.3 short names), reserved device names (`CON`, `NUL`, `COM1`,
-  `LPT1`, ...), a part ending in a dot or space, a path Windows would read differently, and a junction or symbolic link
-  anywhere on the existing path.
-- The fix also requires the folder to exist ("create the folder first") and to be owned by Administrators, SYSTEM or
-  you, and its permissions to let nobody else write, append, delete, change permissions or take ownership (CREATOR
-  OWNER and TrustedInstaller are fine), with nobody else allowed to delete folders in its parent. A new folder in a
-  drive root usually inherits "Authenticated Users: Modify", so it is refused until you tighten it yourself; the
-  script never changes permissions, it shows the command:
+Defender exclusions are not automated in 0.5.0: whether a folder can be trusted (who can write to it, where it really is, what runs from it) is hard to verify safely from a script, and a wrong exclusion silently turns off scanning. The tune scan reports, per folder, whether real-time scanning covers it (`defender.paths`); the
+fix script has no exclusion fix (`-DefenderExclusions` exits 2). To speed up builds:
 
-  ```text
-  icacls "C:\lq" /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F "<your-account>:(OI)(CI)F"
-  ```
+1. **Prefer a Dev Drive.** On Windows 11, a Dev Drive in performance mode keeps protection on and scans
+   asynchronously: Settings > System > Storage > Disks & volumes > Create Dev Drive, then put work_root and
+   `NUGET_PACKAGES` there.
+2. **If you exclude, exclude only** a top-level build folder (for example `C:\lq` or `D:\build`) and your own
+   `%USERPROFILE%\.nuget\packages`. Never temp, a profile folder (Desktop, Documents, Downloads, AppData, ...), a
+   Windows, program, tool or vendor folder, a folder on PATH, a network or `subst` drive, or a whole drive.
+3. **Lock the folder down first**, so only Administrators, SYSTEM and your account can change what is never scanned.
+   In an elevated PowerShell:
 
-  All of this is checked when the item is shown, again after your answer, and again right before the change.
+   ```text
+   icacls C:\lq /setowner *S-1-5-32-544 /T
+   icacls C:\lq /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F <your-account>:(OI)(CI)F /T
+   ```
 
-`-WorkRoot` itself only has to be a valid LanQueue work_root for the scan (a drive path with no `.` part, not a whole
-drive), in the scan and in the fix script, so a work_root inside a profile still scans and the other fixes still run;
-`defender.paths` and the fix then say it cannot be excluded and why (the NuGet cache is still offered when it qualifies).
+   Then check it: `icacls C:\lq` should list only Administrators, SYSTEM and you (and inherited-only entries for
+   them). Do the same for the folder that holds it if others could rename it.
+4. **Add the exclusion** in an elevated PowerShell: `Add-MpPreference -ExclusionPath C:\lq`
+5. **Undo** at any time: `Remove-MpPreference -ExclusionPath C:\lq`
+
+Paths only, never processes or file types. An organization's Defender policy may override or remove local exclusions.
+
+`-WorkRoot` only has to be a valid LanQueue work_root (a drive path with no `.` part, not a whole drive).
 
 ### The curated list
 
@@ -157,32 +150,9 @@ offered only when the tune scan would report it. Undo is the usual `-Undo <recor
 | `dotnet.env` | the unset ones of `DOTNET_CLI_TELEMETRY_OPTOUT=1`, `DOTNET_NOLOGO=1`, `DOTNET_GENERATE_ASPNET_CERTIFICATE=false` in the machine environment (registry). Restart sshd so new SSH sessions see them | those values removed |
 | `defender.scantime` | needs `-Hours`. `Set-MpPreference -ScanScheduleTime` (and the quick scan time, if that one is in the window) to one hour after the window ends | the old times. Not offered when Defender is not the active antivirus |
 
-### Defender exclusions (`-Tune -DefenderExclusions`)
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\lanq-makeready-fix.ps1 -Tune -DefenderExclusions -WorkRoot C:/lq -WhatIf
-```
-
-A separate switch, because an exclusion lowers protection. With it, only `defender.exclude` is offered, after a screen
-that explains the trade-off and suggests a **Dev Drive** first (Windows 11: Defender scans a Dev Drive in performance
-mode asynchronously, so protection stays on). Then:
-
-- exclusions cover work_root (`-WorkRoot`) plus the NuGet package cache (`NUGET_PACKAGES`, or
-  `%USERPROFILE%\.nuget\packages`), nothing else: never temp, never processes;
-- each folder must pass the build-folder rule above: a top-level build folder such as `C:\lq` or `D:\build`, or
-  this account's own `.nuget\packages`; it must exist and be owned by Administrators, SYSTEM or you, and it is checked
-  again after your answer and right before the change (a folder that became a junction meanwhile is skipped);
-- the NuGet package cache is offered only when the elevated PowerShell runs as the account logged on at the console:
-  otherwise `%USERPROFILE%` belongs to another account (for example an administrator who elevated for you), and the
-  script says so and offers work_root only;
-- a folder already covered by an exclusion (itself or a parent) is skipped and never recorded;
-- nothing is offered when AMRunningMode is not Normal (another antivirus is active, or passive mode);
-- `Add-MpPreference -ExclusionPath <folder>`; the record keeps the folder, and undo runs
-  `Remove-MpPreference -ExclusionPath` for exactly the folders this script added.
-
 ### Report only, never fixed
 
-Cache clean-up, the Windows Update restart policy (`wu.reboot`), Windows Search, visual effects, WSL, the page file,
+Defender exclusions (see above), cache clean-up, the Windows Update restart policy (`wu.reboot`), Windows Search, visual effects, WSL, the page file,
 disk health and fullness, drivers, autologon, other antivirus, OneDrive, BIOS settings and the maintenance time.
 
 ## For AI agents

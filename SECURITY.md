@@ -62,15 +62,8 @@ The fix script changes the PC, but only what its owner confirms there, one item 
   `core.longpaths`, the `administrators_authorized_keys` permissions. Linux: start sshd, mask the sleep targets.
   With `-Tune` (0.5.0+): the tune fixes in [docs/TUNE.md](docs/TUNE.md). PC-maker services, tasks and Run entries are
   taken only from a short curated list in the code (never "everything unused"), tasks under `\Microsoft\` are never
-  touched, and undo re-checks every name against that list. Defender exclusions need a second switch
-  (`-DefenderExclusions`), cover work_root plus the NuGet package cache only, and only an allow-listed folder: a top-level build folder such
-  as `C:\lq` or `D:\build`, or exactly your own `<profile>\.nuget\packages` (never temp, processes, a drive root, a
-  system, program or vendor folder, or anything in a user profile); it must be an existing local folder, not a system/profile/tool area
-  or on PATH, that only Administrators, SYSTEM and you can change (owner and DACL checked by SID; no subst, mapped or
-  network drive, no junction on its path; its real location is asked from Windows), and is checked again right before
-  the change; the script never changes permissions itself; the NuGet cache only when the
-  elevated account is the console user), and
-  are not offered when Defender is not the active antivirus.
+  touched, and undo re-checks every name against that list. Defender exclusions are not automated (too hard to
+  verify a folder's trust safely); docs/TUNE.md gives the manual steps.
   Nothing is installed, deleted, upgraded or downloaded, and there are no network calls.
 - **Never elevates itself.** Without admin or root, every fix is skipped with a note.
 - **Undo record.** Each change is recorded as `pending` before it is made and updated after it, so a crash leaves a
