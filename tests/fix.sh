@@ -222,6 +222,11 @@ for a in --yes -y --force -f --assume-yes; do
   if [ "$rc" = 2 ]; then ok "NoYesFlag: $a -> exit 2"; else bad "NoYesFlag: $a" "$rc" 2; fi
   contains "$o" "unknown argument" "NoYesFlag: $a -> unknown argument"
 done
+for a in --defender-exclusions --create-dev-drive -DefenderExclusions; do
+  o=$(child --tune "$a"); rc=$?
+  eq "$rc" 2 "G4: $a is Windows only: exit 2"
+  contains "$o" "Windows only" "G4: $a says it is Windows only"
+done
 o=$(child --dry-run --list); eq "$?" 2 "two modes at once: exit 2"
 o=$(child --help); rc=$?; eq "$rc" 0 "--help: exit 0"; contains "$o" "no --yes" "--help says there is no --yes"
 o=$(SSH_CONNECTION="10.20.30.5 50000 10.20.30.6 22" LANQ_MAKEREADY_FIX_LIB=1 sh "$fix" --dry-run </dev/null 2>&1); rc=$?

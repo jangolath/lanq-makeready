@@ -75,7 +75,7 @@ jobs:
   # and RUNNER_ENVIRONMENT=github-hosted (an accident guard, not a security boundary).
   real-fix-windows:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     env:
       LANQ_REAL_FIX_OK: disposable-runner
     steps:
@@ -140,6 +140,20 @@ jobs:
       - name: "Pass 3 (tune): real apply + undo (PowerShell 7)"
         shell: pwsh
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests/real-fix.ps1
+      # Pass 4 (defender): C:\lanq-work, the exclusion, non-admin probes (LogonUser), drift and undo. E1-E8 are best
+      # effort here (the image turns real-time protection off); the script prints a ::notice:: when it has to simulate
+      # the scan results, and build-02 is then the required run for E1-E8 and G1.
+      - name: "Pass 4 (defender): real exclusion, probes, drift, undo (Windows PowerShell 5.1)"
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/real-defender.ps1
+      - name: "Pass 4 (defender): remove lanq-work, so PowerShell 7 creates it (FileSystemAclExtensions.Create)"
+        shell: pwsh
+        run: |
+          $p = Join-Path ([Environment]::GetFolderPath('Windows')).Substring(0, 3) 'lanq-work'
+          if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force }
+      - name: "Pass 4 (defender): real exclusion, probes, drift, undo (PowerShell 7)"
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests/real-defender.ps1
   real-fix-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 15
