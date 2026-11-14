@@ -20,6 +20,22 @@ jobs:
       - name: Fix-script tests, fakes only (PowerShell 7)
         shell: pwsh
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests/fix.ps1
+      - name: Tune-scan tests (Windows PowerShell 5.1)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/tune.ps1
+      - name: Tune-scan tests (PowerShell 7)
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests/tune.ps1
+      # Warnings only for now: the result is shown, it does not fail the build.
+      - name: PSScriptAnalyzer 1.23.0 (pinned, warn-only)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Install-Module -Name PSScriptAnalyzer -RequiredVersion 1.23.0 -Scope CurrentUser -Force -AllowClobber
+          Import-Module PSScriptAnalyzer -RequiredVersion 1.23.0
+          $r = foreach ($f in 'lanq-makeready.ps1', 'lanq-makeready-fix.ps1', 'lanq-makeready-tune.ps1') { Invoke-ScriptAnalyzer -Path $f -Severity Warning, Error }
+          $r | Sort-Object ScriptName, Line | Format-Table ScriptName, Line, Severity, RuleName, Message -AutoSize -Wrap | Out-String -Width 220
+          "PSScriptAnalyzer: $(@($r).Count) finding(s) (warn-only)"
   posix:
     strategy:
       fail-fast: false
@@ -98,6 +114,28 @@ jobs:
       - name: "Pass 2: real apply + undo (Windows PowerShell 5.1)"
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/real-fix.ps1
+      - name: "Pass 3 (tune): CPU max 90%, Delivery Optimization LAN peers, SysMain automatic, Defender scan at 02:00"
+        shell: pwsh
+        run: |
+          $req = @()
+          powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 90; powercfg /setactive SCHEME_CURRENT
+          if ("$(powercfg /q SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX)" -match '0x0000005a') { $req += 'power.cpu' } else { 'processor power settings are not readable on this runner: power.cpu is covered by the fake tests only' }
+          Remove-ItemProperty -Path HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization -Name DODownloadMode -ErrorAction SilentlyContinue
+          $ds = 'Registry::HKEY_USERS\S-1-5-20\Software\Microsoft\Windows\CurrentVersion\DeliveryOptimization\Settings'
+          New-Item -Path $ds -Force | Out-Null; Set-ItemProperty -Path $ds -Name DownloadMode -Value 1 -Type DWord; $req += 'do.mode'
+          if (Get-Service SysMain -ErrorAction SilentlyContinue) { sc.exe config SysMain start= auto; $req += 'sysmain' } else { 'no SysMain service on this runner image: sysmain is covered by the fake tests only' }
+          try { Set-MpPreference -ScanScheduleDay 0 -ScanScheduleTime 02:00:00 -ErrorAction Stop; $m = "$((Get-MpComputerStatus -ErrorAction Stop).AMRunningMode)"
+            if (-not $m -or $m -eq 'Normal') { $req += 'defender.scantime' } else { "Defender runs in $m here: defender.scantime is covered by the fake tests only" } } catch { "Defender is not usable here ($($_.Exception.Message)): defender.scantime is covered by the fake tests only" }
+          "LANQ_REAL_FIX_REQUIRE=$($req -join ',')" >> $env:GITHUB_ENV
+          "LANQ_REAL_FIX_SET=tune" >> $env:GITHUB_ENV
+          "LANQ_REAL_FIX_HOURS=00:00-07:00" >> $env:GITHUB_ENV
+          exit 0
+      - name: "Pass 3 (tune): real apply + undo (Windows PowerShell 5.1)"
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/real-fix.ps1
+      - name: "Pass 3 (tune): real apply + undo (PowerShell 7)"
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests/real-fix.ps1
   real-fix-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 15

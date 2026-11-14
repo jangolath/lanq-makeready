@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.5.0 (unreleased)
+
+- **Tune scan**, in new, separate, read-only scripts: `lanq-makeready-tune.ps1` (Windows PowerShell 5.1 and
+  PowerShell 7) and `lanq-makeready-tune.sh`. It reports what slows a worker down or keeps it busy during the job
+  window. Statuses OK, INFO, WARN and SKIP (never FAIL); it never changes readiness, and the exit code is always 0
+  (2 for bad arguments). Arguments like the scanner's (`-Json <path|->`, `-Redact`, `-Hours`) plus `-WorkRoot`
+  (LanQueue's work_root rule). JSON schema `lanq-makeready-tune/v1` (`schema/tune.v1.json`). See docs/TUNE.md.
+- Time: a 90-second deadline for the whole scan and a budget per probe; a probe over its budget reports SKIP
+  "time budget". Driver dates come from `Get-NetAdapter` and the Class registry (15 s), never `Win32_PnPSignedDriver`.
+- Windows checks: `power.plan`, `power.usbsuspend`, `startup.vendor`, `vendor.services`, `vendor.tasks`, `sysmain`,
+  `search.index`, `do.mode`, `wu.reboot`, `visual.fx`, `dotnet.env`, `wsl.reclaim`, `defender.paths` (admin; the
+  exclusion list is compared inside the probe and never printed), `defender.schedule` (the scheduled scan against
+  `-Hours`, in place of a CPU-load check), `av.other` (Security Center and AMRunningMode), `pagefile`, `disk.health`,
+  `disk.full` (over 90%), `drivers.age`, `cache.sizes` (NuGet HTTP cache and Windows Update downloads only),
+  `autologon.plain` (tests that `DefaultPassword` exists, never reads it), `onedrive.workroot`, `bios.power` (a
+  reminder) and `maint.schedule` (automatic maintenance and defrag against `-Hours`).
+- **Tune fixes** in `lanq-makeready-fix.ps1 -Tune`, with the same refusals, confirmation, record and undo:
+  `power.cpu`, `power.usbsuspend`, `startup.vendor`, `vendor.services`, `vendor.tasks`, `sysmain`, `do.mode` (offers 0,
+  HTTP only), `dotnet.env` and `defender.scantime` (needs `-Hours`). Fix ids are additive under
+  `lanq-makeready-fix/v1`; a 0.4 script rejects a record that holds one (exit 2).
+  - StartupApproved: no value means enabled, `Run32` handled, the account SID recorded; an HKCU entry is undone only
+    by the same account.
+  - Services: Start and DelayedAutostart recorded from the registry and put back with `sc.exe` (`delayed-auto`).
+  - Scheduled tasks under `\Microsoft\` are never touched; access denied is skipped.
+  - Undo re-checks service, task and Run entry names against the curated list plus an append-only retired list, and
+    every name and path in a record has a fixed shape. A record holds at most 64 changes.
+- **Defender exclusions** behind their own switch, `-Tune -DefenderExclusions`: after a screen that suggests a Dev
+  Drive first, only work_root (`-WorkRoot`) and the NuGet packages folder are offered, never temp or processes;
+  folders already covered by an exclusion are skipped and never recorded; nothing is offered unless AMRunningMode is
+  Normal. Undo removes exactly the folders the record says were added.
+- Report only, never fixed: cache clean-up, the Windows Update restart policy (`wu.reboot`) and the other checks
+  without a fix id.
+- The PC-maker list is short, generic across makers, kept in code and identical in the tune and fix scripts (a test
+  checks it); every entry has a literal name, no bare wildcards.
+- Agents may run the tune scan only when the developer asks; they never run the fix script.
+- Tests: `tests/tune.ps1` (one fixture per status per check, the read-only AST guard with mutants, an 800-line cap,
+  redaction, a schema check, a real read-only run) on PowerShell 5.1 and 7; tune fixes against fakes in
+  `tests/fix.ps1`; real apply and undo of `power.cpu`, `do.mode`, `sysmain` and `defender.scantime` on a disposable
+  Windows runner. PSScriptAnalyzer 1.23.0 runs in CI, warnings only.
+- The release ships, checksums and attests the tune scripts and `tune.v1.json`; its Windows tests run first.
+- Version 0.5.0 in the scanners and fix scripts. The scanners are otherwise unchanged.
+
 ## 0.4.1 (2026-11-13)
 
 ### Security

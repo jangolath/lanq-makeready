@@ -105,6 +105,8 @@ Test-Case 'defender.schedule' @{ Defender = $dfOn; Hours = $null } 'SKIP' 'no -H
 Test-Case 'defender.schedule' @{ Defender = @{ Mode = 'SxS Passive Mode'; Day = 0; Time = 120 } } 'SKIP' 'not the active antivirus'
 Test-Case 'av.other' @{ AvOther = @('Another AV') } 'INFO' 'another antivirus (report only)' '' 'Another AV'
 Test-Case 'av.other' @{ AvOther = $null } 'SKIP' 'Security Center unreadable'
+Test-Case 'av.other' @{ AvOther = $null; Defender = @{ Mode = 'Passive Mode'; Rtp = $false } } 'INFO' 'Defender passive (AMRunningMode), Security Center unreadable' '' 'Passive Mode'
+Test-Case 'av.other' @{ AvOther = @('Another AV'); Defender = @{ Mode = 'Passive Mode'; Rtp = $false } } 'INFO' 'another antivirus, with the Defender mode' '' 'Another AV \(Defender AMRunningMode: Passive Mode\)'
 $hddPf = @{ Disks = @(@{ Id = '0'; Media = 'SSD'; Bus = 'NVMe'; Health = 'Healthy' }, @{ Id = '1'; Media = 'HDD'; Bus = 'SATA'; Health = 'Healthy' }); Parts = @('C=0', 'D=1'); Pagefile = @{ Auto = $false; Files = @(@{ Name = 'D:\pagefile.sys'; Max = 0 }) } }
 Test-Case 'pagefile' $hddPf 'INFO' 'on the HDD while an SSD exists' '' 'spinning disk'
 Test-Case 'pagefile' @{ Pagefile = @{ Auto = $false; Files = @(@{ Name = 'C:\pagefile.sys'; Max = 2048 }) } } 'INFO' 'fixed size below RAM' '' 'below the RAM'

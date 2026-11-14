@@ -211,9 +211,11 @@ function Get-TuneItems($F) {
     else { & $add (New-TuneItem 'defender.schedule' $t 'OK' "scheduled scan at $(Format-Min $d.Time), outside $($F.Hours)") }
   }
 
-  $t = 'Other antivirus'
-  if ($null -eq $F.AvOther) { & $add (New-TuneItem 'av.other' $t 'SKIP' 'could not read Security Center (not on Windows Server)' '' $false '' $true) }
-  elseif (@($F.AvOther).Count) { & $add (New-TuneItem 'av.other' $t 'INFO' "another antivirus is active: $(Join-Names $F.AvOther)" 'Its real-time scanning slows builds too. Use its own setting for a build folder exclusion or a Dev Drive; this tool never changes it.' $false '' $true) }
+  $t = 'Other antivirus'; $am = ''; if ($d -and $d.Mode -and $d.Mode -ne 'Normal') { $am = " (Defender AMRunningMode: $($d.Mode))" }
+  $avAdv = 'Its real-time scanning slows builds too. Use its own setting for a build folder exclusion or a Dev Drive; this tool never changes it.'
+  if ($null -eq $F.AvOther -and $am) { & $add (New-TuneItem 'av.other' $t 'INFO' "Defender is not the active antivirus$am; Security Center could not be read" $avAdv $false '' $true) }
+  elseif ($null -eq $F.AvOther) { & $add (New-TuneItem 'av.other' $t 'SKIP' 'could not read Security Center (not on Windows Server)' '' $false '' $true) }
+  elseif (@($F.AvOther).Count) { & $add (New-TuneItem 'av.other' $t 'INFO' "another antivirus is active: $(Join-Names $F.AvOther)$am" $avAdv $false '' $true) }
   else { & $add (New-TuneItem 'av.other' $t 'OK' 'no other active antivirus is registered' '' $false '' $true) }
 
   $t = 'Page file placement'
