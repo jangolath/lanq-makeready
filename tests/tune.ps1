@@ -162,10 +162,11 @@ Assert-True ((& $cov 'C:\lq' 'C:\lq\') -and (& $cov 'c:\' 'C:\lq\') -and (& $cov
 Assert-True ($text0 -notmatch 'ExpandEnvironmentVariables') 'L4: the tune scan expands no environment variable'
 # the functions the tune scan copies from the fix script are the same there (record trust, permissions, Dev Drive)
 $fx0 = [System.IO.File]::ReadAllText((Join-Path $root 'lanq-makeready-fix.ps1'))
+$fxAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'lanq-makeready-fix.ps1'), [ref]$null, [ref]$null)
 foreach ($fn in 'ConvertFrom-Sddl', 'Get-AccountName', 'Test-TrustedSddl', 'Get-PathSddl', 'Test-FixRecordTrusted', 'Get-SdCanon', 'Get-DevDrvInfo', 'Test-DevDriveBuild') {
-  $re = "(?ms)^function $fn\b.*?^}"; $a1 = [regex]::Match($text0, $re); $a2 = [regex]::Match($fx0, $re)
-  if (-not $a1.Success) { $re = "(?m)^function $fn\b.*$"; $a1 = [regex]::Match($text0, $re); $a2 = [regex]::Match($fx0, $re) }
-  Assert-True ($a1.Success -and $a2.Success -and $a1.Value -ceq $a2.Value) "$fn is the same in the tune and fix scripts"
+  $a1 = @($past.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fn }, $true))
+  $a2 = @($fxAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fn }, $true))
+  Assert-True ($a1.Count -eq 1 -and $a2.Count -eq 1 -and $a1[0].Extent.Text -ceq $a2[0].Extent.Text) "$fn is the same in the tune and fix scripts"
 }
 foreach ($v in '$WorkDirSddl', '$WriteMask', '$BaSid', '$SySid') {
   $re = '(?m)^' + [regex]::Escape($v) + ' = .*$'; $m1 = [regex]::Match($text0, $re); $m2 = [regex]::Match($fx0, $re)
@@ -329,7 +330,7 @@ function Get-TuneGuardViolations($Ast) {
   $fnOf = { param($Node) $p = $Node.Parent; while ($p) { if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $p.Name }; $p = $p.Parent }; return '' }
   $ok = @('ConvertTo-Json', 'ForEach-Object', 'Get-ChildItem', 'Get-CimInstance', 'Get-Content', 'Get-Item', 'Get-Location', 'Get-MpComputerStatus', 'Get-MpPreference', 'Get-NetAdapter', 'Get-Partition',
     'Get-PhysicalDisk', 'Get-ScheduledTask', 'Get-Service', 'Get-Command', 'Get-StorageReliabilityCounter', 'Join-Path', 'New-Object', 'Sort-Object', 'Test-Path', 'Where-Object', 'Write-Host',
-    'Get-Acl', 'ConvertFrom-Json', 'Get-Volume')
+    'Get-Acl', 'ConvertFrom-Json', 'Get-Volume', 'Split-Path')
   foreach ($c in $Ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
     $n = $c.GetCommandName(); $fn = & $fnOf $c
     if (-not $n) { if (-not (($c.Extent.Text -match '^& \$(add|why)\b' -and $fn -eq 'Get-TuneItems') -or ($c.Extent.Text -match '^& \$(min|cov)\b'))) { $bad += "dynamic command: $($c.Extent.Text)" }; continue }
