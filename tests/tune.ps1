@@ -200,7 +200,7 @@ function Test-TuneJson([string]$Text) {
   if ($j.schema -cne $schema.properties.schema.const) { $bad += 'schema id' }
   if ($j.tool.name -cne 'lanq-makeready-tune' -or $j.tool.version -cnotmatch $schema.properties.tool.properties.version.pattern) { $bad += 'tool' }
   if ("$($j.generatedAt)" -cnotmatch $schema.properties.generatedAt.pattern -and $j.generatedAt -isnot [datetime]) { $bad += 'generatedAt' }
-  if (@($schema.properties.host.properties.os.enum) -notcontains $j.host.os) { $bad += 'host.os' }
+  if ($j.host.os -isnot [string] -or $j.host.os.Length -gt $schema.properties.host.properties.os.maxLength) { $bad += 'host.os' }
   if ($j.context.container -isnot [bool] -or $j.context.elevated -isnot [bool]) { $bad += 'context booleans' }
   $is = $schema.'$defs'.item; $n = @{ OK = 0; INFO = 0; WARN = 0; SKIP = 0 }
   if (@($j.items).Count -gt $schema.properties.items.maxItems) { $bad += 'too many items' }

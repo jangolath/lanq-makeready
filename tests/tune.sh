@@ -163,18 +163,18 @@ q=$(whole --quiet); lacks "$q" "[OK  ]" "--quiet: OK rows left out"
 js=$(whole --json - --work-root /srv/lq); js=${js%rc=*}
 eq "$(printf '%s' "$js" | head -n 1)" "{" "json: starts with {"
 for k in '"schema": "lanq-makeready-tune/v1",' '"tool": {"name": "lanq-makeready-tune", "version": "' '"generatedAt": "' '"host": {"hostname": "testbox7", "user": "builder7", "os": "Testix on testbox7", "arch": "x86_64"},' \
-  '"context": {"container": false, "elevated": true, "workRoot": "/srv/lq"},' '"summary": {"warn": 3, "info": 2}' '"fixId": null' '"fixId": "sysctl.tune"' '"security": true'; do
+  '"context": {"container": false, "elevated": true, "workRoot": "/srv/lq"},' '"summary": {"ok": 5, "info": 2, "warn": 3, "skip": 1}' '"fixId": null' '"fixId": "sysctl.tune"' '"security": true'; do
   contains "$js" "$k" "json has $k"
 done
 bad_lines=$(printf '%s\n' "$js" | sed -n '/"items": \[/,/^  \]/p' | sed '1d;$d' | grep -vxE '    \{"id": "[a-z.]+", "title": "[^"\\]*", "status": "(OK|INFO|WARN|SKIP)", "detail": "([^"\\]|\\.)*", "advice": "([^"\\]|\\.)*", "needsAdmin": (true|false), "fixId": (null|"[a-z.]+"), "security": (true|false)\},?')
 eq "$bad_lines" "" "json: every item has exactly the schema's fields in order"
 eq "$(printf '%s\n' "$js" | grep -c '"id": ')" 11 "json: eleven items"
 if command -v python3 >/dev/null 2>&1; then
-  if printf '%s' "$js" | python3 -c "import json,sys; d=json.load(sys.stdin); assert set(d)=={'schema','tool','generatedAt','host','context','items','summary'}; assert all(set(i)=={'id','title','status','detail','advice','needsAdmin','fixId','security'} for i in d['items'])"; then ok "json parses (python3), exact keys"; else bad "json parse" invalid valid; fi
+  if printf '%s' "$js" | python3 -c "import json,sys; d=json.load(sys.stdin); assert set(d)=={'schema','tool','generatedAt','host','context','items','summary'}; assert set(d['summary'])=={'ok','info','warn','skip'}; assert all(set(i)=={'id','title','status','detail','advice','needsAdmin','fixId','security'} for i in d['items'])"; then ok "json parses (python3), exact keys"; else bad "json parse" invalid valid; fi
 fi
 red=$(whole --json - --redact --work-root /home/builder7/lq); red=${red%rc=*}
 lacks "$red" "builder7" "redact: no user name"; lacks "$red" "testbox7" "redact: no host name"
-contains "$red" '"host": {"os": "Testix on <redacted>", "arch": "x86_64"},' "redact: hostname and user left out, free text redacted"
+contains "$red" '"host": {"hostname": "<redacted>", "user": "<redacted>", "os": "Testix on <redacted>", "arch": "x86_64"},' "redact: hostname and user are <redacted> (as in the ps1), free text redacted"
 contains "$red" '"workRoot": "<redacted>/lq"' "redact: the work root hides the home folder"
 jf=${TMPDIR:-/tmp}/lanq-tune-out.$$.json; whole --json "$jf" >/dev/null; eq "$(head -n 1 "$jf" 2>/dev/null)" "{" "--json PATH writes the file"; rm -f "$jf"
 rm -rf "$FAKE"

@@ -7,7 +7,7 @@
 # Usage: lanq-makeready-tune.sh [--json PATH|-] [--redact] [--hours HH:MM-HH:MM] [--work-root /abs/path] [--quiet]
 #        --json - writes ONLY the JSON to stdout (over SSH: sh -s -- --json - --redact < this-file)
 
-TOOL_VERSION=0.4.1
+TOOL_VERSION=0.5.0
 SEP=$(printf '\037')
 NL=$(printf '\nx'); NL=${NL%x}
 ITEMS=""
@@ -402,11 +402,12 @@ render_json() {
   printf '{\n  "schema": "lanq-makeready-tune/v1",\n  "tool": {"name": "lanq-makeready-tune", "version": "%s"},\n' "$TOOL_VERSION"
   printf '  "generatedAt": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '  "host": {'
-  [ "$REDACT" = 1 ] || printf '"hostname": "%s", "user": "%s", ' "$(json_esc "$F_HOST")" "$(json_esc "$F_USER")"
+  if [ "$REDACT" = 1 ]; then printf '"hostname": "<redacted>", "user": "<redacted>", '; else printf '"hostname": "%s", "user": "%s", ' "$(json_esc "$F_HOST")" "$(json_esc "$F_USER")"; fi
   _os=${F_OSNAME:-$F_OS}; [ "$REDACT" = 1 ] && _os=$(rv "$_os")
   printf '"os": "%s", "arch": "%s"},\n' "$(json_esc "$_os")" "$(json_esc "$F_ARCH")"
   printf '  "context": {"container": %s, "elevated": %s' "${CONTAINER:-false}" "${ELEVATED:-false}"
   if [ -n "$WORK_ROOT" ]; then _wr=$WORK_ROOT; [ "$REDACT" = 1 ] && _wr=$(rv "$_wr"); printf ', "workRoot": "%s"' "$(json_esc "$_wr")"; fi
+  [ -z "$HOURS" ] || printf ', "hours": "%s"' "$(json_esc "$HOURS")"
   printf '},\n  "items": ['
   _n=0
   printf '%s' "$ITEMS" | while IFS="$SEP" read -r _i _ti _s _d _a _adm _fid _sec; do
@@ -416,7 +417,7 @@ render_json() {
     printf '\n    {"id": "%s", "title": "%s", "status": "%s", "detail": "%s", "advice": "%s", "needsAdmin": %s, "fixId": %s, "security": %s}' "$_i" "$(json_esc "$_ti")" "$_s" "$(json_esc "$_d")" "$(json_esc "$_a")" "${_adm:-false}" "$_f" "${_sec:-false}"
   done
   [ -z "$ITEMS" ] || printf '\n  '
-  printf '],\n  "summary": {"warn": %s, "info": %s}\n}\n' "$(count_status WARN)" "$(count_status INFO)"
+  printf '],\n  "summary": {"ok": %s, "info": %s, "warn": %s, "skip": %s}\n}\n' "$(count_status OK)" "$(count_status INFO)" "$(count_status WARN)" "$(count_status SKIP)"
 }
 
 # ---------- main ----------

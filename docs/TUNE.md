@@ -152,4 +152,48 @@ instructions.
 
 ## Linux
 
-<!-- The Linux section (lanq-makeready-tune.sh and fix --tune) is written with the Linux script. -->
+`lanq-makeready-tune.sh` is read-only POSIX sh, like the scanner. Run it on the worker, or over SSH with
+`sh -s -- --json - --redact < lanq-makeready-tune.sh`.
+
+    sh lanq-makeready-tune.sh [--json PATH|-] [--redact] [--hours HH:MM-HH:MM] [--work-root /srv/lq] [--quiet]
+
+It never changes anything. Tuning never affects readiness: there is no FAIL, and the exit code is always 0 (2 for bad
+arguments). The whole scan has a 90 s deadline, and any probe that would start after it reports `SKIP` (time budget).
+Inside a container (`/.dockerenv`, `/run/.containerenv`, or a docker/lxc/kubepods/containerd/libpod cgroup for PID 1),
+the host-level checks report `SKIP`; `pkgcache` and `disk.full` still run. On macOS it prints "no tune checks for
+macOS". The pending reboot is reported by the scanner (`reboot.pending`), not here.
+
+| id | What it looks at | OK / INFO / WARN | Fix |
+|---|---|---|---|
+| `cpu.governor` | `scaling_driver` and `scaling_governor` | intel_pstate and amd-pstate-epp: any governor is OK (powersave is their normal dynamic mode). acpi-cpufreq and intel_cpufreq: powersave is WARN, userspace is INFO. Any other driver: INFO. No cpufreq (a VM): SKIP. | report only |
+| `sysctl.swappiness` | `vm.swappiness`, RAM | INFO above 60 with less than 8 GB RAM | report only |
+| `sysctl.inotify` | `fs.inotify.max_user_instances` / `max_user_watches` | WARN when instances is 128 or less; INFO when watches is below 524288 | `sysctl.tune` |
+| `journald.size` | `/var/log/journal`, `/run/log/journal` (RAM), and `SystemMaxUse` / `RuntimeMaxUse` in journald.conf and its drop-ins | INFO when there is no cap of your own and the persistent journal is 1 GB or more, or the volatile one 256 MB or more (the default cap is already 10% of the filesystem, at most 4 GB). SKIP (needs admin) when the folders cannot be read. | `journald.cap` |
+| `services.unused` | cups (service, socket, path), cups-browsed, avahi-daemon, bluetooth, ModemManager: enabled or active | cups-browsed is WARN and a security item (it listens on the network, CVE-2024-47176). The others are INFO. With a desktop running (display-manager), only cups-browsed is checked. avahi-daemon is report only: disabling it can make `host.local` names stop resolving. | `services.unused` (not avahi) |
+| `unattended.reboot` | unattended-upgrades `Automatic-Reboot` / `-Time`; dnf-automatic `reboot =` with an enabled timer | WARN when the reboot time falls inside `--hours` ("now" counts as about 06:00, after apt-daily-upgrade); INFO without `--hours` | report only |
+| `pkgcache` | apt, dnf, yum, apk, pacman and zypper caches | INFO above 2 GB; the clean commands are given as advice | report only |
+| `fstrim` | non-rotational disks with `discard_max_bytes` > 0; `/` mounted with discard; `fstrim.timer` | INFO when the timer is disabled (or missing) | `fstrim.timer` |
+| `smart` | `smartctl -H -n standby` per disk (at most 8; never wakes a sleeping disk); needs root and smartctl | WARN on a failing health check | report only |
+| `thermal.throttle` | Intel `thermal_throttle` counters | INFO when the CPU throttled since boot (with a BIOS power and C-state reminder) | report only |
+| `disk.full` | `df` of `/` and the work root's filesystem | WARN above 90% used | report only |
+
+### Linux fixes (`sudo sh lanq-makeready-fix.sh --tune`)
+
+`--tune` uses the same machinery as the other fixes: run at the PC (it refuses over SSH, from stdin, or without a
+console), each fix confirmed with `[y/N]`, no `--yes`, root needed, an undo record written before each change, and
+`--undo FILE` puts it back, newest first. `--tune` goes with an apply run or `--dry-run`; `--undo` and `--list` work
+for every fix without it. A tune fix is offered only for what the tune scan reports: the fix script carries the
+scan's decision functions unchanged, and a test checks that the copies match.
+
+- `sysctl.tune` writes `/etc/sysctl.d/99-zz-lanq-makeready.conf` (only when absent) with the inotify limits that are
+  below 1024 instances and 524288 watches, and applies them with `sysctl -w`. It never lowers a value. Undo removes the
+  file and restores the old values.
+- `journald.cap` writes `/etc/systemd/journald.conf.d/99-zz-lanq-makeready.conf` (`SystemMaxUse=1G`,
+  `RuntimeMaxUse=256M`) and restarts journald. **The trimmed logs cannot be restored**; the prompt says so.
+- `services.unused` runs `systemctl disable --now` on cups (service, socket and path), cups-browsed, bluetooth or
+  ModemManager. Each is its own prompt, and none is offered while a desktop runs, except cups-browsed. It never masks.
+  Undo re-enables and restarts exactly the units that were enabled and running.
+- `fstrim.timer` runs `systemctl enable --now fstrim.timer`.
+
+Undo takes unit, file and sysctl names only from fixed tables in the script. A service name in a record must be on
+the script's append-only list and have the name shape, or the record is rejected.

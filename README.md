@@ -278,6 +278,11 @@ another antivirus, page file placement, disk health and fullness, old network an
 caches, a plain-text autologon password (its existence only; it is never read), work_root inside OneDrive, and a BIOS
 power reminder. Every check, its fix id and the JSON are in [docs/TUNE.md](docs/TUNE.md).
 
+Linux (`sh lanq-makeready-tune.sh [--json PATH|-] [--redact] [--hours HH:MM-HH:MM] [--work-root /srv/lq]`): CPU
+frequency governor, swappiness, inotify limits, journald size, unused services (cups-browsed is a security item),
+automatic update reboots against `--hours`, package caches, SSD TRIM, SMART health (root), thermal throttling and disks
+over 90% full. Host checks report `SKIP` inside a container; on macOS it says there are no tune checks.
+
 Items with a fix id can be changed at the PC with the fix script's `-Tune` gate (below, and
 [docs/TUNE.md](docs/TUNE.md)). Defender exclusions sit behind their own `-DefenderExclusions` switch and suggest a Dev
 Drive first. Cache clean-up, the Windows Update restart policy and the other report-only items are never changed.
@@ -411,6 +416,10 @@ Windows tune fixes: `power.cpu`, `power.usbsuspend`, `startup.vendor`, `vendor.s
 a Dev Drive first; folders already excluded are skipped, and nothing is offered when Defender is not the active
 antivirus. What each one changes and how it is undone is in [docs/TUNE.md](docs/TUNE.md). A record holds at most 64
 changes; run the script again for the rest.
+
+On Linux, `sudo sh lanq-makeready-fix.sh --tune --dry-run` shows the tune fixes (`sysctl.tune`, `journald.cap`,
+`services.unused`, `fstrim.timer`); run it without `--dry-run` at the PC. `journald.cap` deletes old journal files,
+which undo cannot bring back; the prompt says so.
 
 ### What it refuses, and why
 
@@ -546,6 +555,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\tune.ps1     # tune sc
 ```sh
 sh tests/run.sh                                                          # same for the sh script
 sh tests/fix.sh                                                          # fix script, fake systemctl only
+sh tests/tune.sh                                                         # tune scan against a fake root
 docker run --rm -v "$PWD:/w:ro" ubuntu:24.04 sh /w/tests/run.sh         # also try alpine:3.21 (busybox)
 ```
 

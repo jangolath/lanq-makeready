@@ -47,7 +47,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: shellcheck
         if: runner.os == 'Linux'
-        run: shellcheck --severity=warning lanq-makeready.sh lanq-makeready-fix.sh tests/run.sh tests/fix.sh tests/real-fix.sh
+        run: shellcheck --severity=warning lanq-makeready.sh lanq-makeready-fix.sh lanq-makeready-tune.sh tests/run.sh tests/fix.sh tests/real-fix.sh tests/tune.sh
       - name: setfacl for the real ACL test
         if: runner.os == 'Linux'
         run: command -v setfacl >/dev/null || { sudo apt-get update -q && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q acl; }
@@ -55,6 +55,8 @@ jobs:
         run: sh tests/run.sh
       - name: Fix-script tests, fakes only
         run: sh tests/fix.sh
+      - name: Tune-scan tests (fake root)
+        run: sh tests/tune.sh
   alpine:
     runs-on: ubuntu-latest
     container: alpine:3.21
@@ -67,6 +69,8 @@ jobs:
         run: sh tests/run.sh
       - name: Fix-script tests, fakes only (busybox sh)
         run: sh tests/fix.sh
+      - name: Tune-scan tests (busybox sh)
+        run: sh tests/tune.sh
   # Real apply and undo on disposable GitHub-hosted runners only. The drivers refuse to run without LANQ_REAL_FIX_OK
   # and RUNNER_ENVIRONMENT=github-hosted (an accident guard, not a security boundary).
   real-fix-windows:
@@ -155,3 +159,19 @@ jobs:
           printf '[Login]\nIdleAction=suspend\n' | sudo tee /etc/systemd/logind.conf.d/90-lanq-ci.conf
       - name: Real apply + undo (systemd, root)
         run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" LANQ_REAL_FIX_OK="$LANQ_REAL_FIX_OK" sh tests/real-fix.sh
+      - name: "Tune: make the tune fixes necessary (this runner is thrown away)"
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q cups cups-browsed
+          sudo systemctl enable --now cups.service cups.socket cups.path cups-browsed.service
+          sudo rm -f /etc/sysctl.d/99-zz-lanq-makeready.conf
+          sudo sysctl -w fs.inotify.max_user_instances=128
+          req=sysctl.tune,services.unused:cups-browsed,services.unused:cups
+          # fstrim.timer only where the runner's disk reports TRIM (Azure disks vary); the driver checks the rest
+          sudo systemctl disable --now fstrim.timer || true
+          for q in /sys/block/*/queue/rotational; do n=${q%/queue/rotational}
+            case "$n" in */loop*|*/ram*|*/zram*|*/dm-*|*/sr*|*/nbd*|*/md*|*/fd*) continue ;; esac
+            [ "$(cat "$q")" = 0 ] && [ "$(cat "$n/queue/discard_max_bytes")" != 0 ] && { req="$req,fstrim.timer"; break; }
+          done
+          echo "LANQ_REAL_FIX_REQUIRE=$req" >> "$GITHUB_ENV"
+      - name: "Tune: real apply + undo (systemd, root)"
+        run: sudo env GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" LANQ_REAL_FIX_OK="$LANQ_REAL_FIX_OK" LANQ_REAL_FIX_REQUIRE="$LANQ_REAL_FIX_REQUIRE" sh tests/real-fix.sh --tune

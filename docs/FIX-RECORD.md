@@ -52,7 +52,7 @@ Each item:
 | Field | Meaning |
 |---|---|
 | `seq` | 1 to 999, unique: the order the changes were made. Undo goes from the highest down. |
-| `id` | the fix id. Windows: `ssh.start`, `ssh.auto`, `power.sleep`, `longpaths.on`, `git.longpaths`, `ssh.aclkeys`, and the tune fixes (0.5, `-Tune`) `power.cpu`, `power.usbsuspend`, `startup.vendor`, `vendor.services`, `vendor.tasks`, `sysmain`, `do.mode`, `dotnet.env`, `defender.scantime`, `defender.exclude`. Linux: `ssh.start`, `power.sleep`, and the Linux tune fixes. Ids are additive: a script that does not know an id rejects the whole record ("unknown fix id", exit 2), so a 0.4 script refuses a 0.5 record with a tune id. |
+| `id` | the fix id. Windows: `ssh.start`, `ssh.auto`, `power.sleep`, `longpaths.on`, `git.longpaths`, `ssh.aclkeys`, and the tune fixes (0.5, `-Tune`) `power.cpu`, `power.usbsuspend`, `startup.vendor`, `vendor.services`, `vendor.tasks`, `sysmain`, `do.mode`, `dotnet.env`, `defender.scantime`, `defender.exclude`. Linux: `ssh.start`, `power.sleep`, and with `--tune` also `sysctl.tune`, `journald.cap`, `services.unused` and `fstrim.timer`. Ids are additive: a script that does not know an id rejects the whole record ("unknown fix id", exit 2), so a 0.4 script refuses a 0.5 record with a tune id. |
 | `status` | `pending`, `applied`, `failed`, `undone` or `skipped` (below). |
 | `time` | UTC time of the last status change. |
 | `before` | the state before the change, in the fixed shape for the id (below). Undo puts this back. |
@@ -60,7 +60,7 @@ Each item:
 | `after` | the state found after the change, same shape as `before`, or `unknown` when it could not be read. While `pending` it holds the state the change is expected to leave. Undo acts only when the current state equals it. |
 
 There are no other fields, and no field may be missing. The file is plain ASCII (other characters are written as `?`).
-Windows accepts up to 256 KB, Linux up to 64 KB.
+Windows accepts up to 256 KB, Linux up to 64 KB. On Linux `command` may be up to 510 characters.
 
 ## Statuses
 
@@ -107,6 +107,10 @@ invalid.
 | windows : `defender.exclude` | `excluded=(0\|1) path=<drive path>` | whether exactly this folder is in Defender's exclusion list. The path is a drive path of letters, digits, space and `_ . ( ) -`, never `..` and never a drive root. The fix starts only from `excluded=0` (folders already covered are not offered); undo runs `Remove-MpPreference -ExclusionPath` for that folder only. |
 | linux : `ssh.start` | `unit=(ssh\|sshd) enabled=(enabled\|disabled) active=(active\|inactive)` | `systemctl is-enabled` / `is-active` of the unit (`failed` counts as inactive) |
 | linux : `power.sleep` | `sleep=<v> suspend=<v> hibernate=<v> hybrid-sleep=<v>` | `systemctl is-enabled` of the four targets, for example `static`, `masked`, `masked-runtime`, `none` (not found) |
+| linux : `sysctl.tune` | `file=(absent\|lanq) instances=<n> watches=<n>` | The two `fs.inotify` limits, and `/etc/sysctl.d/99-zz-lanq-makeready.conf` (`lanq` = a regular file, not a link, whose first line is this script's marker). It is offered only when the file is absent. Apply writes the file, holding only the limits below 1024 / 524288 (it never lowers one), then runs `sysctl -w` for them. Undo removes the file and runs `sysctl -w` with the old values of the raised limits. |
+| linux : `journald.cap` | `file=(absent\|lanq)` | `/etc/systemd/journald.conf.d/99-zz-lanq-makeready.conf`, holding `SystemMaxUse=1G` and `RuntimeMaxUse=256M`, then `systemctl restart systemd-journald.service`. Undo removes the file and restarts journald. **The journal files deleted by the cap cannot be restored**, and the prompt says so. An empty `journald.conf.d` folder created by the fix stays. |
+| linux : `services.unused` | `svc=<name> <type>=<enabled>:<active> ...` | One item per service. The name must be in the script's append-only list, and the unit words must match its fixed unit table (`cups`: `service socket path`; `cups-browsed`, `bluetooth`, `modemmanager`: `service`). Values are `enabled\|disabled\|none` and `active\|inactive`. Apply runs `systemctl disable --now` on the units that are enabled or active, and never masks. Undo runs `systemctl enable` on the units that were enabled, then `systemctl start` on the ones that were active. The unit names come from the script's table, never from the record. |
+| linux : `fstrim.timer` | `enabled=(enabled\|disabled) active=(active\|inactive)` | `fstrim.timer`. Apply runs `enable --now`. Undo runs `disable` and/or `stop`, as for `ssh.start`. |
 
 How the states are compared:
 
@@ -128,7 +132,7 @@ parsed `before` state (a start type, a number of seconds, a registry value, a gi
 names, a checked DACL). The service, registry key, file and unit names are fixed in the script and are never read from
 the record. The tune fixes are the exception that is needed: a vendor service, task or Run entry name, and an excluded
 folder, come from the record, so they must have the exact shape above, and the names must match the curated list
-(current or retired) before anything is done. The `command` field is never run. The `host` and `user` fields are for people only.
+(current or retired) before anything is done. On Linux, undo reads the `services.unused` service name from `before` and accepts it only if it is on the script's append-only list (names are never removed, so old records stay undoable) and has the shape `[a-z][a-z0-9-]{0,31}`; it runs only the units of that name from the script's fixed table. The `command` field is never run. The `host` and `user` fields are for people only.
 
 ## Example (Windows)
 

@@ -25,7 +25,7 @@
       "properties": {
         "hostname": { "type": "string", "maxLength": 128, "description": "Both scripts write it; \"<redacted>\" with -Redact / --redact." },
         "user": { "type": "string", "maxLength": 128, "description": "Both scripts write it; \"<redacted>\" with -Redact / --redact." },
-        "os": { "enum": ["windows", "linux", "macos"] },
+        "os": { "type": "string", "maxLength": 128, "description": "Windows: \"windows\". Linux: the distribution name from os-release (free text, redacted like detail). macOS: the product name." },
         "arch": { "type": "string", "maxLength": 32 }
       }
     },

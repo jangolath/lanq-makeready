@@ -40,7 +40,27 @@
   `tests/fix.ps1`; real apply and undo of `power.cpu`, `do.mode`, `sysmain` and `defender.scantime` on a disposable
   Windows runner. PSScriptAnalyzer 1.23.0 runs in CI, warnings only.
 - The release ships, checksums and attests the tune scripts and `tune.v1.json`; its Windows tests run first.
-- Version 0.5.0 in the scanners and fix scripts. The scanners are otherwise unchanged.
+- New `lanq-makeready-tune.sh`:
+  - a read-only tuning report for Linux workers (`lanq-makeready-tune/v1` JSON with `--json`);
+  - checks: CPU governor, swappiness, inotify limits, journald size (persistent and `/run`), unused services
+    (cups-browsed flagged as a security item), automatic update reboots against `--hours`, package cache, SSD TRIM,
+    SMART health (root), thermal throttling, and disks over 90% full;
+  - `--work-root` (lanq's `work_root` rule) and `--hours`, a 90 s internal deadline, and SKIP for host checks inside a
+    container;
+  - on macOS it reports "no tune checks". Tuning never changes readiness or the exit code.
+- `lanq-makeready-fix.sh --tune`:
+  - four new reversible fixes: `sysctl.tune` (inotify limits through `/etc/sysctl.d/99-zz-lanq-makeready.conf`),
+    `journald.cap` (a journald size cap; the trimmed logs cannot be restored), `services.unused` (`disable --now` of
+    cups, cups-browsed, bluetooth, ModemManager; never masks, avahi stays report only), `fstrim.timer`;
+  - the new fix ids are additive under `lanq-makeready-fix/v1`, and older fix scripts reject records that hold them;
+  - undo checks service names against an append-only list and a name shape.
+- Tests:
+  - `tests/tune.sh` (fake root: one case per status per check, a read-only guard with injected mutations, a line cap
+    of 800, redaction, JSON shape, the 90 s deadline, containers, macOS);
+  - tune-fix tests in `tests/fix.sh` (fakes);
+  - a `--tune` leg in `tests/real-fix.sh` for disposable CI runners (cups, the sysctl drop-in, fstrim.timer).
+- Both tune scripts write the same JSON: `host.hostname` and `host.user` are `"<redacted>"` with `-Redact`/`--redact`, `context.hours` is present when given, and `summary` has `ok`, `info`, `warn` and `skip` (`host.os` is free text: `windows`, or the Linux distribution name).
+- Version 0.5.0 in the scanners, tune scripts and fix scripts. The scanners are otherwise unchanged.
 
 ## 0.4.1 (2026-11-13)
 

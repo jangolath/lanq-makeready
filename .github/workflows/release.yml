@@ -38,7 +38,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Tests
-        run: sh tests/run.sh && sh tests/fix.sh
+        run: sh tests/run.sh && sh tests/fix.sh && sh tests/tune.sh
       - name: Collect files and checksums
         run: |
           mkdir dist

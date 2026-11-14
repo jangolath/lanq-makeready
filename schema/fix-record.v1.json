@@ -31,14 +31,14 @@
       "additionalProperties": false,
       "properties": {
         "seq": { "type": "integer", "minimum": 1, "maximum": 999, "description": "Order the changes were made; undo goes from the highest down. Unique." },
-        "id": { "enum": ["ssh.start", "ssh.auto", "power.sleep", "longpaths.on", "git.longpaths", "ssh.aclkeys", "power.cpu", "power.usbsuspend", "startup.vendor", "vendor.services", "vendor.tasks", "sysmain", "do.mode", "dotnet.env", "defender.scantime", "defender.exclude"], "description": "Windows readiness fixes (0.4): ssh.start, ssh.auto, power.sleep, longpaths.on, git.longpaths, ssh.aclkeys. Windows tune fixes (0.5, fix -Tune): power.cpu, power.usbsuspend, startup.vendor, vendor.services, vendor.tasks, sysmain, do.mode, dotnet.env, defender.scantime, defender.exclude. Linux: ssh.start and power.sleep, plus the Linux tune fixes. Ids are additive: a script that does not know an id rejects the whole record (exit 2)." },
+        "id": { "enum": ["ssh.start", "ssh.auto", "power.sleep", "longpaths.on", "git.longpaths", "ssh.aclkeys", "power.cpu", "power.usbsuspend", "startup.vendor", "vendor.services", "vendor.tasks", "sysmain", "do.mode", "dotnet.env", "defender.scantime", "defender.exclude", "sysctl.tune", "journald.cap", "services.unused", "fstrim.timer"], "description": "Windows readiness fixes (0.4): ssh.start, ssh.auto, power.sleep, longpaths.on, git.longpaths, ssh.aclkeys. Windows tune fixes (0.5, fix -Tune): power.cpu, power.usbsuspend, startup.vendor, vendor.services, vendor.tasks, sysmain, do.mode, dotnet.env, defender.scantime, defender.exclude. Linux: ssh.start and power.sleep; Linux tune fixes (0.5, fix --tune): sysctl.tune, journald.cap, services.unused, fstrim.timer. Ids are additive: a script that does not know an id rejects the whole record (exit 2)." },
         "status": {
           "enum": ["pending", "applied", "failed", "undone", "skipped"],
           "description": "pending: written before the change (a crash leaves this); applied: changed and verified; failed: the change or its check failed (after holds what was found); undone: put back and verified; skipped: a pending item whose change was never made (undo found the before state)."
         },
         "time": { "$ref": "#/$defs/time" },
         "before": { "type": "string", "description": "State before the change, in the fixed shape for the id (see stateShapes). Undo restores this." },
-        "command": { "type": "string", "pattern": "^[\\x20-\\x7E]{0,1024}$", "description": "The exact command(s) that were run, for people to read. Never executed." },
+        "command": { "type": "string", "pattern": "^[\\x20-\\x7E]{0,1024}$", "description": "The exact command(s) that were run, for people to read. Never executed. The sh script writes at most 510 characters." },
         "after": { "type": "string", "description": "State after the change, same shape as before, or 'unknown'. Undo acts only when the current state equals this ('changed since; left alone' otherwise)." }
       }
     },
@@ -61,7 +61,11 @@
         "windows:defender.scantime": { "type": "string", "pattern": "^day=[0-8] time=[0-9]{1,4} quick=[0-9]{1,4}$", "description": "Defender ScanScheduleDay and the scheduled scan and daily quick scan times in minutes after midnight (0-1439; quick 0 = none)." },
         "windows:defender.exclude": { "type": "string", "pattern": "^excluded=[01] path=[A-Za-z]:(\\\\[A-Za-z0-9 _.()-]{1,64}){1,16}$", "description": "Whether exactly this folder is in Defender's ExclusionPath list (never '..'). The fix adds work_root or the NuGet packages folder only; undo removes only a path this script added (before excluded=0)." },
         "linux:ssh.start": { "type": "string", "pattern": "^unit=(ssh|sshd) enabled=(enabled|disabled) active=(active|inactive)$" },
-        "linux:power.sleep": { "type": "string", "pattern": "^sleep=[a-z-]{1,20} suspend=[a-z-]{1,20} hibernate=[a-z-]{1,20} hybrid-sleep=[a-z-]{1,20}$", "description": "systemctl is-enabled of the four sleep targets (none = not found). Undo unmasks only the targets this fix masked." }
+        "linux:power.sleep": { "type": "string", "pattern": "^sleep=[a-z-]{1,20} suspend=[a-z-]{1,20} hibernate=[a-z-]{1,20} hybrid-sleep=[a-z-]{1,20}$", "description": "systemctl is-enabled of the four sleep targets (none = not found). Undo unmasks only the targets this fix masked." },
+        "linux:sysctl.tune": { "type": "string", "pattern": "^file=(absent|lanq) instances=[0-9]{1,10} watches=[0-9]{1,10}$", "description": "fs.inotify.max_user_instances / max_user_watches and whether /etc/sysctl.d/99-zz-lanq-makeready.conf is absent or this script's (first line is its marker). Undo removes the file and sysctl -w puts back only the limits the fix raised." },
+        "linux:journald.cap": { "type": "string", "pattern": "^file=(absent|lanq)$", "description": "/etc/systemd/journald.conf.d/99-zz-lanq-makeready.conf (SystemMaxUse=1G, RuntimeMaxUse=256M). Undo removes it and restarts journald; journal files deleted by the cap cannot be restored." },
+        "linux:services.unused": { "type": "string", "pattern": "^svc=[a-z][a-z0-9-]{0,31}( (service|socket|path)=(enabled|disabled|none):(active|inactive)){1,3}$", "description": "One item per service: svc is a name from the script's APPEND-ONLY list (cups, cups-browsed, bluetooth, modemmanager), and the unit words must match the script's fixed unit table for it (cups: service socket path; the others: service). none = no such unit. Undo re-enables the units that were enabled and starts the ones that were active. Never masks." },
+        "linux:fstrim.timer": { "type": "string", "pattern": "^enabled=(enabled|disabled) active=(active|inactive)$", "description": "systemctl is-enabled / is-active of fstrim.timer." }
       }
     }
   }
