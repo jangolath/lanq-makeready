@@ -23,7 +23,7 @@
 # Exit:  0 = done or nothing to do, 1 = a change failed or did not verify, 2 = bad arguments or a rejected record,
 #        3 = refused (over SSH, from stdin, no interactive console; --tune inside a container).
 
-TOOL_VERSION=0.5.0
+TOOL_VERSION=0.6.0
 RECORD_SCHEMA=lanq-makeready-fix/v1
 FIX_IDS="ssh.start power.sleep"
 # --tune: one key per prompt (services.unused:<service>); the record holds the id before the colon
@@ -823,6 +823,8 @@ main() {
       --undo) if [ $# -lt 2 ] || [ -z "$2" ]; then err "lanq-makeready-fix: --undo needs a record file"; return 2; fi; MODE=undo; UNDO_FILE=$2; _modes=$((_modes + 1)); shift ;;
       --list) MODE=list; _modes=$((_modes + 1)) ;;
       -h|--help) out "$USAGE"; return 0 ;;
+      --defender-exclusions|--create-dev-drive|-DefenderExclusions|-CreateDevDrive)
+        err "lanq-makeready-fix: $1 is Windows only (lanq-makeready-fix.ps1 -Tune); there is nothing like it on Linux. Nothing was changed."; return 2 ;;
       *) err "lanq-makeready-fix: unknown argument: $1"; err "$USAGE"; return 2 ;;
     esac
     shift

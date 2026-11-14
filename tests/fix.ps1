@@ -148,7 +148,7 @@ function Get-FixGuardViolations([string]$Path) {
     'Microsoft.PowerShell.Utility\Get-Alias', 'Microsoft.PowerShell.Core\Get-Command')
   $mut = @('Set-Service', 'Start-Service', 'Stop-Service', 'Set-ItemProperty', 'Remove-ItemProperty', 'Set-Acl', 'New-Item', 'Disable-ScheduledTask', 'Enable-ScheduledTask',
     'Set-MpPreference', 'Add-MpPreference', 'Remove-MpPreference', 'Initialize-Disk', 'New-Partition', 'Format-Volume')
-  $callers = @{ 'Invoke-FixChange' = @('Invoke-FixApply', 'Invoke-FixUndo'); 'Assert-Native' = @('Invoke-FixChange'); 'New-FixSecuredDir' = @('Initialize-FixRecordDir'); 'New-FixSecuredFile' = @('Save-FixRecord')
+  $callers = @{ 'Invoke-FixChange' = @('Invoke-FixApply', 'Invoke-FixUndo'); 'Assert-Native' = @('Invoke-FixChange'); 'New-FixSecuredDir' = @('Initialize-FixRecordDir', 'Invoke-FixChange'); 'New-FixSecuredFile' = @('Save-FixRecord')
     'Get-EicarBytes' = @('Invoke-FixChange') }
   $okNative = @("`$PowercfgExe|@('/q', 'SCHEME_CURRENT', 'SUB_SLEEP', 'STANDBYIDLE')", "`$PowercfgExe|@('/q', 'SCHEME_CURRENT', 'SUB_SLEEP', 'HIBERNATEIDLE')",
     "`$PowercfgExe|@('/getactivescheme')", "`$git|@('config', '--system', '--show-origin', '--get', 'core.longpaths')", "`$git|@('config', '--system', '--show-origin', '--list')", "`$git|@('config', '--get', 'core.longpaths')",
@@ -186,7 +186,7 @@ function Get-FixGuardViolations([string]$Path) {
     'ToString', 'GetSecurityDescriptorSddlForm', 'SetSecurityDescriptorSddlForm', 'GetOwner', 'Translate', 'IsInRole', 'GetCurrent', 'GetCurrentProcess', 'GetFolderPath', 'Matches',
     'ToInt64', 'Exists', 'ReadAllText', 'WriteAllText', 'Move', 'CreateDirectory', 'WriteLine', 'ReadLine', 'IsPathRooted', 'ContainsKey', 'Round', 'ToUniversalTime',
     'GetValueNames', 'GetValueKind', 'GetValue', 'Create', 'AddScript', 'BeginInvoke', 'WaitOne', 'BeginStop', 'EndInvoke', 'Dispose', 'ComputeHash', 'ToBase64String', 'FromBase64String',
-    'GetFullPath', 'ToLowerInvariant', 'GetBytes', 'Write', 'Min', 'Floor', 'ToByte', 'WriteAllBytes', 'Delete', 'GetFileSystemEntries', 'Sleep', 'NewGuid', 'ToUpperInvariant', 'Clone')
+    'GetFullPath', 'ToLowerInvariant', 'GetBytes', 'Write', 'Min', 'Floor', 'ToByte', 'WriteAllBytes', 'Delete', 'GetFileSystemEntries', 'Sleep', 'NewGuid', 'ToUpperInvariant', 'AddSeconds', 'IndexOf', 'StartNew')
   # 0.6.0: the EICAR test file is written, and the self-test folders deleted, only in Invoke-FixChange; lanq-work and the
   # self-test folders are created (with their permissions, in one call) only there too.
   $onlyIn = @{ 'WriteAllText' = @('Save-FixRecord'); 'Move' = @('Save-FixRecord'); 'CreateDirectory' = @('New-FixSecuredDir', 'Invoke-FixChange'); 'Start' = @('Invoke-Native'); 'Kill' = @('Invoke-Native')
@@ -199,7 +199,7 @@ function Get-FixGuardViolations([string]$Path) {
     if ($mn -eq 'Replace' -and $ex -match 'IO\.File' -and $fn -ne 'Save-FixRecord') { [void]$bad.Add('File.Replace outside Save-FixRecord') }
     if ($mn -eq 'Create' -and -not (($ex -eq '[System.Management.Automation.PowerShell]' -and $fn -eq 'Get-FixProcessTable') -or ($ex -eq '[System.Security.Cryptography.SHA256]' -and @('Get-AuthKeySummary', 'Get-SdHash') -contains $fn) -or
         ($ex -eq '[System.IO.FileSystemAclExtensions]' -and @('New-FixSecuredDir', 'New-FixSecuredFile', 'Invoke-FixChange') -contains $fn))) { [void]$bad.Add("Create on $ex in '$fn'") }
-    if ($mn -eq 'SetSecurityDescriptorSddlForm' -and $fn -ne 'Invoke-FixChange' -and @('$RecordDirSddl', '$RecordFileSddl') -notcontains $m.Arguments[0].Extent.Text) { [void]$bad.Add("SetSecurityDescriptorSddlForm with $($m.Arguments[0].Extent.Text) in '$fn'") }
+    if ($mn -eq 'SetSecurityDescriptorSddlForm' -and $fn -ne 'Invoke-FixChange' -and @('$RecordDirSddl', '$RecordFileSddl') -notcontains $m.Arguments[0].Extent.Text -and -not ($fn -eq 'New-FixSecuredDir' -and $m.Arguments[0].Extent.Text -eq '$Sddl')) { [void]$bad.Add("SetSecurityDescriptorSddlForm with $($m.Arguments[0].Extent.Text) in '$fn'") }
     if ($mn -eq 'AddScript') {
       $arg = $m.Arguments[0]
       if ($arg -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { [void]$bad.Add('AddScript with other than a constant') }
@@ -419,7 +419,7 @@ function Get-FixRecordDir { return $RecDir }
 # the record store: the folder is created plain (no admin-owned ACL here), trust is what the test says
 function Initialize-FixRecordDir { if ($script:DirWhy) { return $script:DirWhy }; if (-not (Test-Path -LiteralPath $RecDir)) { [void](New-Item -ItemType Directory -Path $RecDir) }; return '' }
 function Get-FixRecordDirProblem { return $script:DirWhy }
-function New-FixSecuredDir([string]$Dir) { [void](New-Item -ItemType Directory -Path $Dir) }
+function New-FixSecuredDir([string]$Dir, [string]$Sddl) { [void][System.IO.Directory]::CreateDirectory($Dir) }
 function New-FixSecuredFile([string]$Path, [byte[]]$Bytes) { $st = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::CreateNew); try { $st.Write($Bytes, 0, $Bytes.Length) } finally { $st.Dispose() } }
 function Test-FixRecordTrusted([string]$Path) { return $script:Trust }
 function Get-LatestRecord { $f = @(Get-ChildItem -LiteralPath $RecDir -Filter 'fix-*.json' -ErrorAction SilentlyContinue | Sort-Object -Property Name); if ($f.Count) { return $f[-1].FullName }; return $null }
@@ -969,7 +969,8 @@ $RootDefault = 'O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464
 Assert-Equal (Test-RootSddl $RootDefault) '' 'B2: the default root of C: on Windows 11 passes'
 Assert-Equal (Test-RootSddl 'O:SYG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)(A;OICIIO;SDGXGWGR;;;AU)(A;;0x4;;;AU)') '' 'B2: an older default root passes'
 Assert-Equal (Test-RootSddl 'O:SYG:SYD:PAI(A;OICI;FA;;;BA)(A;OICIIO;GA;;;CO)(D;;0x40;;;AU)(A;OICIIO;0x1301bf;;;AU)') '' 'B2: inherit-only and deny entries do not apply to the root itself'
-foreach ($r in @(@('(A;;0x40;;;AU)', 'DELETE_CHILD'), @('(A;;WD;;;BU)', 'WRITE_DAC'), @('(A;;WO;;;BU)', 'WRITE_OWNER'), @('(A;;GA;;;WD)', 'GENERIC_ALL'), @('(A;;GW;;;AU)', 'GENERIC_WRITE'), @("(A;;FA;;;$Bu)", 'full control'), @('(A;;0x1301bf;;;AU)', 'modify on the root'))) {
+Assert-Equal (Test-RootSddl 'O:SYG:SYD:PAI(A;OICI;FA;;;BA)(A;;0x1301bf;;;AU)') '' 'B2: Modify on the root itself (no DELETE_CHILD) cannot rename or replace what is in it'
+foreach ($r in @(@('(A;;0x40;;;AU)', 'DELETE_CHILD'), @('(A;;WD;;;BU)', 'WRITE_DAC'), @('(A;;WO;;;BU)', 'WRITE_OWNER'), @('(A;;GA;;;WD)', 'GENERIC_ALL'), @('(A;;GW;;;AU)', 'GENERIC_WRITE'), @("(A;;FA;;;$Bu)", 'full control'))) {
   Assert-True ((Test-RootSddl ('O:SYG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)' + $r[0])) -match 'may delete or rename') "B3: a drive root that gives others $($r[1]) fails"
 }
 Assert-True ((Test-RootSddl "O:$($Bu)G:SYD:PAI(A;OICI;FA;;;BA)") -match 'owned by') 'B3: a drive root owned by a user fails'
@@ -1087,7 +1088,7 @@ function Invoke-Native([string]$Exe, [string[]]$ArgList, [int]$Sec = 60, [string
   Note-Call "$leaf $($a -join ' ')"
   return @{ Code = 0; Out = '' }
 }
-$unsafe = @(foreach ($n in 'Add-MpPreference', 'Remove-MpPreference', 'Wait-MpDetection', 'Get-EicarBytes', 'Get-DriveRoot', 'Get-SystemDriveLetter', 'Invoke-Native', 'Initialize-Disk', 'New-Partition', 'Format-Volume', 'Get-DiskImage',
+$unsafe = @(foreach ($n in 'New-FixSecuredDir', 'Add-MpPreference', 'Remove-MpPreference', 'Wait-MpDetection', 'Get-EicarBytes', 'Get-DriveRoot', 'Get-SystemDriveLetter', 'Invoke-Native', 'Initialize-Disk', 'New-Partition', 'Format-Volume', 'Get-DiskImage',
     'Get-BuildUser', 'Get-VolumeFacts', 'Get-WorkDirFacts', 'Get-DevVhdFacts', 'Get-MpPreference', 'Get-MpComputerStatus', 'Test-FixRecordTrusted', 'Initialize-FixRecordDir', 'New-FixSecuredFile', 'Get-FixRecordDir') {
     if (@(Get-Command $n)[0].CommandType -ne 'Function' -or @(Get-Command $n)[0].ScriptBlock.File -eq $fixPath) { $n } })
 if ($unsafe.Count -gt 0 -or -not (Get-DriveRoot 'C').StartsWith([IO.Path]::GetTempPath()) -or -not $DevVhdFile.StartsWith($Sandbox) -or "$(Get-EicarBytes)" -match 'EICAR') { Write-Host "ABORT: not faked: $($unsafe -join ', ')" -ForegroundColor Red; exit 1 }
@@ -1193,7 +1194,7 @@ Reset-Dx; $rc = Invoke-Dx 'apply' @('c:\LANQ-WORK\')
 Assert-True ($rc -eq 0 -and (Read-Rec (Get-LatestRecord)).items[0].status -eq 'applied') 'the typed path ignores case and a trailing backslash'
 Reset-Dx; $script:Console = $false; $before = Get-TuneWorld; $rc = Invoke-Dx 'dry' @('C:\lanq-work')
 Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and $script:Asked -eq 0 -and $null -eq (Get-LatestRecord) -and (Get-TuneWorld) -eq $before -and (Get-SandboxDirs 'C').Count -eq 0) 'WhatIfChangesNothing: no folder, no exclusion, no record, nothing asked'
-Assert-True ((OutText) -match "command: New folder C:\\lanq-work, owner Administrators, permissions O:BAG:BAD:PAI" -and (OutText) -match "command: Add-MpPreference -ExclusionPath 'C:\\lanq-work\\'" -and (OutText) -match "undo: +Remove-MpPreference -ExclusionPath 'C:\\lanq-work\\'") 'WhatIf shows the folder, its permissions, the exact exclusion and the undo'
+Assert-True ((OutText) -match ("command: New folder C:\\lanq-work, owner Administrators, permissions " + [regex]::Escape(($WorkDirSddl -f $Bu))) -and (OutText) -match "command: Add-MpPreference -ExclusionPath 'C:\\lanq-work\\'" -and (OutText) -match "undo: +Remove-MpPreference -ExclusionPath 'C:\\lanq-work\\'") 'WhatIf shows the folder, its permissions, the exact exclusion and the undo'
 Reset-Dx; $script:Elev = $false; $rc = Invoke-Dx 'apply' @('C:\lanq-work')
 Assert-True ($rc -eq 0 -and $Calls.Count -eq 0 -and $script:Asked -eq 0 -and (OutText) -match 'needs an elevated PowerShell') 'not elevated: shown, skipped, nothing asked'
 Reset-Dx; $script:OnAnswer = { [void]$Mp.Ex.Add('C:\') }; $rc = Invoke-Dx 'apply' @('C:\lanq-work')

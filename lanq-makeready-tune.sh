@@ -7,7 +7,7 @@
 # Usage: lanq-makeready-tune.sh [--json PATH|-] [--redact] [--hours HH:MM-HH:MM] [--work-root /abs/path] [--quiet]
 #        --json - writes ONLY the JSON to stdout (over SSH: sh -s -- --json - --redact < this-file)
 
-TOOL_VERSION=0.5.0
+TOOL_VERSION=0.6.0
 SEP=$(printf '\037')
 NL=$(printf '\nx'); NL=${NL%x}
 ITEMS=""
